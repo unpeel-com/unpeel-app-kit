@@ -1,4 +1,4 @@
-# unpeel-tui-kit
+# unpeel-app-kit
 
 Reusable, borderless [Ratatui](https://ratatui.rs/) components for
 terminal-native Unpeel Apps. The crate is standalone-safe: Unpeel-specific
@@ -39,7 +39,7 @@ only semantic surfaces such as selected rows and popup menus paint a
 background.
 
 ```rust
-use unpeel_tui_kit::{ColorScheme, ExplorerTheme, KitTheme};
+use unpeel_app_kit::{ColorScheme, ExplorerTheme, KitTheme};
 
 let scheme = ColorScheme::detect();
 let palette = KitTheme::for_scheme(scheme);
@@ -53,13 +53,13 @@ package:
 
 ```toml
 [dependencies]
-unpeel-tui-kit = { path = "../unpeel-tui-kit" }
+unpeel-app-kit = { path = "../unpeel-app-kit" }
 ```
 
 It targets Ratatui `0.30`. Enable the editor only in Apps that need it:
 
 ```toml
-unpeel-tui-kit = { path = "../unpeel-tui-kit", features = ["markdown-text-area"] }
+unpeel-app-kit = { path = "../unpeel-app-kit", features = ["markdown-text-area"] }
 ```
 
 ## Native path dragging
@@ -74,7 +74,7 @@ the destination is another Unpeel terminal.
 
 ```rust
 use ratatui::{layout::Rect, text::Line};
-use unpeel_tui_kit::{DragSurface, DraggablePath};
+use unpeel_app_kit::{DragSurface, DraggablePath};
 
 let mut paths = DragSurface::detect();
 
@@ -124,7 +124,7 @@ absolute Host-local path, so the receiving surface decides whether that path
 becomes terminal text, a file URL, or a future App-specific drop.
 
 ```rust
-use unpeel_tui_kit::{DragSurface, Explorer, ExplorerInput};
+use unpeel_app_kit::{DragSurface, Explorer, ExplorerInput};
 
 let mut explorer = Explorer::new(".")?;
 let mut drags = DragSurface::detect();
@@ -162,7 +162,7 @@ supports muted and danger tones without stock Ratatui borders.
 
 ```rust
 use ratatui::layout::Position;
-use unpeel_tui_kit::{MenuItem, MenuTheme, PopupMenu};
+use unpeel_app_kit::{MenuItem, MenuTheme, PopupMenu};
 
 let mut menu = PopupMenu::new(
     Position::new(mouse.column, mouse.row),
@@ -190,7 +190,7 @@ Outside Unpeel they return `AgentError`. `clipboard_sequence()` provides an
 OSC 52 copy fallback.
 
 ```rust
-use unpeel_tui_kit::{AgentBridge, clipboard_sequence};
+use unpeel_app_kit::{AgentBridge, clipboard_sequence};
 
 let agent = AgentBridge::new();
 agent.refresh();
@@ -212,7 +212,7 @@ scroll-position count. The default is the capless Unpeel style (`│` track,
 
 ```rust
 use ratatui::style::{Color, Style};
-use unpeel_tui_kit::VerticalScrollbar;
+use unpeel_app_kit::VerticalScrollbar;
 
 frame.render_widget(
     VerticalScrollbar::new(total_rows, viewport_rows, scroll_top)
@@ -237,7 +237,7 @@ and `VerticalScrollbar` stay lightweight for Apps that do not edit text.
 ```rust
 use ratatui::layout::Position;
 use ratatui::style::{Color, Style};
-use unpeel_tui_kit::{MarkdownTextArea, MarkdownTextAreaStyle};
+use unpeel_app_kit::{MarkdownTextArea, MarkdownTextAreaStyle};
 
 let style = MarkdownTextAreaStyle {
     current_gutter: Style::new().fg(Color::Gray),
