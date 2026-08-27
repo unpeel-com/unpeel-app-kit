@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod agent;
+mod click;
 mod drag;
 mod explorer;
 #[cfg(feature = "markdown-text-area")]
@@ -20,6 +21,7 @@ mod widgets;
 pub use agent::{
     AgentBridge, AgentError, clipboard_sequence, is_hosted, path_reference, send_to_agent,
 };
+pub use click::{DEFAULT_DOUBLE_CLICK_INTERVAL, DoubleClickTracker};
 pub use drag::{DRAG_MAP_FILENAME, DragRegion, DragSurface};
 pub use explorer::{
     Explorer, ExplorerEntry, ExplorerEvent, ExplorerInput, ExplorerTheme, ExplorerWidget,

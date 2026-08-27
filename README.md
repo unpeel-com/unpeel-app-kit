@@ -12,6 +12,7 @@ The kit currently provides:
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
 | `KitTheme` / `ColorScheme` | Shared dark/light defaults for selectable rows, menus, text, and scrollbars |
+| `DoubleClickTracker` | Target-aware double-click detection shared by mouse-driven Apps |
 | `AgentBridge` | Async adjacent-agent discovery plus approval-free same-group path/text handoff |
 | `DragSurface` | Frame-accurate semantic path regions for native drag-and-drop |
 | `DraggablePath` / `DragSource<W>` | Small Ratatui wrappers for custom path drag sources |
@@ -49,6 +50,23 @@ let scheme = ColorScheme::detect();
 let palette = KitTheme::for_scheme(scheme);
 let explorer_theme = ExplorerTheme::for_color_scheme(scheme);
 ```
+
+### Double-click activation
+
+Use a logical item identity rather than terminal coordinates so a redraw
+between presses cannot activate another row:
+
+```rust
+use unpeel_app_kit::DoubleClickTracker;
+
+let mut clicks = DoubleClickTracker::new();
+if clicks.click(item_id) {
+    open_item(item_id);
+}
+```
+
+The default interval is 500 ms. A different target replaces the pending
+click, and a completed double click resets the sequence.
 
 ## Add it to an App
 
