@@ -1,0 +1,21 @@
+[package]
+name = "unpeel-tui-kit"
+version = "0.1.0"
+edition = "2024"
+description = "Ratatui components for Host-native Unpeel terminal interactions"
+license = "MIT"
+
+[features]
+default = []
+markdown-text-area = ["dep:tui-textarea", "dep:unicode-segmentation"]
+
+[dependencies]
+ratatui = { version = "0.30.2", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tui-textarea = { package = "tui-textarea-2", version = "0.12", default-features = false, features = ["ratatui"], optional = true }
+unicode-segmentation = { version = "1", optional = true }
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
