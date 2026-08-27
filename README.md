@@ -31,6 +31,10 @@ the text span: the gray selection background should continue through the
 unused cells on both sides of the row. `Explorer`, `PopupMenu`, and the shared
 theme defaults implement this convention.
 
+Pinned navigation actions such as `← Back` may keep a full-width hit target,
+but they are not selected list items: render their ordinary row background
+transparent.
+
 Use `KitTheme::dark()` or `KitTheme::light()` when an App owns an appearance
 setting. `KitTheme::detected()` and `ColorScheme::detect()` first honor
 `UNPEEL_TUI_THEME=dark|light`, then the common `COLORFGBG` hint, and otherwise
