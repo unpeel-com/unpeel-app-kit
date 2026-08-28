@@ -11,6 +11,7 @@ mod agent;
 mod click;
 mod drag;
 mod explorer;
+mod keyboard;
 #[cfg(feature = "markdown-text-area")]
 mod markdown_text_area;
 mod menu;
@@ -26,6 +27,7 @@ pub use drag::{DRAG_MAP_FILENAME, DragRegion, DragSurface};
 pub use explorer::{
     Explorer, ExplorerEntry, ExplorerEvent, ExplorerInput, ExplorerTheme, ExplorerWidget,
 };
+pub use keyboard::KeyboardEnhancementGuard;
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_text_area::{MarkdownTextArea, MarkdownTextAreaStyle};
 pub use menu::{MenuItem, MenuItemTone, MenuTheme, PopupMenu};

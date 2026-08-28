@@ -13,6 +13,7 @@ The kit currently provides:
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
 | `KitTheme` / `ColorScheme` | Shared dark/light defaults for selectable rows, menus, text, and scrollbars |
 | `DoubleClickTracker` | Target-aware double-click detection shared by mouse-driven Apps |
+| `KeyboardEnhancementGuard` | Scoped unambiguous Escape delivery on capable terminals |
 | `AgentBridge` | Async adjacent-agent discovery plus approval-free same-group path/text handoff |
 | `DragSurface` | Frame-accurate semantic path regions for native drag-and-drop |
 | `DraggablePath` / `DragSource<W>` | Small Ratatui wrappers for custom path drag sources |
@@ -67,6 +68,19 @@ if clicks.click(item_id) {
 
 The default interval is 500 ms. A different target replaces the pending
 click, and a completed double click resets the sequence.
+
+### Reliable Escape
+
+Create a `KeyboardEnhancementGuard` after entering the terminal and keep it
+alive for the event loop. It requests explicit Escape encoding from terminals
+that support the progressive keyboard protocol, then restores the preceding
+mode on drop:
+
+```rust
+use unpeel_app_kit::KeyboardEnhancementGuard;
+
+let _keyboard = KeyboardEnhancementGuard::enter()?;
+```
 
 ## Add it to an App
 
