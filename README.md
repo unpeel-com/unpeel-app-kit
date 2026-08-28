@@ -133,7 +133,9 @@ Host-local files or directories. Unpeel performs the native point-to-cell hit
 test, starts a normal platform file drag, and pastes a shell-quoted path when
 the destination is another Unpeel terminal. Pasted text is relative to that
 Session's project root when possible, uses `~/…` elsewhere under the user's
-home, and stays absolute only outside both roots.
+home, and stays absolute only outside both roots. Image paths are the exception:
+they remain absolute so Claude, Codex, and other agents recognize them as local
+attachments such as `[Image #1]`.
 
 ### Ratatui usage
 
@@ -336,9 +338,11 @@ menu.render(frame);
 
 `AgentBridge` implements the shared Unpeel App handoff used by context menus.
 Call `refresh()` when the App starts and again when a menu opens; it probes off
-the UI thread and caches an honest target label. `send_text()` and
-`send_path()` re-resolve at activation time, prefer an adjacent same-group
-agent, and paste with `submit: false`, allowing the user to finish the prompt.
+the UI thread and caches an honest target label. `send_text()`,
+`send_reference()`, and `send_path()` re-resolve at activation time and prefer
+an adjacent same-group agent. `send_reference()` types an exact, unsubmitted
+`path:line-range` token without a conversational sender envelope; the other
+methods paste with `submit: false`, allowing the user to finish the prompt.
 Outside Unpeel they return `AgentError`. `clipboard_sequence()` provides an
 OSC 52 copy fallback.
 
