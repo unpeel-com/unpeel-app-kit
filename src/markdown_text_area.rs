@@ -5,7 +5,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use tui_textarea::{CursorRenderMode, Input, Key, TextArea, WrapMode};
+use tui_textarea::{CursorMove, CursorRenderMode, Input, Key, TextArea, WrapMode};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
@@ -15,6 +15,7 @@ const DEFAULT_LEFT_PADDING: u16 = 1;
 const DEFAULT_TAB_LENGTH: u8 = 2;
 const DEFAULT_MAX_HISTORIES: usize = 500;
 const DEFAULT_PLACEHOLDER: &str = "Type '/' for commands";
+const DEFAULT_DROP_EDGE_ROWS: u16 = 2;
 
 /// Colors used by [`MarkdownTextArea`] for its editor chrome and cursor.
 ///
@@ -198,6 +199,33 @@ impl<'a> MarkdownTextArea<'a> {
         } else {
             false
         }
+    }
+
+    /// Moves the insertion cursor beneath a native file/folder drag.
+    ///
+    /// Hovering within two rows of the top or bottom edge scrolls one visual
+    /// row per update. This is intentionally separate from text-selection
+    /// dragging: a semantic drop cancels any selection and previews the exact
+    /// insertion point that will receive the dropped reference.
+    pub fn position_drop_cursor(&mut self, position: Position) -> bool {
+        let previous_cursor = self.text_area.cursor();
+        let previous_scroll = self.scroll_top;
+        let was_selecting = self.text_area.is_selecting();
+        let edge_rows = DEFAULT_DROP_EDGE_ROWS.min(self.area.height.saturating_div(2));
+        if edge_rows > 0 {
+            if position.y < self.area.y.saturating_add(edge_rows) {
+                self.scroll_lines(-1);
+            } else if position.y >= self.area.bottom().saturating_sub(edge_rows) {
+                self.scroll_lines(1);
+            }
+        }
+        let (row, column) = self.hit_test(position);
+        self.text_area.cancel_selection();
+        self.text_area
+            .move_cursor(CursorMove::Jump(clamp_u16(row), clamp_u16(column)));
+        was_selecting
+            || previous_cursor != self.text_area.cursor()
+            || previous_scroll != self.scroll_top
     }
 
     /// Maps terminal coordinates to a logical `(line, character-column)`.
@@ -783,5 +811,22 @@ mod tests {
 
         assert_eq!(editor.scroll_top(), (0, 0));
         assert_eq!(editor.lines(), ["replacement"]);
+    }
+
+    #[test]
+    fn drop_hover_moves_the_cursor_and_auto_scrolls_at_an_edge() {
+        let lines = (1..=20).map(|line| format!("row {line}"));
+        let mut editor = MarkdownTextArea::new(lines, MarkdownTextAreaStyle::default());
+        let _terminal = render(&mut editor, 30, 5);
+        editor.start_selection();
+
+        assert!(editor.position_drop_cursor(Position::new(8, 4)));
+        assert_eq!(editor.scroll_top().0, 1);
+        assert_eq!(editor.cursor(), (5, 2));
+        assert!(!editor.is_selecting());
+
+        assert!(editor.position_drop_cursor(Position::new(8, 4)));
+        assert_eq!(editor.scroll_top().0, 2);
+        assert_eq!(editor.cursor(), (6, 2));
     }
 }

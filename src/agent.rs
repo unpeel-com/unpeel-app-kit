@@ -8,12 +8,15 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use serde_json::{Value, json};
+
+const MAX_LITERAL_KEYS_PER_CALL: usize = 40;
 
 /// Error returned when no eligible agent exists or the Host MCP is
 /// unavailable.
@@ -94,6 +97,52 @@ pub fn send_to_agent(text: &str) -> Result<String, AgentError> {
     Ok(label)
 }
 
+/// Type an exact, single-line file reference into the best nearby agent.
+///
+/// References use the Sessions MCP keystroke path instead of its message
+/// path. That keeps a cross-group handoff literal — `path:line-range` only —
+/// without the provenance envelope that belongs on conversational messages.
+/// The reference is not submitted.
+pub fn send_reference_to_agent(reference: &str) -> Result<String, AgentError> {
+    if !is_hosted() {
+        return Err(AgentError::new("not inside an Unpeel session"));
+    }
+    let batches = literal_key_batches(reference)?;
+    let mut client = McpClient::spawn()?;
+    let (target_id, label) = resolve_agent(&mut client)?;
+    for keys in batches {
+        client.call_tool(
+            "sessions",
+            &json!({
+                "action": "send_keys",
+                "session_id": target_id,
+                "keys": keys,
+                "delay_ms": 0,
+            }),
+        )?;
+    }
+    Ok(label)
+}
+
+fn literal_key_batches(reference: &str) -> Result<Vec<Vec<String>>, AgentError> {
+    if reference.is_empty() {
+        return Err(AgentError::new("reference is empty"));
+    }
+    if reference.chars().any(char::is_control) {
+        return Err(AgentError::new(
+            "reference contains unsupported control characters",
+        ));
+    }
+    let keys = reference
+        .chars()
+        .map(|character| character.to_string())
+        .collect::<Vec<_>>();
+    Ok(keys
+        .chunks(MAX_LITERAL_KEYS_PER_CALL)
+        .map(<[String]>::to_vec)
+        .collect())
+}
+
 /// Cached, non-blocking peer discovery for context menus plus synchronous
 /// send helpers for the selected action.
 ///
@@ -103,7 +152,18 @@ pub fn send_to_agent(text: &str) -> Result<String, AgentError> {
 #[derive(Clone, Default)]
 pub struct AgentBridge {
     label: Arc<Mutex<Option<String>>>,
+    project_context: Arc<Mutex<Option<AgentProjectContext>>>,
     probing: Arc<AtomicBool>,
+}
+
+/// Project/worktree identity of the agent this App would hand off to.
+/// `cwd` is Host-authoritative Session launch context, not a pane-title guess.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentProjectContext {
+    pub session_id: String,
+    pub label: String,
+    pub project_id: String,
+    pub cwd: PathBuf,
 }
 
 impl AgentBridge {
@@ -119,19 +179,28 @@ impl AgentBridge {
         self.label.lock().ok()?.clone()
     }
 
+    /// Last asynchronously discovered main/neighboring agent context.
+    #[must_use]
+    pub fn project_context(&self) -> Option<AgentProjectContext> {
+        self.project_context.lock().ok()?.clone()
+    }
+
     /// Refresh the cached label off the UI thread, if hosted by Unpeel.
     pub fn refresh(&self) {
         if !is_hosted() || self.probing.swap(true, Ordering::SeqCst) {
             return;
         }
         let label = Arc::clone(&self.label);
+        let project_context = Arc::clone(&self.project_context);
         let probing = Arc::clone(&self.probing);
         std::thread::spawn(move || {
             let found = McpClient::spawn()
-                .and_then(|mut client| resolve_agent(&mut client))
-                .ok()
-                .map(|(_, label)| label);
+                .and_then(|mut client| resolve_agent_project_context(&mut client))
+                .ok();
             if let Ok(mut slot) = label.lock() {
+                *slot = found.as_ref().map(|context| context.label.clone());
+            }
+            if let Ok(mut slot) = project_context.lock() {
                 *slot = found;
             }
             probing.store(false, Ordering::SeqCst);
@@ -147,10 +216,73 @@ impl AgentBridge {
         Ok(label)
     }
 
+    /// Type an exact one-line `path:line-range` reference without a sender
+    /// envelope and without submitting it.
+    pub fn send_reference(&self, reference: &str) -> Result<String, AgentError> {
+        let label = send_reference_to_agent(reference)?;
+        if let Ok(mut slot) = self.label.lock() {
+            *slot = Some(label.clone());
+        }
+        Ok(label)
+    }
+
     /// Paste a safe absolute path reference into the current target.
     pub fn send_path(&self, path: impl AsRef<Path>) -> Result<String, AgentError> {
         self.send_text(&path_reference(path))
     }
+}
+
+fn resolve_agent_project_context(
+    client: &mut McpClient,
+) -> Result<AgentProjectContext, AgentError> {
+    let (session_id, label) = resolve_agent(client)?;
+    let agents = client
+        .call_tool("agents", &json!({ "action": "list" }))
+        .ok();
+    let group = client
+        .call_tool(
+            "sessions",
+            &json!({ "action": "list_group", "include_exited": false }),
+        )
+        .ok();
+    project_context_for_target(&session_id, &label, agents.as_ref(), group.as_ref())
+        .ok_or_else(|| AgentError::new("agent project context unavailable"))
+}
+
+fn project_context_for_target(
+    session_id: &str,
+    label: &str,
+    agents: Option<&Value>,
+    group: Option<&Value>,
+) -> Option<AgentProjectContext> {
+    let agent = agents
+        .and_then(|value| value.get("agents"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|agent| {
+            agent
+                .pointer("/agent_ref/session_id")
+                .and_then(Value::as_str)
+                == Some(session_id)
+        });
+    let session = group
+        .and_then(|value| value.get("sessions"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|session| string_field(session, "id") == session_id);
+    let source = agent.or(session)?;
+    let cwd = PathBuf::from(string_field(source, "cwd"));
+    if !cwd.is_absolute() {
+        return None;
+    }
+    Some(AgentProjectContext {
+        session_id: session_id.to_owned(),
+        label: label.to_owned(),
+        project_id: string_field(source, "project_id"),
+        cwd,
+    })
 }
 
 fn resolve_agent(client: &mut McpClient) -> Result<(String, String), AgentError> {
@@ -449,6 +581,19 @@ mod tests {
     }
 
     #[test]
+    fn literal_reference_keys_preserve_only_the_reference() {
+        let reference = format!("notes/{}:12-14", "é".repeat(50));
+        let batches = literal_key_batches(&reference).unwrap();
+        assert!(
+            batches
+                .iter()
+                .all(|batch| !batch.is_empty() && batch.len() <= MAX_LITERAL_KEYS_PER_CALL)
+        );
+        assert_eq!(batches.into_iter().flatten().collect::<String>(), reference);
+        assert!(literal_key_batches("notes/file.md:1\nextra").is_err());
+    }
+
+    #[test]
     fn adjacent_idle_agent_wins_inside_the_group() {
         let current = json!({
             "pane_context": { "neighbors": {
@@ -462,6 +607,20 @@ mod tests {
             adjacent_target(&current, &group),
             Some(("idle".to_owned(), "claude".to_owned()))
         );
+    }
+
+    #[test]
+    fn project_context_uses_the_resolved_agents_host_cwd() {
+        let agents = json!({ "agents": [{
+            "agent_ref": { "session_id": "agent-1" },
+            "project_id": "worktree-project",
+            "cwd": "/tmp/project-worktree"
+        }] });
+        let context =
+            project_context_for_target("agent-1", "Claude", Some(&agents), None).expect("context");
+        assert_eq!(context.session_id, "agent-1");
+        assert_eq!(context.project_id, "worktree-project");
+        assert_eq!(context.cwd, PathBuf::from("/tmp/project-worktree"));
     }
 
     #[test]

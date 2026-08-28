@@ -172,9 +172,16 @@ impl ExplorerTheme {
         Self::for_palette(KitTheme::for_scheme(scheme))
     }
 
+    /// Builds Explorer styling from a complete kit palette, preserving a
+    /// Host-provided project/workspace accent from [`KitTheme::detected`].
+    #[must_use]
+    pub const fn for_theme(theme: KitTheme) -> Self {
+        Self::for_palette(theme)
+    }
+
     #[must_use]
     pub fn detected() -> Self {
-        Self::for_color_scheme(ColorScheme::detect())
+        Self::for_theme(KitTheme::detected())
     }
 
     const fn for_palette(palette: KitTheme) -> Self {
@@ -602,6 +609,34 @@ impl Explorer {
         self.filter.set_focused(false);
         self.rebuild_filtered(None);
         Ok(())
+    }
+
+    /// Replaces a scoped Explorer's navigation root and current directory.
+    ///
+    /// This is the reusable project/worktree switch primitive: filtering
+    /// policy, hidden-file policy, theme, and component configuration remain
+    /// intact while navigation is atomically rebound to another canonical
+    /// directory. The text filter and selection reset because their paths
+    /// belong to the previous tree.
+    pub fn set_navigation_root(&mut self, path: impl AsRef<Path>) -> io::Result<bool> {
+        let cwd = canonical_directory(path.as_ref())?;
+        if self.navigation_root.as_deref() == Some(cwd.as_path()) {
+            return Ok(false);
+        }
+        let all_entries = read_entries(
+            &cwd,
+            self.show_hidden,
+            false,
+            self.file_extensions.as_deref(),
+            self.prune_unmatched_directories,
+        )?;
+        self.navigation_root = Some(cwd.clone());
+        self.cwd = cwd;
+        self.all_entries = all_entries;
+        self.filter.clear();
+        self.filter.set_focused(false);
+        self.rebuild_filtered(None);
+        Ok(true)
     }
 
     /// Refreshes the current directory while preserving the selected path.
@@ -1370,6 +1405,30 @@ mod tests {
             explorer.set_cwd(root.parent().unwrap()).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+
+    #[test]
+    fn scoped_explorer_can_rebind_to_another_project_root() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        fs::write(first.path().join("main.txt"), "main").unwrap();
+        fs::write(second.path().join("worktree.txt"), "worktree").unwrap();
+        let mut explorer = Explorer::scoped(first.path()).unwrap();
+
+        assert!(explorer.set_navigation_root(second.path()).unwrap());
+        assert_eq!(explorer.cwd(), second.path().canonicalize().unwrap());
+        assert_eq!(
+            explorer.navigation_root(),
+            Some(second.path().canonicalize().unwrap().as_path())
+        );
+        assert!(
+            explorer
+                .entries()
+                .iter()
+                .any(|entry| entry.name() == "worktree.txt")
+        );
+        assert!(!explorer.set_navigation_root(second.path()).unwrap());
+        assert!(explorer.set_navigation_root(first.path()).unwrap());
     }
 
     #[cfg(unix)]
