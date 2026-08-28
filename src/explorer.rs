@@ -5,11 +5,14 @@ use std::path::{Path, PathBuf};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 
-use crate::{ColorScheme, DragSurface, KitTheme, SELECTABLE_LEFT_PADDING, VerticalScrollbar};
+use crate::{
+    ColorScheme, DragSurface, InputField, InputFieldAction, InputFieldTheme, KitTheme,
+    SELECTABLE_LEFT_PADDING, VerticalScrollbar,
+};
 
 /// One item in the current directory shown by [`Explorer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +86,22 @@ pub enum ExplorerInput {
     ClearFilter,
     FilterCharacter(char),
     FilterBackspace,
+    FilterDelete,
+    FilterSelectAll,
+    FilterLeft {
+        extend: bool,
+        word: bool,
+    },
+    FilterRight {
+        extend: bool,
+        word: bool,
+    },
+    FilterHome {
+        extend: bool,
+    },
+    FilterEnd {
+        extend: bool,
+    },
     #[default]
     None,
 }
@@ -188,25 +207,41 @@ impl ExplorerTheme {
 #[derive(Debug)]
 pub struct Explorer {
     cwd: PathBuf,
+    navigation_root: Option<PathBuf>,
     all_entries: Vec<ExplorerEntry>,
     entries: Vec<ExplorerEntry>,
     selected: usize,
     show_hidden: bool,
+    file_extensions: Option<Vec<String>>,
+    prune_unmatched_directories: bool,
     show_filter: bool,
-    filter: String,
-    filter_focused: bool,
+    filter: InputField,
     show_path: bool,
     theme: ExplorerTheme,
     scroll: usize,
     viewport_rows: usize,
     area: Rect,
-    filter_area: Rect,
     list_area: Rect,
 }
 
 impl Explorer {
     /// Opens a directory, or opens a file's parent and selects that file.
+    /// Parent navigation is unbounded; Apps that represent a project should
+    /// use [`Self::scoped`] instead.
     pub fn new(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::from_path(path.as_ref(), false)
+    }
+
+    /// Opens an Explorer whose initial directory is a hard navigation root.
+    ///
+    /// The root has no synthetic `../` entry, parent actions become no-ops at
+    /// that level, and canonicalized directory targets outside it are denied.
+    /// Passing a file scopes the Explorer to that file's parent directory.
+    pub fn scoped(path: impl AsRef<Path>) -> io::Result<Self> {
+        Self::from_path(path.as_ref(), true)
+    }
+
+    fn from_path(path: &Path, scoped: bool) -> io::Result<Self> {
         let requested = fs::canonicalize(path)?;
         let metadata = fs::metadata(&requested)?;
         let (cwd, preferred) = if metadata.is_dir() {
@@ -217,28 +252,34 @@ impl Explorer {
             })?;
             (parent.to_path_buf(), Some(requested))
         };
-        let all_entries = read_entries(&cwd, false)?;
+        let navigation_root = scoped.then(|| cwd.clone());
+        let all_entries = read_entries(&cwd, false, navigation_root.is_none(), None, false)?;
         let entries = all_entries.clone();
         let selected = preferred
             .as_deref()
             .and_then(|path| entries.iter().position(|entry| entry.path == path))
             .unwrap_or(0)
             .min(entries.len().saturating_sub(1));
+        let theme = ExplorerTheme::default();
+        let filter = InputField::new("Filter files")
+            .with_prompt("/ ")
+            .with_theme(input_theme(&theme));
         Ok(Self {
             cwd,
+            navigation_root,
             all_entries,
             entries,
             selected,
             show_hidden: false,
+            file_extensions: None,
+            prune_unmatched_directories: false,
             show_filter: true,
-            filter: String::new(),
-            filter_focused: false,
+            filter,
             show_path: true,
-            theme: ExplorerTheme::default(),
+            theme,
             scroll: 0,
             viewport_rows: 12,
             area: Rect::default(),
-            filter_area: Rect::default(),
             list_area: Rect::default(),
         })
     }
@@ -246,12 +287,14 @@ impl Explorer {
     /// Applies a borderless visual theme.
     #[must_use]
     pub fn with_theme(mut self, theme: ExplorerTheme) -> Self {
+        self.filter.set_theme(input_theme(&theme));
         self.theme = theme;
         self
     }
 
     /// Replaces the visual theme without changing navigation state.
     pub fn set_theme(&mut self, theme: ExplorerTheme) {
+        self.filter.set_theme(input_theme(&theme));
         self.theme = theme;
     }
 
@@ -273,12 +316,17 @@ impl Explorer {
     /// Current case-insensitive filename filter.
     #[must_use]
     pub fn filter(&self) -> &str {
-        &self.filter
+        self.filter.text()
     }
 
     #[must_use]
     pub const fn filter_focused(&self) -> bool {
-        self.filter_focused
+        self.filter.focused()
+    }
+
+    /// Replaces the hint shown by an empty filter row.
+    pub fn set_filter_placeholder(&mut self, placeholder: impl Into<String>) -> bool {
+        self.filter.set_placeholder(placeholder)
     }
 
     /// Replaces the filter, dropping terminal control characters.
@@ -288,11 +336,11 @@ impl Explorer {
             .chars()
             .filter(|character| !character.is_control())
             .collect::<String>();
-        if next == self.filter {
+        if next == self.filter.text() {
             return false;
         }
         let preferred = self.selected().map(|entry| entry.path.clone());
-        self.filter = next;
+        self.filter.set_text(next);
         self.rebuild_filtered(preferred.as_deref());
         true
     }
@@ -304,9 +352,7 @@ impl Explorer {
 
     /// Focuses or blurs the filter row.
     pub fn set_filter_focused(&mut self, focused: bool) -> bool {
-        let changed = self.filter_focused != focused;
-        self.filter_focused = focused;
-        changed
+        self.filter.set_focused(focused)
     }
 
     /// Shows or hides the draggable current-directory header.
@@ -323,6 +369,12 @@ impl Explorer {
     #[must_use]
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    /// Hard navigation boundary, when this Explorer is scoped.
+    #[must_use]
+    pub fn navigation_root(&self) -> Option<&Path> {
+        self.navigation_root.as_deref()
     }
 
     /// Entries in display order after filtering, including `../` when a
@@ -346,6 +398,82 @@ impl Explorer {
     #[must_use]
     pub const fn show_hidden(&self) -> bool {
         self.show_hidden
+    }
+
+    /// Optional case-insensitive file extensions admitted by this Explorer.
+    /// Directories are always retained for navigation.
+    #[must_use]
+    pub fn file_extensions(&self) -> Option<&[String]> {
+        self.file_extensions.as_deref()
+    }
+
+    /// Restricts visible files to the supplied extensions while preserving
+    /// directories. Leading dots are optional (`"md"` and `".md"` match).
+    pub fn set_file_extensions<I, S>(&mut self, extensions: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let extensions = normalize_extensions(extensions);
+        if self.file_extensions.as_ref() == Some(&extensions) {
+            return Ok(());
+        }
+        self.replace_file_extensions(Some(extensions))
+    }
+
+    /// Builder form of [`Self::set_file_extensions`].
+    pub fn with_file_extensions<I, S>(mut self, extensions: I) -> io::Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.set_file_extensions(extensions)?;
+        Ok(self)
+    }
+
+    /// Removes a configured extension restriction.
+    pub fn clear_file_extensions(&mut self) -> io::Result<()> {
+        if self.file_extensions.is_none() {
+            return Ok(());
+        }
+        self.replace_file_extensions(None)
+    }
+
+    /// Whether directories without a matching descendant file are hidden.
+    ///
+    /// This policy is active only while [`Self::file_extensions`] is set.
+    /// Recursive discovery follows ordinary directories but never directory
+    /// symlinks, so a scoped Explorer cannot scan through a link outside its
+    /// navigation root.
+    #[must_use]
+    pub const fn prune_unmatched_directories(&self) -> bool {
+        self.prune_unmatched_directories
+    }
+
+    /// Hides directories unless they contain a visible file admitted by the
+    /// current extension policy somewhere below them.
+    pub fn set_prune_unmatched_directories(&mut self, prune: bool) -> io::Result<()> {
+        if prune == self.prune_unmatched_directories {
+            return Ok(());
+        }
+        let preferred = self.selected().map(|entry| entry.path.clone());
+        let all_entries = read_entries(
+            &self.cwd,
+            self.show_hidden,
+            self.parent_allowed_at(&self.cwd),
+            self.file_extensions.as_deref(),
+            prune,
+        )?;
+        self.prune_unmatched_directories = prune;
+        self.all_entries = all_entries;
+        self.rebuild_filtered(preferred.as_deref());
+        Ok(())
+    }
+
+    /// Builder form of [`Self::set_prune_unmatched_directories`].
+    pub fn with_prune_unmatched_directories(mut self, prune: bool) -> io::Result<Self> {
+        self.set_prune_unmatched_directories(prune)?;
+        Ok(self)
     }
 
     #[must_use]
@@ -377,7 +505,39 @@ impl Explorer {
     /// Most recently rendered filter row.
     #[must_use]
     pub const fn filter_area(&self) -> Rect {
-        self.filter_area
+        self.filter.area()
+    }
+
+    /// Native cursor location for the focused filter after the latest render.
+    #[must_use]
+    pub const fn filter_cursor_position(&self) -> Option<Position> {
+        self.filter.cursor_position()
+    }
+
+    /// Whether a mouse selection drag started in the filter is active.
+    #[must_use]
+    pub const fn filter_dragging(&self) -> bool {
+        self.filter.is_dragging()
+    }
+
+    /// Starts filter cursor placement or selection from a terminal cell.
+    pub fn filter_mouse_down(&mut self, position: Position, extend: bool) -> bool {
+        self.filter.mouse_down(position, extend)
+    }
+
+    /// Extends an active filter selection drag.
+    pub fn filter_mouse_drag(&mut self, position: Position) -> bool {
+        self.filter.mouse_drag(position)
+    }
+
+    /// Ends an active filter selection drag.
+    pub fn filter_mouse_up(&mut self) -> bool {
+        self.filter.mouse_up()
+    }
+
+    /// Inserts pasted or composed text at the filter cursor.
+    pub fn insert_filter_text(&mut self, text: impl Into<String>) -> ExplorerEvent {
+        self.focus_and_edit_filter(InputFieldAction::InsertText(text.into()))
     }
 
     /// Most recently rendered item viewport, excluding filter, path header,
@@ -428,12 +588,18 @@ impl Explorer {
 
     /// Changes directory and resets selection to its first entry.
     pub fn set_cwd(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
-        let cwd = canonical_directory(path.as_ref())?;
-        let all_entries = read_entries(&cwd, self.show_hidden)?;
+        let cwd = self.canonical_scoped_directory(path.as_ref())?;
+        let all_entries = read_entries(
+            &cwd,
+            self.show_hidden,
+            self.parent_allowed_at(&cwd),
+            self.file_extensions.as_deref(),
+            self.prune_unmatched_directories,
+        )?;
         self.cwd = cwd;
         self.all_entries = all_entries;
         self.filter.clear();
-        self.filter_focused = false;
+        self.filter.set_focused(false);
         self.rebuild_filtered(None);
         Ok(())
     }
@@ -442,7 +608,13 @@ impl Explorer {
     pub fn refresh(&mut self) -> io::Result<()> {
         let preferred = self.selected().map(|entry| entry.path.clone());
         let previous = self.selected;
-        let all_entries = read_entries(&self.cwd, self.show_hidden)?;
+        let all_entries = read_entries(
+            &self.cwd,
+            self.show_hidden,
+            self.parent_allowed_at(&self.cwd),
+            self.file_extensions.as_deref(),
+            self.prune_unmatched_directories,
+        )?;
         self.all_entries = all_entries;
         self.rebuild_filtered(preferred.as_deref());
         if preferred.is_none() {
@@ -459,7 +631,13 @@ impl Explorer {
         }
         let preferred = self.selected().map(|entry| entry.path.clone());
         let previous = self.selected;
-        let all_entries = read_entries(&self.cwd, show)?;
+        let all_entries = read_entries(
+            &self.cwd,
+            show,
+            self.parent_allowed_at(&self.cwd),
+            self.file_extensions.as_deref(),
+            self.prune_unmatched_directories,
+        )?;
         self.all_entries = all_entries;
         self.show_hidden = show;
         self.rebuild_filtered(preferred.as_deref());
@@ -514,19 +692,29 @@ impl Explorer {
                 if character.is_control() {
                     return Ok(ExplorerEvent::None);
                 }
-                let mut filter = self.filter.clone();
-                filter.push(character);
-                self.set_filter(filter);
-                Ok(ExplorerEvent::FilterChanged)
+                Ok(self.focus_and_edit_filter(InputFieldAction::Insert(character)))
             }
-            ExplorerInput::FilterBackspace => {
-                let mut filter = self.filter.clone();
-                if filter.pop().is_some() {
-                    self.set_filter(filter);
-                    Ok(ExplorerEvent::FilterChanged)
-                } else {
-                    Ok(ExplorerEvent::None)
-                }
+            ExplorerInput::FilterBackspace => Ok(self.edit_filter(InputFieldAction::Backspace)),
+            ExplorerInput::FilterDelete => Ok(self.edit_filter(InputFieldAction::Delete)),
+            ExplorerInput::FilterSelectAll => {
+                self.filter.handle(InputFieldAction::SelectAll);
+                Ok(ExplorerEvent::None)
+            }
+            ExplorerInput::FilterLeft { extend, word } => {
+                self.filter.handle(InputFieldAction::Left { extend, word });
+                Ok(ExplorerEvent::None)
+            }
+            ExplorerInput::FilterRight { extend, word } => {
+                self.filter.handle(InputFieldAction::Right { extend, word });
+                Ok(ExplorerEvent::None)
+            }
+            ExplorerInput::FilterHome { extend } => {
+                self.filter.handle(InputFieldAction::Home { extend });
+                Ok(ExplorerEvent::None)
+            }
+            ExplorerInput::FilterEnd { extend } => {
+                self.filter.handle(InputFieldAction::End { extend });
+                Ok(ExplorerEvent::None)
             }
             ExplorerInput::None => Ok(ExplorerEvent::None),
         }
@@ -555,7 +743,7 @@ impl Explorer {
     }
 
     fn rebuild_filtered(&mut self, preferred: Option<&Path>) {
-        let needle = self.filter.to_lowercase();
+        let needle = self.filter.text().to_lowercase();
         self.entries = self
             .all_entries
             .iter()
@@ -572,12 +760,48 @@ impl Explorer {
         self.selected = preferred
             .and_then(|path| {
                 self.entries.iter().position(|entry| {
-                    entry.path == path && (self.filter.is_empty() || !entry.parent)
+                    entry.path == path && (self.filter.text().is_empty() || !entry.parent)
                 })
             })
             .unwrap_or(first_match)
             .min(self.entries.len().saturating_sub(1));
         self.scroll = 0;
+    }
+
+    fn edit_filter(&mut self, action: InputFieldAction) -> ExplorerEvent {
+        let before = self.filter.text().to_owned();
+        self.filter.handle(action);
+        if self.filter.text() == before {
+            return ExplorerEvent::None;
+        }
+        let preferred = self.selected().map(|entry| entry.path.clone());
+        self.rebuild_filtered(preferred.as_deref());
+        ExplorerEvent::FilterChanged
+    }
+
+    fn focus_and_edit_filter(&mut self, action: InputFieldAction) -> ExplorerEvent {
+        let focus_changed = self.filter.set_focused(true);
+        let event = self.edit_filter(action);
+        if event == ExplorerEvent::None && focus_changed {
+            ExplorerEvent::FilterFocusChanged
+        } else {
+            event
+        }
+    }
+
+    fn replace_file_extensions(&mut self, extensions: Option<Vec<String>>) -> io::Result<()> {
+        let preferred = self.selected().map(|entry| entry.path.clone());
+        let all_entries = read_entries(
+            &self.cwd,
+            self.show_hidden,
+            self.parent_allowed_at(&self.cwd),
+            extensions.as_deref(),
+            self.prune_unmatched_directories,
+        )?;
+        self.file_extensions = extensions;
+        self.all_entries = all_entries;
+        self.rebuild_filtered(preferred.as_deref());
+        Ok(())
     }
 
     fn move_selection(&mut self, delta: isize) -> ExplorerEvent {
@@ -620,6 +844,9 @@ impl Explorer {
     }
 
     fn open_parent(&mut self) -> io::Result<ExplorerEvent> {
+        if !self.parent_allowed_at(&self.cwd) {
+            return Ok(ExplorerEvent::None);
+        }
         let Some(parent) = self.cwd.parent().map(Path::to_path_buf) else {
             return Ok(ExplorerEvent::None);
         };
@@ -630,7 +857,7 @@ impl Explorer {
         let Some(entry) = self.selected().cloned() else {
             return Ok(ExplorerEvent::None);
         };
-        self.filter_focused = false;
+        self.filter.set_focused(false);
         if entry.directory {
             self.change_directory(entry.path)
         } else {
@@ -640,8 +867,14 @@ impl Explorer {
 
     fn change_directory(&mut self, path: PathBuf) -> io::Result<ExplorerEvent> {
         let previous = self.cwd.clone();
-        let cwd = canonical_directory(&path)?;
-        let all_entries = read_entries(&cwd, self.show_hidden)?;
+        let cwd = self.canonical_scoped_directory(&path)?;
+        let all_entries = read_entries(
+            &cwd,
+            self.show_hidden,
+            self.parent_allowed_at(&cwd),
+            self.file_extensions.as_deref(),
+            self.prune_unmatched_directories,
+        )?;
         let selected = all_entries
             .iter()
             .position(|entry| entry.path == previous)
@@ -650,18 +883,39 @@ impl Explorer {
         self.cwd = cwd;
         self.all_entries = all_entries;
         self.filter.clear();
-        self.filter_focused = false;
+        self.filter.set_focused(false);
         self.entries = self.all_entries.clone();
         self.selected = selected;
         self.scroll = 0;
         Ok(ExplorerEvent::DirectoryChanged(self.cwd.clone()))
     }
 
+    fn parent_allowed_at(&self, cwd: &Path) -> bool {
+        cwd.parent().is_some() && self.navigation_root.as_ref().is_none_or(|root| cwd != root)
+    }
+
+    fn canonical_scoped_directory(&self, path: &Path) -> io::Result<PathBuf> {
+        let directory = canonical_directory(path)?;
+        if let Some(root) = self.navigation_root.as_ref()
+            && !directory.starts_with(root)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is outside Explorer root {}",
+                    directory.display(),
+                    root.display()
+                ),
+            ));
+        }
+        Ok(directory)
+    }
+
     fn render(&mut self, area: Rect, buffer: &mut Buffer, drags: &mut DragSurface) {
         self.area = area;
         buffer.set_style(area, self.theme.style);
         if area.is_empty() {
-            self.filter_area = Rect::default();
+            self.filter.clear_render_state();
             self.list_area = Rect::default();
             self.viewport_rows = 0;
             self.scroll = 0;
@@ -669,13 +923,12 @@ impl Explorer {
         }
 
         let filter_height = u16::from(self.show_filter && area.height > 0);
-        self.filter_area = if filter_height == 1 {
+        if filter_height == 1 {
             let filter_area = Rect::new(area.x, area.y, area.width, 1);
-            self.render_filter(filter_area, buffer);
-            filter_area
+            self.filter.widget().render(filter_area, buffer);
         } else {
-            Rect::default()
-        };
+            self.filter.clear_render_state();
+        }
 
         let path_height = u16::from(self.show_path && area.height > filter_height);
         if path_height == 1 {
@@ -708,7 +961,7 @@ impl Explorer {
                 " ".repeat(usize::from(
                     self.theme.left_padding.min(self.list_area.width)
                 )),
-                if self.filter.is_empty() {
+                if self.filter.text().is_empty() {
                     "empty folder"
                 } else {
                     "no matches"
@@ -752,43 +1005,6 @@ impl Explorer {
                 .thumb_style(self.theme.scrollbar_thumb)
                 .render(scrollbar, buffer);
         }
-    }
-
-    fn render_filter(&self, area: Rect, buffer: &mut Buffer) {
-        if area.is_empty() {
-            return;
-        }
-        let padding = " ".repeat(usize::from(self.theme.left_padding.min(area.width)));
-        let prompt = "/ ";
-        let cursor = if self.filter_focused { "▏" } else { "" };
-        let reserved = display_width(&padding)
-            .saturating_add(display_width(prompt))
-            .saturating_add(display_width(cursor));
-        let available = usize::from(area.width).saturating_sub(reserved);
-        let content = if self.filter.is_empty() {
-            truncate_end("Filter files", available)
-        } else {
-            truncate_start(&self.filter, u16::try_from(available).unwrap_or(u16::MAX))
-        };
-        let active = if self.filter_focused {
-            self.theme.filter_focused
-        } else {
-            self.theme.filter
-        };
-        let content_style = if self.filter.is_empty() && !self.filter_focused {
-            self.theme.filter_placeholder
-        } else {
-            active
-        };
-        let style = self.theme.style.patch(active);
-        buffer.set_style(area, style);
-        Line::from(vec![
-            Span::styled(padding, style),
-            Span::styled(prompt, style),
-            Span::styled(content, self.theme.style.patch(content_style)),
-            Span::styled(cursor, self.theme.style.patch(self.theme.filter_focused)),
-        ])
-        .render(area, buffer);
     }
 
     fn entry_style(&self, entry: &ExplorerEntry, selected: bool) -> Style {
@@ -870,6 +1086,18 @@ impl Widget for ExplorerWidget<'_, '_> {
     }
 }
 
+fn input_theme(theme: &ExplorerTheme) -> InputFieldTheme {
+    InputFieldTheme {
+        style: theme.style,
+        text: theme.filter,
+        focused: theme.filter_focused,
+        placeholder: theme.filter_placeholder,
+        prompt: theme.filter,
+        selection: theme.selected,
+        left_padding: theme.left_padding,
+    }
+}
+
 fn canonical_directory(path: &Path) -> io::Result<PathBuf> {
     let path = fs::canonicalize(path)?;
     if fs::metadata(&path)?.is_dir() {
@@ -882,9 +1110,15 @@ fn canonical_directory(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-fn read_entries(cwd: &Path, show_hidden: bool) -> io::Result<Vec<ExplorerEntry>> {
+fn read_entries(
+    cwd: &Path,
+    show_hidden: bool,
+    include_parent: bool,
+    file_extensions: Option<&[String]>,
+    prune_unmatched_directories: bool,
+) -> io::Result<Vec<ExplorerEntry>> {
     let mut entries = Vec::new();
-    if let Some(parent) = cwd.parent() {
+    if include_parent && let Some(parent) = cwd.parent() {
         entries.push(ExplorerEntry {
             path: parent.to_path_buf(),
             name: "..".to_owned(),
@@ -908,6 +1142,18 @@ fn read_entries(cwd: &Path, show_hidden: bool) -> io::Result<Vec<ExplorerEntry>>
             let directory = fs::metadata(&path)
                 .ok()
                 .is_some_and(|metadata| metadata.is_dir());
+            if let Some(extensions) = file_extensions {
+                if directory {
+                    if prune_unmatched_directories
+                        && (symlink
+                            || !directory_contains_matching_file(&path, extensions, show_hidden))
+                    {
+                        return None;
+                    }
+                } else if !path_matches_extensions(&path, extensions) {
+                    return None;
+                }
+            }
             Some(ExplorerEntry {
                 path,
                 name: sanitize_label(&raw_name),
@@ -926,6 +1172,73 @@ fn read_entries(cwd: &Path, show_hidden: bool) -> io::Result<Vec<ExplorerEntry>>
     });
     entries.extend(children);
     Ok(entries)
+}
+
+fn path_matches_extensions(path: &Path, extensions: &[String]) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|actual| {
+            extensions
+                .iter()
+                .any(|allowed| actual.eq_ignore_ascii_case(allowed))
+        })
+}
+
+fn directory_contains_matching_file(root: &Path, extensions: &[String], show_hidden: bool) -> bool {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let raw_name = entry.file_name();
+            if !show_hidden && raw_name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                if fs::metadata(&path)
+                    .ok()
+                    .is_some_and(|target| target.is_file())
+                    && path_matches_extensions(&path, extensions)
+                {
+                    return true;
+                }
+                continue;
+            }
+            if metadata.is_file() && path_matches_extensions(&path, extensions) {
+                return true;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+            }
+        }
+    }
+    false
+}
+
+fn normalize_extensions<I, S>(extensions: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut extensions = extensions
+        .into_iter()
+        .map(|extension| {
+            extension
+                .as_ref()
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase()
+        })
+        .filter(|extension| !extension.is_empty())
+        .collect::<Vec<_>>();
+    extensions.sort();
+    extensions.dedup();
+    extensions
 }
 
 fn sanitize_label(label: &str) -> String {
@@ -1016,6 +1329,150 @@ mod tests {
             entry_names(&explorer),
             ["../", "a-dir/", "z-dir/", ".secret", "a.txt"]
         );
+    }
+
+    #[test]
+    fn scoped_navigation_stops_at_its_canonical_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let child = temp.path().join("child");
+        fs::create_dir(&child).unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let child = fs::canonicalize(child).unwrap();
+
+        let mut explorer = Explorer::scoped(&root).unwrap();
+        assert_eq!(explorer.navigation_root(), Some(root.as_path()));
+        assert_eq!(entry_names(&explorer), ["child/"]);
+        assert_eq!(
+            explorer.handle(ExplorerInput::Parent).unwrap(),
+            ExplorerEvent::None
+        );
+        assert_eq!(explorer.cwd(), root);
+
+        explorer.select_path(&child);
+        assert_eq!(explorer.selected().unwrap().path(), child);
+        assert_eq!(
+            explorer.handle(ExplorerInput::Open).unwrap(),
+            ExplorerEvent::DirectoryChanged(child.clone())
+        );
+        assert_eq!(entry_names(&explorer), ["../"]);
+        assert_eq!(
+            explorer.handle(ExplorerInput::Parent).unwrap(),
+            ExplorerEvent::DirectoryChanged(root.clone())
+        );
+        assert_eq!(explorer.cwd(), root);
+        assert_eq!(
+            explorer.set_cwd(root.parent().unwrap()).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_navigation_denies_symlinks_that_escape_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let root_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let escape = root_dir.path().join("escape");
+        symlink(outside_dir.path(), &escape).unwrap();
+
+        let mut explorer = Explorer::scoped(root_dir.path()).unwrap();
+        explorer.select_path(&escape);
+        assert!(explorer.selected().unwrap().path().ends_with("escape"));
+        let error = explorer.handle(ExplorerInput::Open).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(explorer.cwd(), fs::canonicalize(root_dir.path()).unwrap());
+    }
+
+    #[test]
+    fn file_extension_policy_keeps_directories_and_matches_case_insensitively() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("folder")).unwrap();
+        fs::write(temp.path().join("note.md"), "note").unwrap();
+        fs::write(temp.path().join("A.MD"), "note").unwrap();
+        fs::write(temp.path().join("notes.txt"), "text").unwrap();
+        fs::write(temp.path().join("LICENSE"), "text").unwrap();
+
+        let mut explorer = Explorer::scoped(temp.path())
+            .unwrap()
+            .with_file_extensions([".MD", "md"])
+            .unwrap();
+        assert_eq!(
+            explorer.file_extensions(),
+            Some(["md".to_owned()].as_slice())
+        );
+        assert_eq!(entry_names(&explorer), ["folder/", "A.MD", "note.md"]);
+
+        explorer.clear_file_extensions().unwrap();
+        assert_eq!(explorer.file_extensions(), None);
+        assert_eq!(explorer.total_count(), 5);
+    }
+
+    #[test]
+    fn extension_policy_can_prune_directories_without_matching_descendants() {
+        let temp = tempfile::tempdir().unwrap();
+        let notes = temp.path().join("notes");
+        let nested = notes.join("nested");
+        let empty = temp.path().join("empty");
+        let hidden_only = temp.path().join("hidden-file-only");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(&empty).unwrap();
+        fs::create_dir(&hidden_only).unwrap();
+        fs::write(nested.join("deep.MD"), "note").unwrap();
+        fs::write(empty.join("other.txt"), "text").unwrap();
+        fs::write(hidden_only.join(".private.md"), "note").unwrap();
+        fs::write(temp.path().join("root.md"), "note").unwrap();
+
+        let mut explorer = Explorer::scoped(temp.path()).unwrap();
+        explorer.set_prune_unmatched_directories(true).unwrap();
+        explorer.set_file_extensions([".md"]).unwrap();
+
+        assert!(explorer.prune_unmatched_directories());
+        assert_eq!(entry_names(&explorer), ["notes/", "root.md"]);
+
+        explorer.set_show_hidden(true).unwrap();
+        assert_eq!(
+            entry_names(&explorer),
+            ["hidden-file-only/", "notes/", "root.md"]
+        );
+
+        let notes = fs::canonicalize(notes).unwrap();
+        explorer.select_path(&notes);
+        assert_eq!(explorer.selected().unwrap().path(), notes);
+        assert_eq!(
+            explorer.handle(ExplorerInput::Open).unwrap(),
+            ExplorerEvent::DirectoryChanged(notes.clone())
+        );
+        assert_eq!(entry_names(&explorer), ["../", "nested/"]);
+
+        assert!(matches!(
+            explorer.handle(ExplorerInput::Parent).unwrap(),
+            ExplorerEvent::DirectoryChanged(_)
+        ));
+        explorer.clear_file_extensions().unwrap();
+        assert_eq!(
+            entry_names(&explorer),
+            ["empty/", "hidden-file-only/", "notes/", "root.md"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_directory_scan_never_follows_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("outside.md"), "note").unwrap();
+        let linked = root.path().join("linked");
+        symlink(outside.path(), &linked).unwrap();
+
+        let mut explorer = Explorer::scoped(root.path()).unwrap();
+        explorer.set_prune_unmatched_directories(true).unwrap();
+        explorer.set_file_extensions(["md"]).unwrap();
+
+        assert!(!explorer.select_path(linked));
+        assert!(explorer.entries().is_empty());
     }
 
     #[test]
@@ -1134,10 +1591,7 @@ mod tests {
         fs::write(temp.path().join("notes.txt"), "hello").unwrap();
 
         let mut explorer = Explorer::new(temp.path()).unwrap();
-        assert_eq!(
-            explorer.handle(ExplorerInput::FocusFilter).unwrap(),
-            ExplorerEvent::FilterFocusChanged
-        );
+        assert!(!explorer.filter_focused());
         for character in "Me.MD".chars() {
             assert_eq!(
                 explorer
@@ -1152,6 +1606,30 @@ mod tests {
         assert_eq!(explorer.total_count(), 3);
         assert_eq!(explorer.selected().unwrap().display_name(), "README.md");
         assert!(explorer.filter_focused());
+    }
+
+    #[test]
+    fn typing_or_pasting_focuses_the_filter_automatically() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("alpha.txt"), "hello").unwrap();
+        let mut explorer = Explorer::new(temp.path()).unwrap();
+
+        assert_eq!(
+            explorer
+                .handle(ExplorerInput::FilterCharacter('a'))
+                .unwrap(),
+            ExplorerEvent::FilterChanged
+        );
+        assert!(explorer.filter_focused());
+
+        explorer.set_filter_focused(false);
+        explorer.clear_filter();
+        assert_eq!(
+            explorer.insert_filter_text("alpha"),
+            ExplorerEvent::FilterChanged
+        );
+        assert!(explorer.filter_focused());
+        assert_eq!(explorer.filter(), "alpha");
     }
 
     #[test]

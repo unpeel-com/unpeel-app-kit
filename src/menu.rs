@@ -4,7 +4,7 @@ use ratatui::style::Style;
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{ColorScheme, KitTheme, SELECTABLE_LEFT_PADDING, VerticalScrollbar};
+use crate::{ColorScheme, KitTheme, VerticalScrollbar};
 
 /// Semantic color treatment for one popup-menu item.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -120,10 +120,10 @@ impl MenuTheme {
             danger: Style::new().fg(palette.danger).bg(palette.surface),
             scrollbar_track: Style::new().fg(palette.subtle).bg(palette.surface),
             scrollbar_thumb: Style::new().fg(palette.muted).bg(palette.surface),
-            outer_padding: 1,
-            left_padding: SELECTABLE_LEFT_PADDING,
-            right_padding: 2,
-            minimum_width: 20,
+            outer_padding: 0,
+            left_padding: 0,
+            right_padding: 0,
+            minimum_width: 0,
         }
     }
 }
@@ -136,10 +136,9 @@ impl Default for MenuTheme {
 
 /// Reusable flat popup for context menus and dropdowns.
 ///
-/// The popup paints its own gray surface, keeps one cell of breathing room
-/// around its rows, and uses a full-row gray hover/keyboard selection. It has
-/// no Ratatui `Block` or stock border. Mouse hit-testing is derived from the
-/// most recent render.
+/// The popup paints its own gray surface with no default cell padding and uses
+/// a full-row gray hover/keyboard selection. It has no Ratatui `Block` or stock
+/// border. Mouse hit-testing is derived from the most recent render.
 #[derive(Debug)]
 pub struct PopupMenu<T> {
     items: Vec<MenuItem<T>>,
@@ -297,15 +296,18 @@ impl<T> PopupMenu<T> {
             .unwrap_or(0)
             .saturating_add(usize::from(self.theme.left_padding))
             .saturating_add(usize::from(self.theme.right_padding));
-        let natural_width = u16::try_from(content_width)
-            .unwrap_or(u16::MAX)
-            .max(self.theme.minimum_width)
-            .saturating_add(self.theme.outer_padding.saturating_mul(2));
         let natural_height = u16::try_from(self.items.len())
             .unwrap_or(u16::MAX)
             .saturating_add(self.theme.outer_padding.saturating_mul(2));
-        let width = natural_width.min(bounds.width);
         let height = natural_height.min(bounds.height);
+        let available_rows = height.saturating_sub(self.theme.outer_padding.saturating_mul(2));
+        let scrollbar_width = u16::from(self.items.len() > usize::from(available_rows));
+        let natural_width = u16::try_from(content_width)
+            .unwrap_or(u16::MAX)
+            .max(self.theme.minimum_width)
+            .saturating_add(self.theme.outer_padding.saturating_mul(2))
+            .saturating_add(scrollbar_width);
+        let width = natural_width.min(bounds.width);
         let preferred_x = self.anchor.x.saturating_add(1).max(bounds.x);
         let x = preferred_x.min(bounds.right().saturating_sub(width));
         let y = self
@@ -422,6 +424,10 @@ mod tests {
         let items = menu.items_area();
         assert_eq!(
             terminal.backend().buffer()[(area.x, area.y)].bg,
+            Color::Rgb(63, 63, 70)
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(area.x, area.y + 1)].bg,
             Color::Rgb(39, 39, 42)
         );
         assert_eq!(
@@ -430,12 +436,13 @@ mod tests {
         );
         assert_eq!(
             terminal.backend().buffer()[(items.x, items.y)].symbol(),
-            " "
+            "O"
         );
         assert_eq!(
             terminal.backend().buffer()[(items.x + 1, items.y)].symbol(),
-            " "
+            "p"
         );
+        assert_eq!(area, items, "the default menu has no cell padding");
 
         assert!(menu.hover_at(Position::new(items.x, items.y + 1)));
         terminal.draw(|frame| menu.render(frame)).unwrap();

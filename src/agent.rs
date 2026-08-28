@@ -67,12 +67,15 @@ pub fn clipboard_sequence(text: &str) -> String {
     format!("\x1b]52;c;{encoded}\x07")
 }
 
-/// Paste text into the best agent in this App's sidebar group.
+/// Paste text into the best agent near this App's pane.
 ///
-/// A direct pane neighbor wins, then a recognized agent runtime, then an
-/// older command-derived provider match. Settled agents are preferred. The
-/// text is deliberately not submitted, leaving the user in control of the
-/// final prompt.
+/// A direct pane neighbor wins — even one outside this sidebar group, in
+/// which case the Host asks the user to approve the cross-group write —
+/// then a recognized agent runtime in the group, then (for Apps pinned in
+/// the sticky project sidebar) a recognized agent elsewhere in the same
+/// root project, then an older command-derived provider match. Settled
+/// agents are preferred. The text is deliberately not submitted, leaving
+/// the user in control of the final prompt.
 pub fn send_to_agent(text: &str) -> Result<String, AgentError> {
     if !is_hosted() {
         return Err(AgentError::new("not inside an Unpeel session"));
@@ -165,23 +168,76 @@ fn resolve_agent(client: &mut McpClient) -> Result<(String, String), AgentError>
         .map(|session| string_field(session, "id"))
         .collect::<HashSet<_>>();
 
-    let neighbor = client
+    let current = client
         .call_tool("sessions", &json!({ "action": "current" }))
-        .ok()
-        .and_then(|current| adjacent_target(&current, &group_ids));
-    if let Some(target) = neighbor {
+        .ok();
+    if let Some(target) = current
+        .as_ref()
+        .and_then(|current| adjacent_target(current, &group_ids))
+    {
         return Ok(target);
     }
 
-    let recognized = client
+    let agents = client
         .call_tool("agents", &json!({ "action": "list" }))
-        .ok()
-        .and_then(|agents| recognized_target(&agents, &group_ids));
-    if let Some(target) = recognized {
+        .ok();
+    if let Some(target) = agents
+        .as_ref()
+        .and_then(|agents| recognized_target(agents, &group_ids))
+    {
         return Ok(target);
     }
 
-    provider_target(&sessions).ok_or_else(|| AgentError::new("no agent session in this group"))
+    // A sticky project-sidebar App lives in the per-project "sidebar-<root>"
+    // group, which holds only fellow sidebar panes and is outside the
+    // persisted multi-pane layout — so neither the neighbor nor the group
+    // paths can see the panes it is displayed beside. Those panes all belong
+    // to the same root project, so reach the project's agents instead.
+    if let (Some(current), Some(agents)) = (current.as_ref(), agents.as_ref())
+        && let Some(target) = sidebar_project_target(agents, current)
+    {
+        return Ok(target);
+    }
+
+    provider_target(&sessions).ok_or_else(|| AgentError::new("no agent pane nearby"))
+}
+
+/// Installed Unpeel Apps are recognized runtimes too, stamped with
+/// reverse-DNS app ids ("unpeel.app.diffs"); conversational agent slugs
+/// ("claude", "codex") never contain a dot.
+fn is_conversational_runtime(runtime_id: &str) -> bool {
+    !runtime_id.is_empty() && !runtime_id.contains('.')
+}
+
+fn sidebar_project_target(agents: &Value, current: &Value) -> Option<(String, String)> {
+    let session = current.get("current_session")?;
+    if !string_field(session, "group_id").starts_with("sidebar-") {
+        return None;
+    }
+    let project = string_field(session, "project_id");
+    if project.is_empty() {
+        return None;
+    }
+    let mut candidates = agents
+        .get("agents")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|agent| {
+            agent.get("self").and_then(Value::as_bool) != Some(true)
+                && is_conversational_runtime(&string_field(agent, "runtime_id"))
+                && string_field(agent, "project_id") == project
+                && string_field(agent, "state") == "running"
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|agent| settled_rank(&string_field(agent, "activity_status")));
+    candidates.first().and_then(|agent| {
+        let reference = agent.get("agent_ref")?;
+        let runtime = string_field(agent, "runtime_id");
+        Some((
+            string_field(reference, "session_id"),
+            label_or(agent, "label", &runtime),
+        ))
+    })
 }
 
 fn adjacent_target(current: &Value, group_ids: &HashSet<String>) -> Option<(String, String)> {
@@ -189,12 +245,17 @@ fn adjacent_target(current: &Value, group_ids: &HashSet<String>) -> Option<(Stri
     let mut candidates = ["left", "right", "up", "down"]
         .iter()
         .filter_map(|direction| neighbors.get(*direction))
-        .filter(|entry| {
-            string_field(entry, "kind") == "agent"
-                && group_ids.contains(&string_field(entry, "session_id"))
-        })
+        .filter(|entry| string_field(entry, "kind") == "agent")
         .collect::<Vec<_>>();
-    candidates.sort_by_key(|entry| settled_rank(&string_field(entry, "activity_status")));
+    // A direct pane neighbor outside this sidebar group is still reachable;
+    // the Host asks the user for cross-group write approval. Same-group
+    // neighbors win because their writes are approval-free.
+    candidates.sort_by_key(|entry| {
+        (
+            !group_ids.contains(&string_field(entry, "session_id")),
+            settled_rank(&string_field(entry, "activity_status")),
+        )
+    });
     candidates.first().map(|entry| {
         let runtime = string_field(entry, "runtime_id");
         (
@@ -211,6 +272,7 @@ fn recognized_target(agents: &Value, group_ids: &HashSet<String>) -> Option<(Str
         .iter()
         .filter(|agent| {
             agent.get("self").and_then(Value::as_bool) != Some(true)
+                && is_conversational_runtime(&string_field(agent, "runtime_id"))
                 && agent.get("agent_ref").is_some_and(|reference| {
                     group_ids.contains(&string_field(reference, "session_id"))
                 })
@@ -399,6 +461,78 @@ mod tests {
         assert_eq!(
             adjacent_target(&current, &group),
             Some(("idle".to_owned(), "claude".to_owned()))
+        );
+    }
+
+    #[test]
+    fn adjacent_agents_outside_the_group_remain_reachable() {
+        let current = json!({
+            "pane_context": { "neighbors": {
+                "right": { "kind": "agent", "session_id": "other-group", "label": "Claude", "activity_status": "idle" },
+                "down": { "kind": "app", "session_id": "viewer", "label": "Viewer", "activity_status": "idle" }
+            }}
+        });
+        let group = HashSet::from(["me".to_owned()]);
+        assert_eq!(
+            adjacent_target(&current, &group),
+            Some(("other-group".to_owned(), "Claude".to_owned()))
+        );
+    }
+
+    #[test]
+    fn same_group_neighbors_win_over_settled_outsiders() {
+        let current = json!({
+            "pane_context": { "neighbors": {
+                "left": { "kind": "agent", "session_id": "grouped", "label": "Grouped", "activity_status": "busy" },
+                "right": { "kind": "agent", "session_id": "outside", "label": "Outside", "activity_status": "idle" }
+            }}
+        });
+        let group = HashSet::from(["grouped".to_owned()]);
+        assert_eq!(
+            adjacent_target(&current, &group),
+            Some(("grouped".to_owned(), "Grouped".to_owned()))
+        );
+    }
+
+    #[test]
+    fn sidebar_apps_reach_the_projects_agents() {
+        let current = json!({
+            "current_session": { "group_id": "sidebar-native-root", "project_id": "native-root" }
+        });
+        let agents = json!({ "agents": [
+            { "self": true, "runtime_id": "claude", "project_id": "native-root", "state": "running", "activity_status": "idle", "agent_ref": { "session_id": "me" } },
+            { "runtime_id": "unpeel.app.usage", "project_id": "native-root", "state": "running", "activity_status": "idle", "label": "Usage", "agent_ref": { "session_id": "usage-app" } },
+            { "runtime_id": "claude", "project_id": "other-project", "state": "running", "activity_status": "idle", "agent_ref": { "session_id": "elsewhere" } },
+            { "runtime_id": "claude", "project_id": "native-root", "state": "running", "activity_status": "working", "label": "Busy Claude", "agent_ref": { "session_id": "busy" } },
+            { "runtime_id": "codex", "project_id": "native-root", "state": "running", "activity_status": "idle", "agent_ref": { "session_id": "settled" } }
+        ]});
+        assert_eq!(
+            sidebar_project_target(&agents, &current),
+            Some(("settled".to_owned(), "codex".to_owned()))
+        );
+    }
+
+    #[test]
+    fn ordinary_groups_skip_the_sidebar_project_fallback() {
+        let current = json!({
+            "current_session": { "group_id": "native-root", "project_id": "native-root" }
+        });
+        let agents = json!({ "agents": [
+            { "runtime_id": "claude", "project_id": "native-root", "state": "running", "activity_status": "idle", "agent_ref": { "session_id": "agent" } }
+        ]});
+        assert_eq!(sidebar_project_target(&agents, &current), None);
+    }
+
+    #[test]
+    fn recognized_agents_exclude_installed_apps() {
+        let agents = json!({ "agents": [
+            { "runtime_id": "unpeel.app.files", "activity_status": "idle", "label": "Files", "agent_ref": { "session_id": "app" } },
+            { "runtime_id": "claude", "activity_status": "busy", "agent_ref": { "session_id": "agent" } }
+        ]});
+        let group = HashSet::from(["app".to_owned(), "agent".to_owned()]);
+        assert_eq!(
+            recognized_target(&agents, &group),
+            Some(("agent".to_owned(), "claude".to_owned()))
         );
     }
 

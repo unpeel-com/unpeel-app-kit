@@ -10,6 +10,7 @@ The kit currently provides:
 | Component | Responsibility |
 | --- | --- |
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
+| `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
 | `KitTheme` / `ColorScheme` | Shared dark/light defaults for selectable rows, menus, text, and scrollbars |
 | `DoubleClickTracker` | Target-aware double-click detection shared by mouse-driven Apps |
@@ -23,6 +24,19 @@ The kit currently provides:
 The crate owns reusable component behavior, not an App's event loop, key map,
 commands, or surrounding chrome.
 
+## Explorer filter focus
+
+Explorer Apps should map every unmodified printable character to
+`ExplorerInput::FilterCharacter`, even while the file list has focus. The
+component focuses the filter before inserting that first character, so users
+can type immediately without pressing `/` first. Paste through
+`insert_filter_text` has the same behavior.
+
+The filter remains directly mouse-accessible through `filter_mouse_down`,
+which focuses it and places its native text cursor. For keyboard-only access,
+the shared convention is that Up from the first list row sends `FocusFilter`,
+while Down or Tab from the filter sends `BlurFilter` back to the list.
+
 ## Design conventions
 
 ### Selectable rows
@@ -30,8 +44,9 @@ commands, or surrounding chrome.
 Selectable list items use a full-width selection rectangle, with their label
 inset by **two terminal cells** (`SELECTABLE_LEFT_PADDING`). Do not paint only
 the text span: the gray selection background should continue through the
-unused cells on both sides of the row. `Explorer`, `PopupMenu`, and the shared
-theme defaults implement this convention.
+unused cells on both sides of the row. `Explorer` and the shared theme defaults
+implement this convention. Popup menus are the deliberate exception: their
+labels and gray selection rows are edge-aligned with no default cell padding.
 
 Pinned navigation actions such as `← Back` may keep a full-width hit target,
 but they are not selected list items: render their ordinary row background
@@ -152,9 +167,9 @@ surface free to paste a path today or handle an App-to-App path drop later.
 `Explorer` is a flat, borderless current-directory browser for Unpeel Apps.
 It follows the useful interaction model of
 [`ratatui-explorer`](https://github.com/tatounee/ratatui-explorer)—a `../`
-entry, directory suffixes, parent/child navigation, paging, hidden-file
-toggling, a borderless current-folder filter, and full-row selection—while
-integrating `DragSurface` directly.
+entry below the root, directory suffixes, parent/child navigation, paging,
+hidden-file toggling, a borderless current-folder filter, and full-row
+selection—while integrating `DragSurface` directly.
 The current-directory header and every visible file or folder row publish an
 absolute Host-local path, so the receiving surface decides whether that path
 becomes terminal text, a file URL, or a future App-specific drop.
@@ -162,7 +177,12 @@ becomes terminal text, a file URL, or a future App-specific drop.
 ```rust
 use unpeel_app_kit::{DragSurface, Explorer, ExplorerInput};
 
-let mut explorer = Explorer::new(".")?;
+// Project-facing Apps should keep navigation inside their launch directory.
+let mut explorer = Explorer::scoped(".")?;
+// File-opening Apps can retain folders but admit only relevant file types.
+explorer.set_file_extensions(["md"])?;
+// Search-style launchers can also hide folders with no matching descendants.
+explorer.set_prune_unmatched_directories(true)?;
 let mut drags = DragSurface::detect();
 
 drags.begin_frame();
@@ -179,6 +199,25 @@ explorer.handle(ExplorerInput::FilterCharacter('r'))?;
 # Ok::<(), std::io::Error>(())
 ```
 
+`Explorer::scoped` canonicalizes its initial directory and makes that path a
+hard boundary: the root omits `../`, parent actions are no-ops there, and a
+symlink cannot navigate outside it. `Explorer::new` remains available for an
+explicitly unbounded filesystem browser. Passing a file to either constructor
+opens its parent; for `scoped`, that parent becomes the boundary.
+`set_file_extensions` / `with_file_extensions` provide a case-insensitive
+file-type policy for open dialogs; directories always remain visible for
+navigation by default. `set_prune_unmatched_directories(true)` changes that
+policy for focused browsers: a directory remains visible only when a
+non-hidden matching file exists somewhere below it. Toggling hidden files
+recomputes those results, and recursive discovery never follows directory
+symlinks.
+
+The filter uses the shared `InputField`. Apps can map the extended
+`FilterLeft`, `FilterRight`, `FilterHome`, `FilterEnd`, `FilterDelete`, and
+`FilterSelectAll` actions, forward paste through `insert_filter_text`, and
+forward mouse presses/drags through the `filter_mouse_*` methods. After
+rendering, apply `filter_cursor_position()` to the Ratatui frame when present.
+
 The component never enables mouse capture. A standalone App should leave the
 pointer with the terminal emulator when it wants native path dragging.
 
@@ -187,14 +226,55 @@ the component, while file activation remains App-owned. `ExplorerTheme`
 contains styles and spacing only. There is intentionally no `Block`, border,
 or mandatory background, so Apps can compose it without inherited chrome.
 
+## Input field
+
+`InputField` is the shared single-line primitive for filters and lightweight
+forms. It owns its Unicode-safe edit cursor and selection, replaces selected
+text on insert/delete, supports character and word movement with optional
+Shift extension, selects a logical word on double-click, supports drag and
+Shift-click selection, and scrolls horizontally to keep the cursor visible.
+Its gray selection style comes from the same dark/light `KitTheme` defaults as
+selectable rows.
+
+```rust
+use ratatui::layout::Position;
+use unpeel_app_kit::{InputField, InputFieldAction, InputFieldTheme};
+
+let mut input = InputField::new("Filter files")
+    .with_prompt("/ ")
+    .with_theme(InputFieldTheme::detected());
+input.set_focused(true);
+input.handle(InputFieldAction::InsertText("readme".into()));
+input.handle(InputFieldAction::Left {
+    extend: true,
+    word: true,
+});
+
+frame.render_widget(input.widget(), input_area);
+if let Some(position) = input.cursor_position() {
+    frame.set_cursor_position(position);
+}
+
+// Forward terminal mouse reporting when the App enables it.
+input.mouse_down(Position::new(mouse.column, mouse.row), shift_held);
+input.mouse_drag(Position::new(mouse.column, mouse.row));
+input.mouse_up();
+```
+
+`InputField::handle` reports whether editing or selection state changed;
+`text()` is the resulting value and `selected_text()` exposes the active
+selection. The component does not choose a terminal backend, key bindings,
+mouse-capture mode, clipboard policy, or form submission behavior.
+
 ## Popup menu
 
 `PopupMenu<T>` is the shared context-menu/dropdown surface. It paints a flat
-gray panel with one cell of outer breathing room, two cells before every
-label, and a full-row hover/keyboard selection. The dark preset gets lighter
-on selection; the light preset gets darker. It clamps to the terminal,
-scrolls long menus, skips disabled entries during keyboard navigation, and
-supports muted and danger tones without stock Ratatui borders.
+gray panel with no outer, left, or right cell padding by default and a full-row
+hover/keyboard selection. The panel sizes to its longest label (plus a
+scrollbar only when needed). The dark preset gets lighter on selection; the
+light preset gets darker. It clamps to the terminal, scrolls long menus, skips
+disabled entries during keyboard navigation, and supports muted and danger
+tones without stock Ratatui borders.
 
 ```rust
 use ratatui::layout::Position;

@@ -1,9 +1,9 @@
 //! Reusable Ratatui components for terminal-native Unpeel Apps.
 //!
-//! Components cover a borderless filesystem explorer, dark/light theming,
-//! popup menus, adjacent-agent handoff, Host-local path dragging, consistent
-//! proportional scrollbars, and an optional Markdown editing surface built
-//! on `tui-textarea-2`.
+//! Components cover a borderless filesystem explorer and single-line input,
+//! dark/light theming, popup menus, adjacent-agent handoff, Host-local path
+//! dragging, consistent proportional scrollbars, and an optional Markdown
+//! editing surface built on `tui-textarea-2`.
 
 #![forbid(unsafe_code)]
 
@@ -11,6 +11,7 @@ mod agent;
 mod click;
 mod drag;
 mod explorer;
+mod input;
 mod keyboard;
 #[cfg(feature = "markdown-text-area")]
 mod markdown_text_area;
@@ -27,6 +28,7 @@ pub use drag::{DRAG_MAP_FILENAME, DragRegion, DragSurface};
 pub use explorer::{
     Explorer, ExplorerEntry, ExplorerEvent, ExplorerInput, ExplorerTheme, ExplorerWidget,
 };
+pub use input::{InputField, InputFieldAction, InputFieldTheme, InputFieldWidget};
 pub use keyboard::KeyboardEnhancementGuard;
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_text_area::{MarkdownTextArea, MarkdownTextAreaStyle};
