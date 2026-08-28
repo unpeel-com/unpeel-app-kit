@@ -937,7 +937,13 @@ impl Explorer {
             let label = format!(
                 "{}{}",
                 " ".repeat(usize::from(self.theme.left_padding.min(area.width))),
-                truncate_start(&self.cwd.display().to_string(), label_width),
+                truncate_start(
+                    &self.navigation_root.as_deref().map_or_else(
+                        || self.cwd.display().to_string(),
+                        |root| crate::display_path_from_root(&self.cwd, root),
+                    ),
+                    label_width,
+                ),
             );
             let style = self.theme.style.patch(self.theme.path);
             buffer.set_style(header, style);

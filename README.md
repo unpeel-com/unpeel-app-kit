@@ -16,8 +16,10 @@ The kit currently provides:
 | `DoubleClickTracker` | Target-aware double-click detection shared by mouse-driven Apps |
 | `KeyboardEnhancementGuard` | Scoped unambiguous Escape delivery on capable terminals |
 | `AgentBridge` | Async adjacent-agent discovery plus approval-free same-group path/text handoff |
+| `EditorBridge` | Open a file or folder with Unpeel's preferred editor, with a standalone platform fallback |
 | `DragSurface` | Frame-accurate semantic path regions for native drag-and-drop |
 | `DraggablePath` / `DragSource<W>` | Small Ratatui wrappers for custom path drag sources |
+| `display_path_from_root` | Render paths project-relative without weakening absolute semantic path operations |
 | `VerticalScrollbar` | Shared proportional, capless scrollbar |
 | `MarkdownTextArea` | Wrapped Markdown editing surface behind the `markdown-text-area` feature |
 
@@ -97,17 +99,27 @@ use unpeel_app_kit::KeyboardEnhancementGuard;
 let _keyboard = KeyboardEnhancementGuard::enter()?;
 ```
 
-## Add it to an App
+## Install in an App
 
-The kit is currently a sibling development crate rather than a crates.io
-package:
+The kit is currently a Git repository rather than a crates.io package. Check
+it out once beside the Apps that use it, then add the local dependency:
+
+```sh
+mkdir -p ~/Dev && cd ~/Dev
+git clone https://github.com/unpeel-com/unpeel-app-kit.git
+cd your-ratatui-app
+cargo add unpeel-app-kit --path ../unpeel-app-kit
+```
+
+The resulting dependency is:
 
 ```toml
 [dependencies]
 unpeel-app-kit = { path = "../unpeel-app-kit" }
 ```
 
-It targets Ratatui `0.30`. Enable the editor only in Apps that need it:
+It targets Ratatui `0.30`. Enable the Markdown text area only in Apps that
+need it:
 
 ```toml
 unpeel-app-kit = { path = "../unpeel-app-kit", features = ["markdown-text-area"] }
@@ -119,7 +131,9 @@ Path dragging does not capture terminal mouse input. Instead, `DragSurface`
 publishes a short-lived semantic map between Ratatui terminal rectangles and
 Host-local files or directories. Unpeel performs the native point-to-cell hit
 test, starts a normal platform file drag, and pastes a shell-quoted path when
-the destination is another Unpeel terminal.
+the destination is another Unpeel terminal. Pasted text is relative to that
+Session's project root when possible, uses `~/…` elsewhere under the user's
+home, and stays absolute only outside both roots.
 
 ### Ratatui usage
 
@@ -225,6 +239,29 @@ pointer with the terminal emulator when it wants native path dragging.
 the component, while file activation remains App-owned. `ExplorerTheme`
 contains styles and spacing only. There is intentionally no `Block`, border,
 or mandatory background, so Apps can compose it without inherited chrome.
+
+## Project paths and preferred editor
+
+Keep filesystem operations and drag maps absolute, then shorten only visible
+labels with `display_path_from_root`. It returns `.` for the project root,
+uses a repository-relative path for descendants, and leaves paths outside the
+root absolute instead of inventing misleading `..` segments.
+
+`EditorBridge::open` is the shared action for an **Open in editor** menu item.
+Inside a local Unpeel App Session it asks the owning Unpeel instance to use
+the editor selected in Settings. When the same App runs standalone—or against
+an older host without that endpoint—it uses the platform's ordinary file
+opener. Files and folders must exist; relative inputs are resolved against the
+App's current directory before they cross the bridge.
+
+```rust
+use unpeel_app_kit::{EditorBridge, display_path_from_root};
+
+let label = display_path_from_root("/work/project/src/main.rs", "/work/project");
+assert_eq!(label, "src/main.rs");
+EditorBridge::open("/work/project/src/main.rs")?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ## Input field
 
