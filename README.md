@@ -422,6 +422,38 @@ When a valid hosted Session exists but an older/unreachable Host cannot answer,
 the mode remains `Hosted`, `host_available()` is false, and typed values may be
 absent instead of silently pretending the App is standalone.
 
+Use the narrowest value that matches the job:
+
+| Need | API | Meaning |
+| --- | --- | --- |
+| Read files for this Session | `current_root()` | Active worktree when present, otherwise the base project |
+| Group data across worktrees | `current_project()` | Logical base project and stable project id |
+| Label the active checkout | `current_worktree()` | Worktree path and optional branch |
+| Namespace workspace-local state | `current_workspace()` | Stable workspace id when registered, plus its display name |
+| Attribute shared state | `current_user()` | Opaque Host principal only; never an email or display name |
+
+An explicit CLI path should win over detected context. A standalone-first App
+should then fall back to its normal CLI behavior—usually `current_dir()`—when
+`current_root()` is absent. Refresh at a deliberate boundary such as an App
+reload or background polling interval; do not issue a Host request every frame.
+
+### Adoption in the official Ratatui Apps
+
+Every official App that consumes App Kit constructs `AppContext`; each uses
+only the fields relevant to its own behavior:
+
+| App | Hosted behavior | Standalone fallback |
+| --- | --- | --- |
+| Filetree | Starts at `current_root()` and then follows the adjacent agent across worktrees | Process working directory |
+| Diffs | Discovers Git from `current_root()` and then follows the adjacent agent across worktrees | Process working directory |
+| Markdown | Uses `current_root()/docs` as the first-run notes-folder suggestion; explicit and remembered vaults still win | Working-directory `docs` folder |
+| Usage | Resolves **Current project** from refreshed `current_root()`; worktree history is folded into the base repository | Process working directory |
+| GitHub Issues | Discovers the repository and branch from `current_root()` | Process working directory |
+
+Workspace and user values are intentionally not copied into every App's own
+reporter payload: the Host already owns that scope, and an App should consume
+those values only for a real workspace-local or attribution feature.
+
 ## Hosted App reporter
 
 `AppReporter` is the one Rust implementation of Unpeel's documented file +

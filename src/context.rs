@@ -31,6 +31,7 @@ pub struct WorkspaceContext {
     /// Stable workspace registry id. The implicit workspace uses `default`;
     /// an unregistered development home may not have an id.
     pub id: Option<String>,
+    /// Human-readable workspace name supplied by the Host.
     pub name: String,
 }
 
@@ -40,15 +41,20 @@ pub struct WorkspaceContext {
 /// [`AppContext::current_root`] for the checkout the process should read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectContext {
+    /// Stable project id within the current workspace.
     pub id: String,
+    /// Human-readable project name supplied by the Host.
     pub name: String,
+    /// Absolute path to the logical base project checkout.
     pub path: PathBuf,
 }
 
 /// The active worktree checkout, when the Session is not at its base project.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeContext {
+    /// Absolute path to the active worktree checkout.
     pub path: PathBuf,
+    /// Git branch when the Host can resolve one.
     pub branch: Option<String>,
 }
 
@@ -58,6 +64,7 @@ pub struct WorktreeContext {
 /// value. Those claims require a separate consented identity API.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnpeelUser {
+    /// Opaque, Host-scoped principal id suitable only for attribution keys.
     pub id: String,
 }
 
@@ -144,41 +151,49 @@ impl AppContext {
     }
 
     #[must_use]
+    /// Whether the process is standalone or belongs to a hosted App Session.
     pub const fn mode(&self) -> AppMode {
         self.mode
     }
 
     #[must_use]
+    /// True for a valid hosted App Session, even during a transient Host outage.
     pub const fn is_hosted(&self) -> bool {
         matches!(self.mode, AppMode::Hosted)
     }
 
     #[must_use]
+    /// Whether the most recent typed context query reached and validated the Host.
     pub const fn host_available(&self) -> bool {
         self.host_available
     }
 
     #[must_use]
+    /// Hosted Session id, or `None` in a normal terminal.
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
 
     #[must_use]
+    /// Current isolated workspace, when supplied by the Host.
     pub fn current_workspace(&self) -> Option<&WorkspaceContext> {
         self.workspace.as_ref()
     }
 
     #[must_use]
+    /// Logical base project, even when the Session runs in a worktree.
     pub fn current_project(&self) -> Option<&ProjectContext> {
         self.project.as_ref()
     }
 
     #[must_use]
+    /// Active worktree checkout, when it differs from the base project.
     pub fn current_worktree(&self) -> Option<&WorktreeContext> {
         self.worktree.as_ref()
     }
 
     #[must_use]
+    /// Opaque current Session owner, when supplied by the Host.
     pub fn current_user(&self) -> Option<&UnpeelUser> {
         self.user.as_ref()
     }
