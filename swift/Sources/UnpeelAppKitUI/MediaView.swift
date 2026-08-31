@@ -65,7 +65,7 @@ public struct MediaView: View {
                 onAction: onAction,
                 onError: onError
             )
-        case .markdownEditor, .unsupported:
+        case .markdownEditor, .page, .unsupported:
             EmptyView()
         }
     }

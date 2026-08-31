@@ -16,7 +16,7 @@ import {
   isBrowserSafeUiNode,
   negotiateUiProtocolVersion,
   newEventId,
-  uiNodeCapability,
+  uiNodeCapabilities,
 } from "./protocol";
 
 export const WORKSPACE_UI_PROTOCOL_NAME = "unpeel.workspace.ui" as const;
@@ -466,9 +466,9 @@ export class WorkspaceUiSession {
   /** Keeps transport identity alive while the Host exposes the complete PTY. */
   private accept(snapshot: UiSnapshot): boolean {
     this.latestSnapshot = snapshot;
-    const capability = uiNodeCapability(snapshot.root);
-    if (capability !== undefined
-      && this.supportedComponentCapabilities.has(capability)
+    const capabilities = uiNodeCapabilities(snapshot.root);
+    if (capabilities !== undefined
+      && capabilities.every((capability) => this.supportedComponentCapabilities.has(capability))
       && isBrowserSafeUiNode(snapshot.root)) {
       this.semanticProjectionAvailable = true;
       if (this.usingTerminalFallback) {

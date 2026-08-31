@@ -16,6 +16,7 @@ use std::io::{self, BufRead, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+use crate::components::{ListItem, Page};
 use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
 
 /// Stable protocol name carried by every independently replayable frame.
@@ -692,6 +693,7 @@ impl MarkdownEditorSpec {
 pub enum UiComponent {
     MarkdownEditor(MarkdownEditorSpec),
     Media(MediaSpec),
+    Page(Page),
 }
 
 impl UiComponent {
@@ -701,6 +703,7 @@ impl UiComponent {
         match self {
             Self::MarkdownEditor(_) => "markdownEditor",
             Self::Media(_) => "media",
+            Self::Page(_) => "page",
         }
     }
 
@@ -710,6 +713,17 @@ impl UiComponent {
         match self {
             Self::MarkdownEditor(_) => UI_MARKDOWN_EDITOR_CAPABILITY,
             Self::Media(_) => crate::MEDIA_COMPONENT_CAPABILITY,
+            Self::Page(_) => crate::PAGE_COMPONENT_CAPABILITY,
+        }
+    }
+
+    /// Capabilities needed to render this exact closed component tree.
+    #[must_use]
+    pub fn required_capabilities(&self) -> Vec<&'static str> {
+        match self {
+            Self::MarkdownEditor(_) => vec![UI_MARKDOWN_EDITOR_CAPABILITY],
+            Self::Media(_) => vec![crate::MEDIA_COMPONENT_CAPABILITY],
+            Self::Page(page) => page.required_capabilities(),
         }
     }
 }
@@ -739,12 +753,23 @@ impl UiNode {
         }
     }
 
+    #[must_use]
+    pub fn page(id: impl Into<NodeId>, page: Page) -> Self {
+        Self {
+            id: id.into(),
+            element: UiComponent::Page(page),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), UiValidationError> {
         validate_identifier(self.id.as_str(), "root.id")?;
         match &self.element {
             UiComponent::MarkdownEditor(editor) => editor.validate("root"),
             UiComponent::Media(media) => media.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("media", "root", 1), error.message)
+            }),
+            UiComponent::Page(page) => page.validate().map_err(|error| {
+                UiValidationError::new(error.path.replacen("page", "root", 1), error.message)
             }),
         }
     }
@@ -753,6 +778,12 @@ impl UiNode {
     #[must_use]
     pub const fn required_capability(&self) -> &'static str {
         self.element.required_capability()
+    }
+
+    /// Capabilities needed to render this node and each constrained slot.
+    #[must_use]
+    pub fn required_capabilities(&self) -> Vec<&'static str> {
+        self.element.required_capabilities()
     }
 }
 
@@ -871,6 +902,24 @@ pub enum UiDeltaOperation {
         source: MediaSource,
         intrinsic: MediaPixelSize,
     },
+    /// Sets one Toggle and its containing ListItem's denormalized done state.
+    ToggleSetValue {
+        node_id: String,
+        value: bool,
+    },
+    InputSetValue {
+        node_id: String,
+        value: String,
+    },
+    ListInsertItem {
+        list_id: String,
+        index: u64,
+        item: ListItem,
+    },
+    ListRemoveItem {
+        list_id: String,
+        item_id: String,
+    },
 }
 
 impl UiDeltaOperation {
@@ -903,6 +952,39 @@ impl UiDeltaOperation {
         }
     }
 
+    #[must_use]
+    pub fn toggle_set_value(node_id: impl Into<String>, value: bool) -> Self {
+        Self::ToggleSetValue {
+            node_id: node_id.into(),
+            value,
+        }
+    }
+
+    #[must_use]
+    pub fn input_set_value(node_id: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::InputSetValue {
+            node_id: node_id.into(),
+            value: value.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn list_insert_item(list_id: impl Into<String>, index: u64, item: ListItem) -> Self {
+        Self::ListInsertItem {
+            list_id: list_id.into(),
+            index,
+            item,
+        }
+    }
+
+    #[must_use]
+    pub fn list_remove_item(list_id: impl Into<String>, item_id: impl Into<String>) -> Self {
+        Self::ListRemoveItem {
+            list_id: list_id.into(),
+            item_id: item_id.into(),
+        }
+    }
+
     fn validate(&self, path: &str) -> Result<(), UiProtocolError> {
         match self {
             Self::ReplaceRoot { root } => root.validate().map_err(UiProtocolError::InvalidView),
@@ -931,6 +1013,32 @@ impl UiDeltaOperation {
                             error.message,
                         ))
                     })
+            }
+            Self::ToggleSetValue { node_id, .. } | Self::InputSetValue { node_id, .. } => {
+                validate_identifier(node_id, &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)
+            }
+            Self::ListInsertItem {
+                list_id,
+                index,
+                item,
+            } => {
+                validate_identifier(list_id, &format!("{path}.listId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if *index > MAX_SAFE_UI_INTEGER {
+                    return Err(UiProtocolError::InvalidMessage(format!(
+                        "{path}.index exceeds the cross-platform safe integer {MAX_SAFE_UI_INTEGER}"
+                    )));
+                }
+                item.validate(&format!("{path}.item")).map_err(|error| {
+                    UiProtocolError::InvalidView(UiValidationError::new(error.path, error.message))
+                })
+            }
+            Self::ListRemoveItem { list_id, item_id } => {
+                validate_identifier(list_id, &format!("{path}.listId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                validate_identifier(item_id, &format!("{path}.itemId"))
+                    .map_err(UiProtocolError::InvalidView)
             }
             Self::MarkdownSetSelection { node_id, .. }
             | Self::MarkdownSetPresentation { node_id, .. }
@@ -997,6 +1105,36 @@ impl UiNode {
                     media.source = source.clone();
                     media.intrinsic = *intrinsic;
                 }
+                UiDeltaOperation::ToggleSetValue { node_id, value } => {
+                    self.page_mut(index)?
+                        .set_toggle_value(node_id, *value)
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::InputSetValue { node_id, value } => {
+                    self.page_mut(index)?
+                        .set_input_value(node_id, value.clone())
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::ListInsertItem {
+                    list_id,
+                    index: item_index,
+                    item,
+                } => {
+                    let item_index = usize::try_from(*item_index).map_err(|_| {
+                        UiValidationError::new(
+                            format!("delta.operations[{index}].index"),
+                            "List insertion index does not fit this renderer",
+                        )
+                    })?;
+                    self.page_mut(index)?
+                        .insert_list_item(list_id, item_index, item.clone())
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::ListRemoveItem { list_id, item_id } => {
+                    self.page_mut(index)?
+                        .remove_list_item(list_id, item_id)
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
             }
         }
         self.validate()
@@ -1015,7 +1153,7 @@ impl UiNode {
         }
         match &mut self.element {
             UiComponent::MarkdownEditor(editor) => Ok(editor),
-            UiComponent::Media(_) => Err(UiValidationError::new(
+            UiComponent::Media(_) | UiComponent::Page(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires a Markdown editor",
             )),
@@ -1035,12 +1173,32 @@ impl UiNode {
         }
         match &mut self.element {
             UiComponent::Media(media) => Ok(media),
-            UiComponent::MarkdownEditor(_) => Err(UiValidationError::new(
+            UiComponent::MarkdownEditor(_) | UiComponent::Page(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires Media",
             )),
         }
     }
+
+    fn page_mut(&mut self, operation_index: usize) -> Result<&mut Page, UiValidationError> {
+        match &mut self.element {
+            UiComponent::Page(page) => Ok(page),
+            UiComponent::MarkdownEditor(_) | UiComponent::Media(_) => Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}]"),
+                "operation requires Page",
+            )),
+        }
+    }
+}
+
+fn component_delta_error(
+    operation_index: usize,
+    error: crate::ComponentValidationError,
+) -> UiValidationError {
+    UiValidationError::new(
+        format!("delta.operations[{operation_index}].{}", error.path),
+        error.message,
+    )
 }
 
 /// Contiguous server-to-renderer change between two immutable revisions.
@@ -2073,6 +2231,8 @@ fn validate_event_value(value: &UiEventValue) -> Result<(), UiProtocolError> {
 mod tests {
     use std::io::Cursor;
 
+    use crate::{Input, List, ListItem, ListItemSlot, Toggle};
+
     use super::*;
 
     fn route() -> (AppInstanceId, ParticipantId, ClientId, RendererId, ViewId) {
@@ -2097,6 +2257,31 @@ mod tests {
                 MarkdownEditorSpec::new("# Hello\n🙂 world", selection)
                     .dirty(true)
                     .title("README.md"),
+            ),
+        )
+    }
+
+    fn todo_snapshot() -> UiSnapshot {
+        let item = ListItem::new("todo-1", "First")
+            .trailing(ListItemSlot::toggle(Toggle::new(
+                "todo-1-toggle",
+                "Completed",
+                false,
+                "set-done",
+            )))
+            .delete_action("delete-todo");
+        UiSnapshot::new(
+            "app-123",
+            "client-1",
+            "main",
+            1,
+            UiNode::page(
+                "todo-page",
+                Page::new("Todos", List::new("todos", vec![item])).input(
+                    Input::new("new-todo", "New todo")
+                        .placeholder("What needs doing?")
+                        .submit_action("add-todo"),
+                ),
             ),
         )
     }
@@ -2181,6 +2366,36 @@ mod tests {
         assert!(encoded.contains(r#""appInstanceId":"app-123""#));
         assert!(encoded.contains(r#""utf16Column":2"#));
         assert_eq!(decode_ui_frame(encoded.as_bytes()).unwrap(), message);
+    }
+
+    #[test]
+    fn page_deltas_update_only_the_closed_component_slots() {
+        let second = ListItem::new("todo-2", "Second").trailing(ListItemSlot::toggle(Toggle::new(
+            "todo-2-toggle",
+            "Completed",
+            false,
+            "set-done",
+        )));
+        let delta = UiDelta::new(
+            "app-123",
+            "client-1",
+            "main",
+            1,
+            2,
+            vec![
+                UiDeltaOperation::input_set_value("new-todo", "draft"),
+                UiDeltaOperation::toggle_set_value("todo-1-toggle", true),
+                UiDeltaOperation::list_insert_item("todos", 1, second),
+                UiDeltaOperation::list_remove_item("todos", "todo-1"),
+            ],
+        );
+        let updated = todo_snapshot().applying(&delta).unwrap();
+        let UiComponent::Page(page) = updated.root.element else {
+            panic!("Page operations must preserve the component kind");
+        };
+        assert_eq!(page.input_spec().unwrap().value, "draft");
+        assert_eq!(page.list().items.len(), 1);
+        assert_eq!(page.list().items[0].id, "todo-2");
     }
 
     #[test]

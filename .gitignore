@@ -1,2 +1,4 @@
 /target/
 /web/node_modules/
+/.unpeel-todo.json
+/.unpeel-todo.json.*.tmp

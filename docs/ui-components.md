@@ -6,6 +6,18 @@ binary in any terminal with no Unpeel process, account, socket, protocol, or
 environment variables present. Component construction, input handling, and
 Ratatui rendering require zero bridge plumbing.
 
+The canonical proof is the standalone Todo App:
+
+```sh
+cargo run --example todo
+cargo run --example todo --no-default-features
+```
+
+Both commands run the complete Ratatui UI in any terminal. The first build also
+contains the optional hosted projection; without injected Host variables it is
+equally inert. Todo constructs Page, List, ListItem, Toggle, and Input values
+without passing a bridge into any component API.
+
 ## Standalone component layer
 
 A pure-TUI App can compile out the hosted presentation layer entirely:
@@ -55,8 +67,8 @@ parameters or prerequisites for terminal input and rendering.
 ## Optional hosted presentation layer
 
 When Unpeel hosts the App, it may opt into a component-first semantic model—
-`MarkdownEditor`, static `Media`, then `Page`, `List`, `ListItem`, `Input`, and
-other deliberate primitives—not a serialization of terminal cells or a
+`MarkdownEditor`, static `Media`, Page, List, ListItem, Toggle, Input, and other
+deliberate primitives—not a serialization of terminal cells or a
 portable clone of every Ratatui widget. The Rust terminal process remains the
 App and owns the model, reducer, validation, persistence, and commands.
 SwiftUI/AppKit and DOM become optional renderers of the same state alongside
@@ -394,6 +406,63 @@ identity for an agent. Adding a new embeddable control therefore requires an
 explicit schema and renderer change. This is the D16 boundary that prevents
 App Kit from becoming an unbounded remote widget toolkit.
 
+## Page component family v1: canonical Todo
+
+[`examples/todo.rs`](../examples/todo.rs) is the canonical App Kit demo and the
+source of the Page/List/ListItem/Toggle shared fixture. It has one model and one
+reducer:
+
+```text
+Page "Todos"
+├─ header: Input "New todo" → submit("add-todo", text)
+└─ body: List "todos"
+   └─ ListItem { id, label, done, delete }
+      └─ trailing: Toggle → change("set-done", bool)
+```
+
+The standalone presentation uses Ratatui's `List` plus App Kit's existing
+`InputField`. It remains fully usable with `ui-bridge` compiled out. When a
+Host endpoint is present, the same owned values serialize as one Page root;
+SwiftUI `PageView` maps them to a native `List`, `Toggle`, and `TextField`, and
+the web `PageRenderer` maps them to a list, checkbox controls, and a labeled
+text input. No renderer scrapes terminal output.
+
+Containment is deliberately closed:
+
+- Page's v1 header accepts Input and its body accepts List;
+- List accepts only ListItem rows; and
+- ListItem's `leading`, `trailing`, and `accessory` slots currently accept
+  at most one completion Toggle, never an arbitrary `UiNode`; its value and
+  the row's `done` state are one validated invariant.
+
+The wire declares all nested component ids and actions, so an agent can reason
+about “complete todo 2” rather than terminal coordinates. A neighboring agent
+attached by the existing Host with `view + edit` can submit, toggle, or delete
+through the same idempotent semantic events as a person. `UiBridge` enforces
+the edit grant for `change` and `submit`; the Todo reducer validates the target,
+persists the result, publishes a compact delta, and acknowledges the event.
+This is the smallest end-to-end proof of the always-on-App-plus-agents model.
+
+Todo also prototypes the portable save/restore convention. Its cwd file
+`.unpeel-todo.json` (override with `UNPEEL_TODO_PATH`) contains a stable format
+name, format version, App state-schema version, current semantic revision,
+next id, and App-owned todos. Each durable mutation is written to a private
+temporary file, synced, and atomically renamed before the new revision is
+published. A relaunch loads and validates this file before its first snapshot.
+Hosted production Apps may place the same model inside `UiStateStore`; the
+renderer is never the durable owner in either form.
+
+Page adds four compact operations: `toggleSetValue`, `inputSetValue`,
+`listInsertItem`, and `listRemoveItem`. A Toggle update also updates its row's
+denormalized `done` value, preserving one semantic invariant across all three
+renderers.
+
+The pane-level degradation rule is explicit: if a renderer does not recognize
+the Page root, any named slot kind, or any required Page/List/ListItem/Toggle/
+Input capability, it keeps the attachment alive and requests the complete
+terminal view for that pane. It never rejects the attach merely because its
+component vocabulary is older.
+
 ## MarkdownEditor v1
 
 The first component reuses `tui-textarea-2` rather than introducing another
@@ -500,9 +569,10 @@ Server-to-client deltas are part of the foundation, not a post-DataGrid
 optimization. `UiDelta` carries `baseRevision`, the next `revision`, and
 ordered component operations. Markdown supports range replacement, selection,
 presentation, dirty/read-only/title/placeholder/action updates; Media supports
-an atomic source-reference and intrinsic-size swap; and `replaceRoot` remains
-the escape hatch. Swift and web clients apply deltas to their last complete
-snapshot and expose the resulting complete state to renderers.
+an atomic source-reference and intrinsic-size swap; Page supports Toggle/Input
+updates and ListItem insertion/removal; and `replaceRoot` remains the escape
+hatch. Swift and web clients apply deltas to their last complete snapshot and
+expose the resulting complete state to renderers.
 
 A renderer advertises `serverDelta`. `UiBridge` sends operations only when its
 last queued projection for that renderer is the exact base revision and came
@@ -535,19 +605,13 @@ The next useful vocabulary is intentionally conventional:
 
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
-| `Page` | layout + block | top-level content with named regions and a safe-area/chrome contract |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
-| `List` | `ratatui::widgets::List` | contains only keyed `ListItem` values; native list selection and reorder |
-| `ListItem` | Ratatui `ListItem` | semantically keyed row with label/detail and constrained `leading`, `trailing`, and `accessory` slots |
-| `Toggle` | styled boolean row/control | boolean value, label, and one idempotent `set-value(bool)` action; SwiftUI `Toggle`; accessible web checkbox/switch |
-| `Media` | `ratatui-image` at explicit cell size | static reference-only image with intrinsic pixels, point sizing, contain/cover/fill, alt text, and optional activation; native `NSImage`, web `<img>` |
-| `Input` | existing `InputField` | native single-line input and validation |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
 | `Explorer` | existing `Explorer` | hierarchical file navigation and drops |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared
-fixtures. Media established the required pane-level terminal fallback for
-renderers that do not advertise or recognize a kind; every later component
-inherits that rule. This keeps App Kit opinionated and prevents its public API
-from becoming an unbounded remote widget toolkit.
+fixtures. Media established, and Page now exercises, the required pane-level
+terminal fallback for renderers that do not advertise or recognize a kind;
+every later component inherits that rule. This keeps App Kit opinionated and
+prevents its public API from becoming an unbounded remote widget toolkit.

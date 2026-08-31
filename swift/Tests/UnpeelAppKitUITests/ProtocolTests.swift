@@ -14,7 +14,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 13)
+    #expect(messages.count == 15)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -84,6 +84,34 @@ func sharedProtocolFixturesDecode() throws {
         return
     }
     #expect(reference.byteLength == 68)
+
+    guard case let .snapshot(todoSnapshot) = messages[13],
+          case let .page(page) = todoSnapshot.root.component,
+          case let .list(list) = page.body,
+          case let .input(input) = page.header,
+          case let .toggle(toggle)? = list.items[1].trailing
+    else {
+        Issue.record("fourteenth fixture must contain the canonical Todo Page")
+        return
+    }
+    #expect(page.title == "Todos")
+    #expect(list.items.map(\.label) == [
+        "Run the standalone TUI",
+        "Attach SwiftUI or web",
+        "Invite an agent with edit grant",
+    ])
+    #expect(input.submit == "add-todo")
+    #expect(toggle.value == false)
+    #expect(page.requiredCapabilities == ["page", "list", "listItem", "input", "toggle"])
+
+    guard case let .delta(todoDelta) = messages[14],
+          case let .page(updatedPage) = try todoSnapshot.applying(todoDelta).root.component,
+          case let .list(updatedList) = updatedPage.body
+    else {
+        Issue.record("fifteenth fixture must update Todo Page")
+        return
+    }
+    #expect(updatedList.items[1].done)
 }
 
 @Test
@@ -232,6 +260,66 @@ func unknownComponentDecodesForTerminalFallbackWithoutRejectingAttachment() thro
     }
     #expect(kind == "futureComponent")
     #expect(snapshot.root.component.requiredCapability == nil)
+}
+
+@Test
+func unknownPageSlotDecodesAndRequiresTerminalFallback() throws {
+    let frame = Data(#"{"type":"snapshot","protocol":"unpeel.ui","protocolVersion":1,"appInstanceId":"app-fixture","clientId":"client-1","viewId":"main","revision":1,"root":{"id":"page","type":"page","title":"Future Page","body":{"type":"list","id":"rows","items":[{"id":"row-1","label":"Row","trailing":{"type":"futureControl","id":"control-1"}}]}}}"#.utf8)
+    guard case let .snapshot(snapshot) = try JSONDecoder().decode(UIMessage.self, from: frame),
+          case let .page(page) = snapshot.root.component,
+          case let .list(list) = page.body,
+          case let .unsupported(kind)? = list.items[0].trailing
+    else {
+        Issue.record("future row slot should stay decodable")
+        return
+    }
+    #expect(kind == "futureControl")
+    #expect(page.requiredCapabilities == nil)
+    #expect(snapshot.root.component.requiredCapability == nil)
+}
+
+@Test
+func pageInputAndListDeltasPreserveTheClosedRoot() throws {
+    let first = UIListItemSpec(id: "todo-1", label: "First")
+    let snapshot = UISnapshot(
+        appInstanceID: "app-fixture",
+        clientID: "client-1",
+        viewID: "main",
+        revision: 1,
+        root: UINode(
+            id: "todo-page",
+            component: .page(PageSpec(
+                title: "Todos",
+                header: .input(UIInputSpec(id: "new-todo", label: "New todo")),
+                body: .list(UIListSpec(id: "todos", items: [first]))
+            ))
+        )
+    )
+    let delta = UIDelta(
+        appInstanceID: "app-fixture",
+        clientID: "client-1",
+        viewID: "main",
+        baseRevision: 1,
+        revision: 2,
+        operations: [
+            .inputSetValue(nodeID: "new-todo", value: "draft"),
+            .listInsertItem(
+                listID: "todos",
+                index: 1,
+                item: UIListItemSpec(id: "todo-2", label: "Second")
+            ),
+            .listRemoveItem(listID: "todos", itemID: "todo-1"),
+        ]
+    )
+    guard case let .page(page) = try snapshot.applying(delta).root.component,
+          case let .input(input)? = page.header,
+          case let .list(list) = page.body
+    else {
+        Issue.record("Page deltas should preserve the Page root")
+        return
+    }
+    #expect(input.value == "draft")
+    #expect(list.items.map(\.id) == ["todo-2"])
 }
 
 @Test

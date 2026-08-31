@@ -5,10 +5,13 @@ import {
   diffText,
   isMarkdownEditorNode,
   isMediaNode,
+  isPageNode,
+  isRenderablePageNode,
   negotiateUiProtocolVersion,
   applyUiDelta,
   resolveMediaPointSize,
   uiNodeCapability,
+  uiNodeCapabilities,
   verifyMediaBlobBytes,
   type UiAttached,
   type UiDelta,
@@ -25,7 +28,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(13);
+    expect(messages).toHaveLength(15);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -64,6 +67,28 @@ describe("shared protocol", () => {
     const updatedMedia = applyUiDelta(mediaSnapshot, mediaDelta);
     if (!isMediaNode(updatedMedia.root)) throw new Error("expected Media delta result");
     expect(updatedMedia.root.source.kind).toBe("blob");
+
+    const todoSnapshot = messages[13] as UiSnapshot;
+    if (!isPageNode(todoSnapshot.root) || !isRenderablePageNode(todoSnapshot.root)) {
+      throw new Error("expected canonical Todo Page fixture");
+    }
+    expect(todoSnapshot.root.title).toBe("Todos");
+    expect(todoSnapshot.root.body.items.map((item) => item.label)).toEqual([
+      "Run the standalone TUI",
+      "Attach SwiftUI or web",
+      "Invite an agent with edit grant",
+    ]);
+    expect(uiNodeCapabilities(todoSnapshot.root)).toEqual([
+      "page",
+      "list",
+      "listItem",
+      "input",
+      "toggle",
+    ]);
+    const todoDelta = messages[14] as UiDelta;
+    const updatedTodo = applyUiDelta(todoSnapshot, todoDelta);
+    if (!isRenderablePageNode(updatedTodo.root)) throw new Error("expected Todo Page delta");
+    expect(updatedTodo.root.body.items[1]?.done).toBe(true);
   });
 
   test("builds the same command envelope", () => {
@@ -138,6 +163,73 @@ describe("shared protocol", () => {
     if (future.type === "snapshot") {
       expect(uiNodeCapability(future.root)).toBeUndefined();
     }
+  });
+
+  test("keeps unknown Page slots attached but requires terminal fallback", () => {
+    const future = decodeUiMessage({
+      type: "snapshot",
+      protocol: "unpeel.ui",
+      protocolVersion: 1,
+      appInstanceId: "app-fixture",
+      clientId: "client-1",
+      viewId: "main",
+      revision: 1,
+      root: {
+        id: "page",
+        type: "page",
+        title: "Future Page",
+        body: {
+          type: "list",
+          id: "rows",
+          items: [{
+            id: "row-1",
+            label: "Row",
+            trailing: { type: "futureControl", id: "control-1" },
+          }],
+        },
+      },
+    });
+    expect(future.type).toBe("snapshot");
+    if (future.type !== "snapshot") return;
+    expect(isPageNode(future.root)).toBe(true);
+    expect(isRenderablePageNode(future.root)).toBe(false);
+    expect(uiNodeCapabilities(future.root)).toBeUndefined();
+  });
+
+  test("applies Input and List deltas to a Page without replacing its root", async () => {
+    const lines = (await Bun.file(new URL(
+      "../../protocol/unpeel-ui-v1.ndjson",
+      import.meta.url,
+    )).text()).trim().split("\n");
+    const snapshot = decodeUiMessage(lines[13]!) as UiSnapshot;
+    const delta: UiDelta = {
+      type: "delta",
+      protocol: "unpeel.ui",
+      protocolVersion: 1,
+      appInstanceId: snapshot.appInstanceId,
+      clientId: snapshot.clientId,
+      viewId: snapshot.viewId,
+      baseRevision: 11,
+      revision: 12,
+      operations: [
+        { op: "inputSetValue", nodeId: "new-todo", value: "draft" },
+        {
+          op: "listInsertItem",
+          listId: "todos",
+          index: 3,
+          item: { id: "todo-4", label: "Fourth", done: false },
+        },
+        { op: "listRemoveItem", listId: "todos", itemId: "todo-1" },
+      ],
+    };
+    const updated = applyUiDelta(snapshot, delta);
+    if (!isRenderablePageNode(updated.root)) throw new Error("expected updated Page");
+    expect(updated.root.header?.value).toBe("draft");
+    expect(updated.root.body.items.map((item) => item.id)).toEqual([
+      "todo-2",
+      "todo-3",
+      "todo-4",
+    ]);
   });
 });
 
@@ -398,6 +490,52 @@ describe("WorkspaceUiSession", () => {
     expect(fallbacks).toEqual(["media", "futureGrid"]);
     expect(socket.readyState).toBe(1);
     expect(socket.sent.join("\n")).not.toContain("/private/app/secret.png");
+    session.stop();
+  });
+
+  test("falls back when any nested Page capability is missing", () => {
+    const socket = new FakeSocket();
+    const fallbacks: string[] = [];
+    const session = new WorkspaceUiSession({
+      url: "wss://workspace.example/apps/terminal-9/ui",
+      appSessionId: "terminal-9",
+      clientId: "client-alice-web",
+      rendererId: "renderer-alice-web",
+      viewId: "main",
+      supportedComponentCapabilities: ["page", "list", "listItem", "input"],
+      onSnapshot: () => { throw new Error("Page should use terminal fallback"); },
+      onTerminalFallback: (kind) => fallbacks.push(kind),
+      webSocketFactory: () => socket,
+    });
+    session.start();
+    socket.open();
+    socket.message(attachedFrame());
+    socket.message({
+      ...snapshotFrame(),
+      root: {
+        id: "todo-page",
+        type: "page",
+        title: "Todos",
+        body: {
+          type: "list",
+          id: "todos",
+          items: [{
+            id: "todo-1",
+            label: "First",
+            done: false,
+            trailing: {
+              type: "toggle",
+              id: "todo-1-toggle",
+              label: "Completed",
+              value: false,
+              setValue: "set-done",
+            },
+          }],
+        },
+      },
+    });
+    expect(fallbacks).toEqual(["page"]);
+    expect(socket.readyState).toBe(1);
     session.stop();
   });
 });

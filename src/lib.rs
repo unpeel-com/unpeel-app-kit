@@ -11,6 +11,7 @@
 
 mod agent;
 mod click;
+mod components;
 mod context;
 mod drag;
 mod drop_target;
@@ -46,6 +47,11 @@ pub use agent::{
     send_reference_to_agent, send_to_agent,
 };
 pub use click::{DEFAULT_DOUBLE_CLICK_INTERVAL, DoubleClickTracker};
+pub use components::{
+    ComponentValidationError, INPUT_COMPONENT_CAPABILITY, Input, LIST_COMPONENT_CAPABILITY,
+    LIST_ITEM_COMPONENT_CAPABILITY, List, ListItem, ListItemSlot, PAGE_COMPONENT_CAPABILITY, Page,
+    PageBodySlot, PageHeaderSlot, PageTheme, PageWidget, TOGGLE_COMPONENT_CAPABILITY, Toggle,
+};
 pub use context::{
     AppContext, AppMode, ProjectContext, UnpeelUser, WorkspaceContext, WorktreeContext,
 };

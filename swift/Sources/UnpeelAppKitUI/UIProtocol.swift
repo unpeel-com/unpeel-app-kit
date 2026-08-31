@@ -8,9 +8,19 @@ public enum UnpeelUIProtocol {
     public static let deltaCapability = "serverDelta"
     public static let markdownEditorCapability = "markdownEditor"
     public static let mediaCapability = "media"
+    public static let pageCapability = "page"
+    public static let listCapability = "list"
+    public static let listItemCapability = "listItem"
+    public static let toggleCapability = "toggle"
+    public static let inputCapability = "input"
     public static let supportedComponentCapabilities = [
         markdownEditorCapability,
         mediaCapability,
+        pageCapability,
+        listCapability,
+        listItemCapability,
+        toggleCapability,
+        inputCapability,
     ]
     private static let maximumWireVersion = Int(UInt32.max)
 
@@ -735,9 +745,264 @@ private func ratioCeil(_ value: Int, _ numerator: Int, _ denominator: Int) -> In
     return Int(min(resolved, UInt64(UInt32.max)))
 }
 
+public struct UIToggleSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let label: String
+    public let value: Bool
+    public let setValue: String
+
+    public init(id: String, label: String, value: Bool, setValue: String) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.setValue = setValue
+    }
+}
+
+public enum UIListItemSlot: Equatable, Hashable, Sendable {
+    case toggle(UIToggleSpec)
+    case unsupported(kind: String)
+
+    public var kind: String {
+        switch self {
+        case .toggle: "toggle"
+        case let .unsupported(kind): kind
+        }
+    }
+}
+
+extension UIListItemSlot: Codable {
+    enum CodingKeys: String, CodingKey { case type }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .type)
+        switch kind {
+        case "toggle": self = .toggle(try UIToggleSpec(from: decoder))
+        default: self = .unsupported(kind: kind)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .toggle(toggle):
+            try container.encode("toggle", forKey: .type)
+            try toggle.encode(to: encoder)
+        case let .unsupported(kind):
+            try container.encode(kind, forKey: .type)
+        }
+    }
+}
+
+public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let label: String
+    public var done: Bool
+    public var leading: UIListItemSlot?
+    public var trailing: UIListItemSlot?
+    public var accessory: UIListItemSlot?
+    public let delete: String?
+
+    public init(
+        id: String,
+        label: String,
+        done: Bool = false,
+        leading: UIListItemSlot? = nil,
+        trailing: UIListItemSlot? = nil,
+        accessory: UIListItemSlot? = nil,
+        delete: String? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.done = done
+        self.leading = leading
+        self.trailing = trailing
+        self.accessory = accessory
+        self.delete = delete
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, done, leading, trailing, accessory, delete
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
+        leading = try container.decodeIfPresent(UIListItemSlot.self, forKey: .leading)
+        trailing = try container.decodeIfPresent(UIListItemSlot.self, forKey: .trailing)
+        accessory = try container.decodeIfPresent(UIListItemSlot.self, forKey: .accessory)
+        delete = try container.decodeIfPresent(String.self, forKey: .delete)
+        let toggles = [leading, trailing, accessory].compactMap { slot -> UIToggleSpec? in
+            guard case let .toggle(toggle) = slot else { return nil }
+            return toggle
+        }
+        guard toggles.count <= 1, toggles.first?.value ?? done == done else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .done,
+                in: container,
+                debugDescription: "ListItem accepts one completion Toggle whose value matches done"
+            )
+        }
+    }
+}
+
+public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public var items: [UIListItemSpec]
+    public let emptyMessage: String
+
+    public init(id: String, items: [UIListItemSpec], emptyMessage: String = "") {
+        self.id = id
+        self.items = items
+        self.emptyMessage = emptyMessage
+    }
+
+    enum CodingKeys: String, CodingKey { case id, items, emptyMessage }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        items = try container.decode([UIListItemSpec].self, forKey: .items)
+        emptyMessage = try container.decodeIfPresent(String.self, forKey: .emptyMessage) ?? ""
+    }
+}
+
+public struct UIInputSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let label: String
+    public var value: String
+    public let placeholder: String
+    public let setValue: String?
+    public let submit: String?
+
+    public init(
+        id: String,
+        label: String,
+        value: String = "",
+        placeholder: String = "",
+        setValue: String? = nil,
+        submit: String? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.placeholder = placeholder
+        self.setValue = setValue
+        self.submit = submit
+    }
+
+    enum CodingKeys: String, CodingKey { case id, label, value, placeholder, setValue, submit }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        value = try container.decodeIfPresent(String.self, forKey: .value) ?? ""
+        placeholder = try container.decodeIfPresent(String.self, forKey: .placeholder) ?? ""
+        setValue = try container.decodeIfPresent(String.self, forKey: .setValue)
+        submit = try container.decodeIfPresent(String.self, forKey: .submit)
+    }
+}
+
+public enum UIPageHeaderSlot: Equatable, Hashable, Sendable {
+    case input(UIInputSpec)
+    case unsupported(kind: String)
+}
+
+extension UIPageHeaderSlot: Codable {
+    enum CodingKeys: String, CodingKey { case type }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .type)
+        switch kind {
+        case "input": self = .input(try UIInputSpec(from: decoder))
+        default: self = .unsupported(kind: kind)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .input(input):
+            try container.encode("input", forKey: .type)
+            try input.encode(to: encoder)
+        case let .unsupported(kind):
+            try container.encode(kind, forKey: .type)
+        }
+    }
+}
+
+public enum UIPageBodySlot: Equatable, Hashable, Sendable {
+    case list(UIListSpec)
+    case unsupported(kind: String)
+}
+
+extension UIPageBodySlot: Codable {
+    enum CodingKeys: String, CodingKey { case type }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .type)
+        switch kind {
+        case "list": self = .list(try UIListSpec(from: decoder))
+        default: self = .unsupported(kind: kind)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .list(list):
+            try container.encode("list", forKey: .type)
+            try list.encode(to: encoder)
+        case let .unsupported(kind):
+            try container.encode(kind, forKey: .type)
+        }
+    }
+}
+
+public struct PageSpec: Codable, Equatable, Hashable, Sendable {
+    public let title: String
+    public var header: UIPageHeaderSlot?
+    public var body: UIPageBodySlot
+
+    public init(title: String, header: UIPageHeaderSlot? = nil, body: UIPageBodySlot) {
+        self.title = title
+        self.header = header
+        self.body = body
+    }
+
+    public var requiredCapabilities: [String]? {
+        var capabilities = [
+            UnpeelUIProtocol.pageCapability,
+            UnpeelUIProtocol.listCapability,
+            UnpeelUIProtocol.listItemCapability,
+        ]
+        if let header {
+            guard case .input = header else { return nil }
+            capabilities.append(UnpeelUIProtocol.inputCapability)
+        }
+        guard case let .list(list) = body else { return nil }
+        var hasToggle = false
+        for item in list.items {
+            for slot in [item.leading, item.trailing, item.accessory].compactMap({ $0 }) {
+                guard case .toggle = slot else { return nil }
+                hasToggle = true
+            }
+        }
+        if hasToggle { capabilities.append(UnpeelUIProtocol.toggleCapability) }
+        return capabilities
+    }
+}
+
 public enum UIComponent: Equatable, Sendable {
     case markdownEditor(MarkdownEditorSpec)
     case media(MediaSpec)
+    case page(PageSpec)
     case unsupported(kind: String)
 
     public var kind: String {
@@ -746,17 +1011,25 @@ public enum UIComponent: Equatable, Sendable {
             "markdownEditor"
         case .media:
             "media"
+        case .page:
+            "page"
         case let .unsupported(kind):
             kind
         }
     }
 
     public var requiredCapability: String? {
+        requiredCapabilities?.first
+    }
+
+    public var requiredCapabilities: [String]? {
         switch self {
         case .markdownEditor:
-            UnpeelUIProtocol.markdownEditorCapability
+            [UnpeelUIProtocol.markdownEditorCapability]
         case .media:
-            UnpeelUIProtocol.mediaCapability
+            [UnpeelUIProtocol.mediaCapability]
+        case let .page(page):
+            page.requiredCapabilities
         case .unsupported:
             nil
         }
@@ -788,6 +1061,8 @@ extension UINode: Codable {
             component = .markdownEditor(try MarkdownEditorSpec(from: decoder))
         case "media":
             component = .media(try MediaSpec(from: decoder))
+        case "page":
+            component = .page(try PageSpec(from: decoder))
         default:
             component = .unsupported(kind: kind)
         }
@@ -803,6 +1078,9 @@ extension UINode: Codable {
         case let .media(media):
             try container.encode("media", forKey: .type)
             try media.encode(to: encoder)
+        case let .page(page):
+            try container.encode("page", forKey: .type)
+            try page.encode(to: encoder)
         case let .unsupported(kind):
             try container.encode(kind, forKey: .type)
         }

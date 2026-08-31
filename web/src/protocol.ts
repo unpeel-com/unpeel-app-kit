@@ -5,9 +5,19 @@ export const UI_PROTOCOL_VERSION = UI_PROTOCOL_MAX_VERSION;
 export const UI_DELTA_CAPABILITY = "serverDelta" as const;
 export const UI_MARKDOWN_EDITOR_CAPABILITY = "markdownEditor" as const;
 export const UI_MEDIA_CAPABILITY = "media" as const;
+export const UI_PAGE_CAPABILITY = "page" as const;
+export const UI_LIST_CAPABILITY = "list" as const;
+export const UI_LIST_ITEM_CAPABILITY = "listItem" as const;
+export const UI_TOGGLE_CAPABILITY = "toggle" as const;
+export const UI_INPUT_CAPABILITY = "input" as const;
 export const UI_COMPONENT_CAPABILITIES = [
   UI_MARKDOWN_EDITOR_CAPABILITY,
   UI_MEDIA_CAPABILITY,
+  UI_PAGE_CAPABILITY,
+  UI_LIST_CAPABILITY,
+  UI_LIST_ITEM_CAPABILITY,
+  UI_TOGGLE_CAPABILITY,
+  UI_INPUT_CAPABILITY,
 ] as const;
 export const MAX_INLINE_MEDIA_BYTES = 256 * 1024;
 
@@ -162,6 +172,56 @@ export interface MediaNode {
   activate?: string;
 }
 
+export interface ToggleSpec {
+  type: "toggle";
+  id: string;
+  label: string;
+  value: boolean;
+  setValue: string;
+}
+
+export interface UnsupportedComponentSlot {
+  type: string;
+  [field: string]: unknown;
+}
+
+export type ListItemSlot = ToggleSpec | UnsupportedComponentSlot;
+
+export interface ListItemSpec {
+  id: string;
+  label: string;
+  done?: boolean;
+  leading?: ListItemSlot;
+  trailing?: ListItemSlot;
+  accessory?: ListItemSlot;
+  delete?: string;
+}
+
+export interface ListSpec {
+  type: "list";
+  id: string;
+  items: ListItemSpec[];
+  emptyMessage?: string;
+}
+
+export interface InputSpec {
+  type: "input";
+  id: string;
+  label: string;
+  value?: string;
+  placeholder?: string;
+  setValue?: string;
+  submit?: string;
+}
+
+export interface PageNode {
+  id: string;
+  type: "page";
+  title: string;
+  header?: InputSpec | UnsupportedComponentSlot;
+  body: ListSpec | UnsupportedComponentSlot;
+}
+
 /** Opaque root retained only so the session can request terminal fallback. */
 export interface UnsupportedUiNode {
   id: string;
@@ -169,7 +229,7 @@ export interface UnsupportedUiNode {
   [field: string]: unknown;
 }
 
-export type UiNode = MarkdownEditorNode | MediaNode | UnsupportedUiNode;
+export type UiNode = MarkdownEditorNode | MediaNode | PageNode | UnsupportedUiNode;
 
 export function isMarkdownEditorNode(node: UiNode): node is MarkdownEditorNode {
   return node.type === "markdownEditor";
@@ -179,11 +239,54 @@ export function isMediaNode(node: UiNode): node is MediaNode {
   return node.type === "media";
 }
 
+export function isPageNode(node: UiNode): node is PageNode {
+  return node.type === "page";
+}
+
+export function isToggleSlot(slot: ListItemSlot): slot is ToggleSpec {
+  return slot.type === "toggle";
+}
+
+export function isListSpec(slot: ListSpec | UnsupportedComponentSlot): slot is ListSpec {
+  return slot.type === "list" && Array.isArray(slot.items);
+}
+
+export function isInputSpec(slot: InputSpec | UnsupportedComponentSlot): slot is InputSpec {
+  return slot.type === "input" && typeof slot.id === "string";
+}
+
+/** A Page is renderable only when every named slot uses this wrapper's vocabulary. */
+export function isRenderablePageNode(node: UiNode): node is PageNode & {
+  header?: InputSpec;
+  body: ListSpec;
+} {
+  if (!isPageNode(node) || !isListSpec(node.body)) return false;
+  if (node.header !== undefined && !isInputSpec(node.header)) return false;
+  return node.body.items.every((item) => [item.leading, item.trailing, item.accessory]
+    .every((slot) => slot === undefined || slot.type === "toggle"));
+}
+
 /** Capability required for a known root, or undefined for an unknown kind. */
 export function uiNodeCapability(node: UiNode): string | undefined {
-  if (isMarkdownEditorNode(node)) return UI_MARKDOWN_EDITOR_CAPABILITY;
-  if (isMediaNode(node)) return UI_MEDIA_CAPABILITY;
-  return undefined;
+  return uiNodeCapabilities(node)?.[0];
+}
+
+/** All capabilities needed for a known closed tree, or undefined for fallback. */
+export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined {
+  if (isMarkdownEditorNode(node)) return [UI_MARKDOWN_EDITOR_CAPABILITY];
+  if (isMediaNode(node)) return [UI_MEDIA_CAPABILITY];
+  if (!isRenderablePageNode(node)) return undefined;
+  const capabilities: string[] = [
+    UI_PAGE_CAPABILITY,
+    UI_LIST_CAPABILITY,
+    UI_LIST_ITEM_CAPABILITY,
+  ];
+  if (node.header !== undefined) capabilities.push(UI_INPUT_CAPABILITY);
+  if (node.body.items.some((item) => [item.leading, item.trailing, item.accessory]
+    .some((slot) => slot?.type === "toggle"))) {
+    capabilities.push(UI_TOGGLE_CAPABILITY);
+  }
+  return capabilities;
 }
 
 /** Filesystem paths must be translated by the Host before entering a browser. */
@@ -217,7 +320,11 @@ export type UiDeltaOperation =
     nodeId: string;
     source: MediaSource;
     intrinsic: MediaPixelSize;
-  };
+  }
+  | { op: "toggleSetValue"; nodeId: string; value: boolean }
+  | { op: "inputSetValue"; nodeId: string; value: string }
+  | { op: "listInsertItem"; listId: string; index: number; item: ListItemSpec }
+  | { op: "listRemoveItem"; listId: string; itemId: string };
 
 export interface UiDelta {
   type: "delta";
@@ -542,6 +649,57 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       intrinsic: operation.intrinsic,
     };
   }
+  if (operation.op === "toggleSetValue") {
+    const page = requireRenderablePage(root);
+    let matched = false;
+    const items = page.body.items.map((item) => {
+      let itemMatched = false;
+      const update = (slot: ListItemSlot | undefined): ListItemSlot | undefined => {
+        if (slot === undefined || !isToggleSlot(slot) || slot.id !== operation.nodeId) return slot;
+        matched = true;
+        itemMatched = true;
+        return { ...slot, value: operation.value };
+      };
+      const next = {
+        ...item,
+        leading: update(item.leading),
+        trailing: update(item.trailing),
+        accessory: update(item.accessory),
+      };
+      return itemMatched ? { ...next, done: operation.value } : next;
+    });
+    if (!matched) throw new Error("Delta targets an unavailable Toggle");
+    return { ...page, body: { ...page.body, items } };
+  }
+  if (operation.op === "inputSetValue") {
+    const page = requireRenderablePage(root);
+    if (page.header === undefined || page.header.id !== operation.nodeId) {
+      throw new Error("Delta targets an unavailable Input");
+    }
+    return { ...page, header: { ...page.header, value: operation.value } };
+  }
+  if (operation.op === "listInsertItem") {
+    const page = requireRenderablePage(root);
+    if (page.body.id !== operation.listId
+      || operation.index < 0
+      || operation.index > page.body.items.length) {
+      throw new Error("Delta targets an unavailable List insertion");
+    }
+    const items = page.body.items.slice();
+    items.splice(operation.index, 0, operation.item);
+    return { ...page, body: { ...page.body, items } };
+  }
+  if (operation.op === "listRemoveItem") {
+    const page = requireRenderablePage(root);
+    if (page.body.id !== operation.listId) {
+      throw new Error("Delta targets an unavailable List");
+    }
+    const items = page.body.items.filter((item) => item.id !== operation.itemId);
+    if (items.length === page.body.items.length) {
+      throw new Error("Delta targets an unavailable ListItem");
+    }
+    return { ...page, body: { ...page.body, items } };
+  }
   if (root.id !== operation.nodeId || !isMarkdownEditorNode(root)) {
     throw new Error("Delta targets an unavailable Markdown node");
   }
@@ -578,6 +736,11 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       throw new Error(`Unsupported delta operation ${String(unreachable)}`);
     }
   }
+}
+
+function requireRenderablePage(root: UiNode): PageNode & { header?: InputSpec; body: ListSpec } {
+  if (!isRenderablePageNode(root)) throw new Error("Delta targets an unavailable Page");
+  return root;
 }
 
 function utf16PositionOffset(text: string, position: TextPosition): number {
@@ -686,6 +849,10 @@ function validateNode(value: unknown, path: string): void {
     validateMediaNode(root, path);
     return;
   }
+  if (root.type === "page") {
+    validatePageNode(root, path);
+    return;
+  }
   if (root.type !== "markdownEditor") {
     return;
   }
@@ -705,6 +872,77 @@ function validateNode(value: unknown, path: string): void {
     if (root[field] !== undefined) requireString(root[field], `${path}.${field}`, true);
   }
   if (root.actions !== undefined) validateMarkdownActions(root.actions, `${path}.actions`);
+}
+
+function validatePageNode(root: Record<string, unknown>, path: string): void {
+  requireString(root.title, `${path}.title`, true);
+  const ids = new Set<string>();
+  const register = (value: unknown, valuePath: string): void => {
+    requireIdentifier(value, valuePath);
+    if (ids.has(value as string)) throw new Error(`${valuePath} duplicates a component id`);
+    ids.add(value as string);
+  };
+  if (root.header !== undefined) {
+    const header = record(root.header, `${path}.header`);
+    requireIdentifier(header.type, `${path}.header.type`);
+    if (header.type === "input") {
+      register(header.id, `${path}.header.id`);
+      requireString(header.label, `${path}.header.label`, true);
+      if (header.value !== undefined) requireString(header.value, `${path}.header.value`, true);
+      if (header.placeholder !== undefined) {
+        requireString(header.placeholder, `${path}.header.placeholder`, true);
+      }
+      if (header.setValue !== undefined) {
+        requireIdentifier(header.setValue, `${path}.header.setValue`);
+      }
+      if (header.submit !== undefined) requireIdentifier(header.submit, `${path}.header.submit`);
+    }
+  }
+  const body = record(root.body, `${path}.body`);
+  requireIdentifier(body.type, `${path}.body.type`);
+  if (body.type !== "list") return;
+  register(body.id, `${path}.body.id`);
+  if (body.emptyMessage !== undefined) {
+    requireString(body.emptyMessage, `${path}.body.emptyMessage`, true);
+  }
+  if (!Array.isArray(body.items) || body.items.length > 100_000) {
+    throw new Error(`${path}.body.items must contain at most 100000 rows`);
+  }
+  for (const [index, itemValue] of body.items.entries()) {
+    validateListItem(itemValue, `${path}.body.items[${index}]`, register);
+  }
+}
+
+function validateListItem(
+  value: unknown,
+  path: string,
+  register: (value: unknown, valuePath: string) => void = requireIdentifier,
+): void {
+  const item = record(value, path);
+  register(item.id, `${path}.id`);
+  requireString(item.label, `${path}.label`, true);
+  if (item.done !== undefined && typeof item.done !== "boolean") {
+    throw new Error(`${path}.done must be a boolean`);
+  }
+  const toggleValues: boolean[] = [];
+  if (item.delete !== undefined) requireIdentifier(item.delete, `${path}.delete`);
+  for (const name of ["leading", "trailing", "accessory"] as const) {
+    if (item[name] === undefined) continue;
+    const slot = record(item[name], `${path}.${name}`);
+    requireIdentifier(slot.type, `${path}.${name}.type`);
+    if (slot.type !== "toggle") continue;
+    register(slot.id, `${path}.${name}.id`);
+    requireString(slot.label, `${path}.${name}.label`, true);
+    if (typeof slot.value !== "boolean") {
+      throw new Error(`${path}.${name}.value must be a boolean`);
+    }
+    toggleValues.push(slot.value);
+    requireIdentifier(slot.setValue, `${path}.${name}.setValue`);
+  }
+  if (toggleValues.length > 1) throw new Error(`${path} accepts at most one completion Toggle`);
+  if (toggleValues.length === 1 && toggleValues[0] !== (item.done ?? false)) {
+    throw new Error(`${path}.done must match its completion Toggle`);
+  }
 }
 
 function validateMediaNode(root: Record<string, unknown>, path: string): void {
@@ -873,6 +1111,23 @@ function validateDeltaOperation(value: unknown, path: string): void {
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       validateMediaSource(operation.source, `${path}.source`);
       validateMediaPixelSize(operation.intrinsic, `${path}.intrinsic`);
+      return;
+    case "toggleSetValue":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (typeof operation.value !== "boolean") throw new Error(`${path}.value must be boolean`);
+      return;
+    case "inputSetValue":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      requireString(operation.value, `${path}.value`, true);
+      return;
+    case "listInsertItem":
+      requireIdentifier(operation.listId, `${path}.listId`);
+      requireSafeInteger(operation.index, `${path}.index`);
+      validateListItem(operation.item, `${path}.item`);
+      return;
+    case "listRemoveItem":
+      requireIdentifier(operation.listId, `${path}.listId`);
+      requireIdentifier(operation.itemId, `${path}.itemId`);
       return;
     default:
       throw new Error(`Unsupported delta operation ${String(operation.op)}`);

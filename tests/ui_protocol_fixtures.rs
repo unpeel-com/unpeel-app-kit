@@ -2,7 +2,9 @@
 
 use std::io::{BufReader, Cursor};
 
-use unpeel_app_kit::{MediaSource, UiComponent, UiEventValue, UiMessage, read_ui_message};
+use unpeel_app_kit::{
+    ListItemSlot, MediaSource, UiComponent, UiEventValue, UiMessage, read_ui_message,
+};
 
 const STREAM: &str = include_str!("../protocol/unpeel-ui-v1.ndjson");
 
@@ -14,7 +16,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 13);
+    assert_eq!(messages.len(), 15);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -88,4 +90,31 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
             ..
         }
     ));
+
+    let UiMessage::Snapshot(todo_snapshot) = &messages[13] else {
+        panic!("fourteenth fixture must be the canonical Todo Page");
+    };
+    let UiComponent::Page(page) = &todo_snapshot.root.element else {
+        panic!("Todo fixture must contain Page");
+    };
+    assert_eq!(page.title, "Todos");
+    assert_eq!(page.list().items.len(), 3);
+    assert_eq!(page.list().items[0].label, "Run the standalone TUI");
+    let Some(ListItemSlot::Toggle(toggle)) = &page.list().items[1].trailing else {
+        panic!("Todo rows must expose their completion Toggle in a named slot");
+    };
+    assert!(!toggle.value);
+    assert_eq!(
+        page.input_spec().unwrap().submit.as_deref(),
+        Some("add-todo")
+    );
+
+    let UiMessage::Delta(todo_delta) = &messages[14] else {
+        panic!("fifteenth fixture must update Todo through a compact delta");
+    };
+    let updated = todo_snapshot.applying(todo_delta).unwrap();
+    let UiComponent::Page(page) = updated.root.element else {
+        panic!("Todo delta must preserve Page");
+    };
+    assert!(page.list().items[1].done);
 }

@@ -324,6 +324,120 @@
         "activate": { "$ref": "#/$defs/identifier" }
       }
     },
+    "toggle": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "label", "value", "setValue"],
+      "properties": {
+        "type": { "const": "toggle" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "maxLength": 4096 },
+        "value": { "type": "boolean" },
+        "setValue": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "unsupportedRowSlot": {
+      "description": "Opaque future row control retained so a renderer can fall back to the terminal pane.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": { "type": { "$ref": "#/$defs/identifier" } },
+      "not": {
+        "required": ["type"],
+        "properties": { "type": { "const": "toggle" } }
+      }
+    },
+    "listItemSlot": {
+      "oneOf": [
+        { "$ref": "#/$defs/toggle" },
+        { "$ref": "#/$defs/unsupportedRowSlot" }
+      ]
+    },
+    "listItem": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "label"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "maxLength": 16384 },
+        "done": { "type": "boolean", "default": false },
+        "leading": { "$ref": "#/$defs/listItemSlot" },
+        "trailing": { "$ref": "#/$defs/listItemSlot" },
+        "accessory": { "$ref": "#/$defs/listItemSlot" },
+        "delete": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "list": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "items"],
+      "properties": {
+        "type": { "const": "list" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "items": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": { "$ref": "#/$defs/listItem" }
+        },
+        "emptyMessage": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "label"],
+      "properties": {
+        "type": { "const": "input" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "maxLength": 4096 },
+        "value": { "type": "string", "maxLength": 1048576 },
+        "placeholder": { "type": "string", "maxLength": 4096 },
+        "setValue": { "$ref": "#/$defs/identifier" },
+        "submit": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "unsupportedHeaderSlot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": { "type": { "$ref": "#/$defs/identifier" } },
+      "not": {
+        "required": ["type"],
+        "properties": { "type": { "const": "input" } }
+      }
+    },
+    "unsupportedBodySlot": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": { "type": { "$ref": "#/$defs/identifier" } },
+      "not": {
+        "required": ["type"],
+        "properties": { "type": { "const": "list" } }
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "type", "title", "body"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "const": "page" },
+        "title": { "type": "string", "maxLength": 4096 },
+        "header": {
+          "oneOf": [
+            { "$ref": "#/$defs/input" },
+            { "$ref": "#/$defs/unsupportedHeaderSlot" }
+          ]
+        },
+        "body": {
+          "oneOf": [
+            { "$ref": "#/$defs/list" },
+            { "$ref": "#/$defs/unsupportedBodySlot" }
+          ]
+        }
+      }
+    },
     "unsupportedComponent": {
       "description": "Opaque future root retained only so a renderer can keep its attachment and expose the terminal pane.",
       "type": "object",
@@ -336,7 +450,7 @@
       "not": {
         "required": ["type"],
         "properties": {
-          "type": { "enum": ["markdownEditor", "media"] }
+          "type": { "enum": ["markdownEditor", "media", "page"] }
         }
       }
     },
@@ -365,6 +479,7 @@
           "oneOf": [
             { "$ref": "#/$defs/markdownEditor" },
             { "$ref": "#/$defs/media" },
+            { "$ref": "#/$defs/page" },
             { "$ref": "#/$defs/unsupportedComponent" }
           ]
         }
@@ -382,6 +497,7 @@
               "oneOf": [
                 { "$ref": "#/$defs/markdownEditor" },
                 { "$ref": "#/$defs/media" },
+                { "$ref": "#/$defs/page" },
                 { "$ref": "#/$defs/unsupportedComponent" }
               ]
             }
@@ -476,6 +592,47 @@
             "nodeId": { "$ref": "#/$defs/identifier" },
             "source": { "$ref": "#/$defs/mediaSource" },
             "intrinsic": { "$ref": "#/$defs/mediaPixelSize" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "value"],
+          "properties": {
+            "op": { "const": "toggleSetValue" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "value": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "value"],
+          "properties": {
+            "op": { "const": "inputSetValue" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "value": { "type": "string", "maxLength": 1048576 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "listId", "index", "item"],
+          "properties": {
+            "op": { "const": "listInsertItem" },
+            "listId": { "$ref": "#/$defs/identifier" },
+            "index": { "$ref": "#/$defs/revision" },
+            "item": { "$ref": "#/$defs/listItem" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "listId", "itemId"],
+          "properties": {
+            "op": { "const": "listRemoveItem" },
+            "listId": { "$ref": "#/$defs/identifier" },
+            "itemId": { "$ref": "#/$defs/identifier" }
           }
         }
       ]

@@ -371,8 +371,8 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     private func accept(_ snapshot: UISnapshot) -> Bool {
         latestSnapshot = snapshot
         let component = snapshot.root.component
-        if let capability = component.requiredCapability,
-           configuration.supportedComponentCapabilities.contains(capability)
+        if let capabilities = component.requiredCapabilities,
+           capabilities.allSatisfy(configuration.supportedComponentCapabilities.contains)
         {
             semanticProjectionAvailable = true
             if usingTerminalFallback {

@@ -5,6 +5,32 @@ normal standalone TUI Apps. Use the components in an ordinary terminal
 process, ship the binary anywhere Ratatui runs, and keep ownership of the event
 loop, commands, and model. Unpeel is not required at build time or runtime.
 
+## Quickstart: Todo
+
+The canonical demo is a normal Ratatui Todo App:
+
+```sh
+cargo run --example todo
+```
+
+Type a todo and press Enter. Tab moves between the Input and List; Enter or
+Space toggles the selected row, `d` deletes it, and Escape exits. The App saves
+its versioned model atomically to `.unpeel-todo.json` in the current directory
+(`UNPEEL_TODO_PATH` overrides the location), so an always-on process can be
+stopped and restored without making a renderer the state owner.
+
+The complete TUI also builds with every hosted module removed:
+
+```sh
+cargo run --example todo --no-default-features
+```
+
+With the default `ui-bridge` feature, that same binary detects a Host-injected
+endpoint and additionally publishes its Page → List → ListItem tree. SwiftUI
+renders native list rows and toggles through `PageView`; web does the same with
+`PageRenderer`. With no injected endpoint, bridge detection is inert and the
+App is simply the standalone TUI above.
+
 ## Standalone TUI usage
 
 The base components need no socket, protocol, account, environment variables,
@@ -51,6 +77,9 @@ The standalone component layer currently provides:
 | --- | --- |
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
+| `Page` | Top-level standalone Ratatui presentation with constrained Input header and List body slots |
+| `List` / `ListItem` | Ratatui List rows with stable semantic ids and named, closed control slots |
+| `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
 | `KitTheme` / `ThemeMonitor` | Shared dark/light defaults plus a live hosted project/workspace accent for selectable rows, menus, text, and scrollbars |
 | `DoubleClickTracker` | Target-aware double-click detection shared by mouse-driven Apps |
@@ -86,6 +115,7 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
+| Page semantic projection | Closed Page/List/ListItem/Toggle/Input trees with compact row/control deltas and native SwiftUI/DOM wrappers |
 
 The hosted vocabulary is deliberately small and opinionated rather than a
 portable encoding of every possible Ratatui widget:
@@ -132,11 +162,11 @@ Kit. Its standalone invariant is strict: every App must remain fully
 functional through its TUI, and semantic rendering is only an optional
 presentation path over that fallback.
 
-`MarkdownEditor` and static `Media` are the first two vertical slices. Media
-travels as a local path, a bounded 256 KiB inline image, or a content-addressed
-blob reference—never as an unbounded JSON payload. `Page`, `Tabs`, `List`,
-`ListItem`, `Toggle`, `Input`, and later richer components such as `DataGrid`
-can join the same closed, versioned vocabulary. Containment is slot-based:
+`MarkdownEditor`, static `Media`, and the Todo-driven Page component family are
+the first vertical slices. Media travels as a local path, a bounded 256 KiB
+inline image, or a content-addressed blob reference—never as an unbounded JSON
+payload. `Tabs` and later richer components such as `DataGrid` can join the
+same closed, versioned vocabulary. Containment is slot-based:
 `List` accepts only `ListItem` values, and row slots accept only explicitly
 enumerated controls rather than arbitrary child nodes. See [the component
 architecture](docs/ui-components.md), the trusted [`unpeel.ui/1`
@@ -146,11 +176,12 @@ schema](protocol/unpeel-ui-v1.schema.json), and the separate
 The renderer packages live with the component definitions so the contract
 cannot drift:
 
-- `swift/` — `UnpeelAppKitUI`, including native Markdown and asynchronous
-  `NSImage` Media views plus a reconnecting trusted Unix client;
-- `web/` — `@unpeel/app-kit-ui`, including DOM Markdown and accessible `<img>`
-  Media renderers plus `WorkspaceUiSession` for the existing Host's `/mobile`
-  extension; and
+- `swift/` — `UnpeelAppKitUI`, including native Page/List/Toggle/Input,
+  Markdown, and asynchronous `NSImage` Media views plus a reconnecting trusted
+  Unix client;
+- `web/` — `@unpeel/app-kit-ui`, including native DOM Page/List controls,
+  Markdown, and accessible `<img>` Media renderers plus `WorkspaceUiSession`
+  for the existing Host's `/mobile` extension; and
 - `protocol/` — validated, forward-compatible schemas and shared fixtures
   consumed by Rust, Swift, and web tests.
 

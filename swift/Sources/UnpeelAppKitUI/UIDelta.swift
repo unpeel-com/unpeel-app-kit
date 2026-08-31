@@ -12,6 +12,10 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case markdownSetPlaceholder(nodeID: String, placeholder: String)
     case markdownSetActions(nodeID: String, actions: MarkdownEditorActions)
     case mediaSetSource(nodeID: String, source: MediaSource, intrinsic: MediaPixelSize)
+    case toggleSetValue(nodeID: String, value: Bool)
+    case inputSetValue(nodeID: String, value: String)
+    case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
+    case listRemoveItem(listID: String, itemID: String)
 }
 
 extension UIDeltaOperation: Codable {
@@ -29,6 +33,11 @@ extension UIDeltaOperation: Codable {
         case actions
         case source
         case intrinsic
+        case value
+        case listID = "listId"
+        case index
+        case item
+        case itemID = "itemId"
     }
 
     enum Operation: String, Codable {
@@ -42,6 +51,10 @@ extension UIDeltaOperation: Codable {
         case markdownSetPlaceholder
         case markdownSetActions
         case mediaSetSource
+        case toggleSetValue
+        case inputSetValue
+        case listInsertItem
+        case listRemoveItem
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +111,27 @@ extension UIDeltaOperation: Codable {
                 source: try container.decode(MediaSource.self, forKey: .source),
                 intrinsic: try container.decode(MediaPixelSize.self, forKey: .intrinsic)
             )
+        case .toggleSetValue:
+            self = .toggleSetValue(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                value: try container.decode(Bool.self, forKey: .value)
+            )
+        case .inputSetValue:
+            self = .inputSetValue(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                value: try container.decode(String.self, forKey: .value)
+            )
+        case .listInsertItem:
+            self = .listInsertItem(
+                listID: try container.decode(String.self, forKey: .listID),
+                index: try container.decode(Int.self, forKey: .index),
+                item: try container.decode(UIListItemSpec.self, forKey: .item)
+            )
+        case .listRemoveItem:
+            self = .listRemoveItem(
+                listID: try container.decode(String.self, forKey: .listID),
+                itemID: try container.decode(String.self, forKey: .itemID)
+            )
         }
     }
 
@@ -147,6 +181,23 @@ extension UIDeltaOperation: Codable {
             try container.encode(nodeID, forKey: .nodeID)
             try container.encode(source, forKey: .source)
             try container.encode(intrinsic, forKey: .intrinsic)
+        case let .toggleSetValue(nodeID, value):
+            try container.encode(Operation.toggleSetValue, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(value, forKey: .value)
+        case let .inputSetValue(nodeID, value):
+            try container.encode(Operation.inputSetValue, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(value, forKey: .value)
+        case let .listInsertItem(listID, index, item):
+            try container.encode(Operation.listInsertItem, forKey: .op)
+            try container.encode(listID, forKey: .listID)
+            try container.encode(index, forKey: .index)
+            try container.encode(item, forKey: .item)
+        case let .listRemoveItem(listID, itemID):
+            try container.encode(Operation.listRemoveItem, forKey: .op)
+            try container.encode(listID, forKey: .listID)
+            try container.encode(itemID, forKey: .itemID)
         }
     }
 }
@@ -299,6 +350,61 @@ private extension UINode {
                 intrinsic: intrinsic
             )
             return UINode(id: id, component: .media(media))
+        case let .toggleSetValue(nodeID, value):
+            var page = try page()
+            guard case var .list(list) = page.body else {
+                throw UIDeltaApplicationError("Delta targets an unavailable List")
+            }
+            var found = false
+            for index in list.items.indices {
+                var item = list.items[index]
+                var itemFound = false
+                item.leading = setToggle(item.leading, id: nodeID, value: value, found: &itemFound)
+                item.trailing = setToggle(item.trailing, id: nodeID, value: value, found: &itemFound)
+                item.accessory = setToggle(item.accessory, id: nodeID, value: value, found: &itemFound)
+                if itemFound {
+                    item.done = value
+                    list.items[index] = item
+                    found = true
+                    break
+                }
+            }
+            guard found else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Toggle")
+            }
+            page.body = .list(list)
+            return UINode(id: id, component: .page(page))
+        case let .inputSetValue(nodeID, value):
+            var page = try page()
+            guard case var .input(input) = page.header, input.id == nodeID else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Input")
+            }
+            input.value = value
+            page.header = .input(input)
+            return UINode(id: id, component: .page(page))
+        case let .listInsertItem(listID, index, item):
+            var page = try page()
+            guard case var .list(list) = page.body,
+                  list.id == listID,
+                  index >= 0,
+                  index <= list.items.count
+            else {
+                throw UIDeltaApplicationError("Delta targets an unavailable List insertion")
+            }
+            list.items.insert(item, at: index)
+            page.body = .list(list)
+            return UINode(id: id, component: .page(page))
+        case let .listRemoveItem(listID, itemID):
+            var page = try page()
+            guard case var .list(list) = page.body,
+                  list.id == listID,
+                  let index = list.items.firstIndex(where: { $0.id == itemID })
+            else {
+                throw UIDeltaApplicationError("Delta targets an unavailable ListItem")
+            }
+            list.items.remove(at: index)
+            page.body = .list(list)
+            return UINode(id: id, component: .page(page))
         }
     }
 
@@ -315,6 +421,29 @@ private extension UINode {
         }
         return media
     }
+
+    func page() throws -> PageSpec {
+        guard case let .page(page) = component else {
+            throw UIDeltaApplicationError("Delta targets an unavailable Page")
+        }
+        return page
+    }
+}
+
+private func setToggle(
+    _ slot: UIListItemSlot?,
+    id: String,
+    value: Bool,
+    found: inout Bool
+) -> UIListItemSlot? {
+    guard case let .toggle(toggle) = slot, toggle.id == id else { return slot }
+    found = true
+    return .toggle(UIToggleSpec(
+        id: toggle.id,
+        label: toggle.label,
+        value: value,
+        setValue: toggle.setValue
+    ))
 }
 
 private enum OptionalStringChange {
