@@ -360,11 +360,14 @@
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
         "label": { "type": "string", "maxLength": 16384 },
+        "detail": { "type": "string", "maxLength": 16384 },
+        "value": { "type": "string", "maxLength": 4096 },
         "done": { "type": "boolean", "default": false },
         "leading": { "$ref": "#/$defs/listItemSlot" },
         "trailing": { "$ref": "#/$defs/listItemSlot" },
         "accessory": { "$ref": "#/$defs/listItemSlot" },
-        "delete": { "$ref": "#/$defs/identifier" }
+        "delete": { "$ref": "#/$defs/identifier" },
+        "activate": { "$ref": "#/$defs/identifier" }
       }
     },
     "list": {
@@ -424,6 +427,7 @@
         "id": { "$ref": "#/$defs/identifier" },
         "type": { "const": "page" },
         "title": { "type": "string", "maxLength": 4096 },
+        "back": { "$ref": "#/$defs/identifier" },
         "header": {
           "oneOf": [
             { "$ref": "#/$defs/input" },

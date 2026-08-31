@@ -31,6 +31,7 @@ export class MarkdownEditorRenderer {
   private keyEdited = false;
   private hasRendered = false;
   private authoritativeText = "";
+  private authoritativeSelection: TextSelection | undefined;
   private authoritativeRevision = -1;
   private inFlightText: string | undefined;
   private flushTimer: number | undefined;
@@ -95,6 +96,8 @@ export class MarkdownEditorRenderer {
     const editor = snapshot.root;
     this.applyingSnapshot = true;
     try {
+      const previousSelection = this.authoritativeSelection;
+      let shouldApplyAuthoritativeSelection = !this.hasRendered;
       if (!this.hasRendered) {
         this.hasRendered = true;
         this.authoritativeText = editor.text;
@@ -118,14 +121,35 @@ export class MarkdownEditorRenderer {
           }
           if (!hadLocalChanges || localText === editor.text) {
             this.textarea.value = editor.text;
+            shouldApplyAuthoritativeSelection = !hadLocalChanges
+              && editor.text !== previousText;
           }
         }
       }
+      if (
+        !shouldApplyAuthoritativeSelection
+        && previousSelection !== undefined
+        && !textSelectionsEqual(previousSelection, editor.selection)
+        && this.textarea.value === editor.text
+        && this.inFlightText === undefined
+      ) {
+        const previousOffsets = selectionOffsets(editor.text, previousSelection);
+        const incomingOffsets = selectionOffsets(editor.text, editor.selection);
+        if (incomingOffsets !== undefined) {
+          const ownsFocus = document.activeElement === this.textarea;
+          shouldApplyAuthoritativeSelection = !ownsFocus
+            || (previousOffsets !== undefined
+              && textareaSelectionMatches(this.textarea, previousOffsets))
+            || textareaSelectionMatches(this.textarea, incomingOffsets);
+        }
+      }
+      this.authoritativeSelection = editor.selection;
       this.snapshot = snapshot;
       this.editor = editor;
       this.textarea.readOnly = editor.readOnly ?? false;
       this.textarea.placeholder = editor.placeholder ?? "";
-      const selection = this.textarea.value === this.authoritativeText
+      const selection = shouldApplyAuthoritativeSelection
+        && this.textarea.value === this.authoritativeText
         && this.inFlightText === undefined
         ? selectionOffsets(editor.text, editor.selection)
         : undefined;
@@ -667,6 +691,25 @@ function selectionOffsets(
     end: Math.max(anchor, head),
     direction: anchor > head ? "backward" : "forward",
   };
+}
+
+function textSelectionsEqual(left: TextSelection, right: TextSelection): boolean {
+  return left.anchor.line === right.anchor.line
+    && left.anchor.utf16Column === right.anchor.utf16Column
+    && left.head.line === right.head.line
+    && left.head.utf16Column === right.head.utf16Column;
+}
+
+function textareaSelectionMatches(
+  textarea: HTMLTextAreaElement,
+  expected: NonNullable<ReturnType<typeof selectionOffsets>>,
+): boolean {
+  return textarea.selectionStart === expected.start
+    && textarea.selectionEnd === expected.end
+    && (
+      expected.start === expected.end
+      || textarea.selectionDirection === expected.direction
+    );
 }
 
 function componentAction<K extends keyof NonNullable<MarkdownEditorNode["actions"]>>(

@@ -7,10 +7,13 @@
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::layout::Position;
+use ratatui::layout::{Margin, Position, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
-use crate::{MarkdownTextArea, MenuItem, MenuTheme, PopupMenu};
+use crate::{KitTheme, MarkdownTextArea};
 
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -216,6 +219,31 @@ struct SelectionDrag {
     anchor_end: (usize, usize),
 }
 
+#[derive(Debug, Default)]
+struct MarkdownInsertPopup {
+    area: Rect,
+    item_areas: Vec<Rect>,
+    item_kinds: Vec<MarkdownBlockKind>,
+}
+
+impl MarkdownInsertPopup {
+    const fn area(&self) -> Rect {
+        self.area
+    }
+
+    fn item_at(&self, position: Position) -> Option<(usize, MarkdownBlockKind)> {
+        self.item_areas
+            .iter()
+            .position(|area| area.contains(position))
+            .and_then(|index| {
+                self.item_kinds
+                    .get(index)
+                    .copied()
+                    .map(|kind| (index, kind))
+            })
+    }
+}
+
 /// Stateful interaction controller for an opinionated [`MarkdownTextArea`].
 ///
 /// Apps remain responsible for their event loop and persistence. Route keys
@@ -225,7 +253,7 @@ struct SelectionDrag {
 pub struct MarkdownEditorInteraction {
     menu_open: bool,
     menu_selected: usize,
-    popup: Option<PopupMenu<MarkdownBlockKind>>,
+    popup: Option<MarkdownInsertPopup>,
     drag: Option<SelectionDrag>,
     last_click: Option<(Instant, Position, u8)>,
 }
@@ -291,15 +319,12 @@ impl MarkdownEditorInteraction {
     ) -> MarkdownInteractionOutcome {
         let before = document(editor);
         if self.menu_open {
-            let clicked_kind = self.popup.as_mut().and_then(|popup| {
-                let kind = popup
-                    .item_at(position)
-                    .filter(|item| item.is_enabled())
-                    .map(|item| *item.value());
-                popup.select_at(position);
-                kind
-            });
-            if let Some(kind) = clicked_kind {
+            let clicked = self
+                .popup
+                .as_ref()
+                .and_then(|popup| popup.item_at(position));
+            if let Some((index, kind)) = clicked {
+                self.menu_selected = index;
                 apply_slash(editor.text_area_mut(), kind);
                 self.close_menu();
                 return outcome(true, before != document(editor));
@@ -368,10 +393,16 @@ impl MarkdownEditorInteraction {
         editor: &mut MarkdownTextArea<'_>,
         position: Position,
     ) -> MarkdownInteractionOutcome {
-        let mut changed = self
+        let hovered = self
             .popup
-            .as_mut()
-            .is_some_and(|popup| popup.hover_at(position));
+            .as_ref()
+            .and_then(|popup| popup.item_at(position))
+            .map(|(index, _)| index);
+        let mut changed = hovered.is_some_and(|index| {
+            let changed = self.menu_selected != index;
+            self.menu_selected = index;
+            changed
+        });
         if self.drag.is_some() {
             self.pointer_drag(editor, position);
             changed = true;
@@ -476,29 +507,13 @@ impl MarkdownEditorInteraction {
         };
         let visible = self.visible_items(editor);
         self.menu_selected = self.menu_selected.min(visible.len().saturating_sub(1));
-        let mut theme = MenuTheme::detected();
-        theme.minimum_width = 29;
-        theme.left_padding = 1;
-        theme.right_padding = 1;
-        theme.outer_padding = 1;
-        let entries = visible
-            .iter()
-            .map(|item| MenuItem::new(format!("{:<9} {}", item.sample, item.label), item.kind))
-            .collect::<Vec<_>>();
-        let mut popup = if entries.is_empty() {
-            PopupMenu::new(
-                Position::new(anchor.x, anchor.y.saturating_add(1)),
-                [MenuItem::new("No matching blocks", MarkdownBlockKind::Paragraph).disabled()],
-            )
-        } else {
-            PopupMenu::new(Position::new(anchor.x, anchor.y.saturating_add(1)), entries)
-        }
-        .with_theme(theme);
-        if !visible.is_empty() {
-            popup.set_selected_index(self.menu_selected);
-        }
-        popup.render(frame);
-        self.popup = Some(popup);
+        self.popup = Some(render_insert_popup(
+            frame,
+            anchor,
+            &visible,
+            self.menu_selected,
+            KitTheme::detected(),
+        ));
     }
 
     fn handle_editor_input(&mut self, editor: &mut MarkdownTextArea<'_>, input: Input) -> bool {
@@ -656,6 +671,90 @@ impl MarkdownEditorInteraction {
         };
         self.last_click = Some((now, position, count));
         count
+    }
+}
+
+const MARKDOWN_INSERT_MENU_WIDTH: u16 = 38;
+
+fn render_insert_popup(
+    frame: &mut Frame<'_>,
+    anchor: Position,
+    items: &[&MarkdownInsertItem],
+    selected: usize,
+    theme: KitTheme,
+) -> MarkdownInsertPopup {
+    let bounds = frame.area();
+    if bounds.is_empty() {
+        return MarkdownInsertPopup::default();
+    }
+    let rows = u16::try_from(items.len().max(1)).unwrap_or(u16::MAX);
+    let height = rows.saturating_add(2).min(bounds.height);
+    let width = MARKDOWN_INSERT_MENU_WIDTH.min(bounds.width);
+    let preferred_x = anchor.x.saturating_sub(1).max(bounds.x);
+    let x = preferred_x.min(bounds.right().saturating_sub(width));
+    let below = anchor.y.saturating_add(1);
+    let y = if below.saturating_add(height) <= bounds.bottom() {
+        below
+    } else {
+        anchor
+            .y
+            .saturating_sub(height)
+            .max(bounds.y)
+            .min(bounds.bottom().saturating_sub(height))
+    };
+    let area = Rect::new(x, y, width, height);
+    let inner = area.inner(Margin::new(1, 1));
+    let selected = selected.min(items.len().saturating_sub(1));
+    let mut item_areas = Vec::with_capacity(items.len());
+    let mut item_kinds = Vec::with_capacity(items.len());
+    let mut lines = Vec::with_capacity(items.len().max(1));
+    let background = Style::new().fg(theme.text).bg(theme.surface);
+
+    if items.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " no matching block",
+            Style::new().fg(theme.muted).bg(theme.surface),
+        )));
+    } else {
+        let row_width = usize::from(inner.width);
+        for (index, item) in items.iter().take(usize::from(inner.height)).enumerate() {
+            item_areas.push(Rect::new(
+                inner.x,
+                inner
+                    .y
+                    .saturating_add(u16::try_from(index).unwrap_or(u16::MAX)),
+                inner.width,
+                1,
+            ));
+            item_kinds.push(item.kind);
+            let content = format!(" {}  {:<14}  {}", item.shortcut, item.label, item.sample);
+            let padding = row_width.saturating_sub(content.chars().count());
+            let text = format!("{content}{}", " ".repeat(padding));
+            let style = if index == selected {
+                theme.selected_row.add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme.muted).bg(theme.surface)
+            };
+            lines.push(Line::from(Span::styled(text, style)));
+        }
+    }
+
+    let block = Block::bordered()
+        .title(" insert ")
+        .title_style(
+            Style::new()
+                .fg(theme.text)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        )
+        .border_style(Style::new().fg(theme.subtle).bg(theme.surface))
+        .style(background);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).style(background).block(block), area);
+    MarkdownInsertPopup {
+        area,
+        item_areas,
+        item_kinds,
     }
 }
 
@@ -1118,6 +1217,44 @@ mod tests {
         );
         assert!(outcome.text_changed());
         assert_eq!(editor.lines(), &["- [ ] "]);
+    }
+
+    #[test]
+    fn slash_menu_uses_the_compact_bordered_dropdown_and_full_row_selection() {
+        let mut editor = editor(&[""]);
+        let mut interaction = MarkdownEditorInteraction::new();
+        interaction.handle_input(
+            &mut editor,
+            Input {
+                key: Key::Char('/'),
+                ..Input::default()
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                editor.render(frame, frame.area(), true);
+                interaction.render_overlay(&editor, frame);
+            })
+            .unwrap();
+
+        let popup = interaction.popup.as_ref().unwrap();
+        let anchor = editor.rendered_cursor_position().unwrap();
+        assert_eq!(popup.area.x, anchor.x.saturating_sub(1));
+        assert_eq!(
+            terminal.backend().buffer()[(popup.area.x, popup.area.y)].symbol(),
+            "┌"
+        );
+        let selected = popup.item_areas[0];
+        assert_eq!(
+            terminal.backend().buffer()[(selected.right() - 1, selected.y)].bg,
+            ratatui::style::Color::Rgb(63, 63, 70)
+        );
+        let row = (selected.x..selected.right())
+            .map(|x| terminal.backend().buffer()[(x, selected.y)].symbol())
+            .collect::<String>();
+        assert!(row.contains("1  Heading 1"));
+        assert!(row.trim_end().ends_with('#'));
     }
 
     #[test]

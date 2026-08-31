@@ -33,6 +33,7 @@ mod path;
 #[allow(unsafe_code)]
 mod process_security;
 mod scrollbar;
+mod selectable;
 mod theme;
 #[cfg(feature = "ui-bridge")]
 mod ui;
@@ -51,7 +52,8 @@ pub use agent::{
 pub use click::{DEFAULT_DOUBLE_CLICK_INTERVAL, DoubleClickTracker};
 pub use components::{
     ComponentValidationError, INPUT_COMPONENT_CAPABILITY, Input, LIST_COMPONENT_CAPABILITY,
-    LIST_ITEM_COMPONENT_CAPABILITY, List, ListItem, ListItemSlot, PAGE_COMPONENT_CAPABILITY, Page,
+    LIST_ITEM_ACTIVATE_CAPABILITY, LIST_ITEM_COMPONENT_CAPABILITY, LIST_ITEM_METADATA_CAPABILITY,
+    List, ListItem, ListItemSlot, PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page,
     PageBodySlot, PageHeaderSlot, PageTheme, PageWidget, TOGGLE_COMPONENT_CAPABILITY, Toggle,
 };
 pub use context::{
@@ -91,6 +93,7 @@ pub use menu::{MenuItem, MenuItemTone, MenuTheme, PopupMenu};
 pub use navigator::Navigator;
 pub use path::display_path_from_root;
 pub use scrollbar::VerticalScrollbar;
+pub use selectable::SelectableRow;
 pub use theme::{
     APP_ACCENT_ENV, ColorScheme, KitTheme, SELECTABLE_LEFT_PADDING, ThemeMonitor, hosted_accent,
     hosted_accent_for_scheme,
@@ -106,8 +109,8 @@ pub use ui::{
     UiErrorMessage, UiEvent, UiEventKind, UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode,
     UiParticipant, UiParticipantKind, UiPresence, UiPresenceMember, UiProtocolError,
     UiRendererMetadata, UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId,
-    decode_ui_frame, encode_ui_frame, negotiate_ui_protocol_version, read_ui_message,
-    write_ui_message,
+    decode_ui_frame, encode_ui_frame, markdown_delta_operations, negotiate_ui_protocol_version,
+    read_ui_message, write_ui_message,
 };
 #[cfg(feature = "ui-bridge")]
 pub use ui_auth::{

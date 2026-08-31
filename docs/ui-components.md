@@ -415,6 +415,13 @@ web, and agent participants:
 - `Page` and later containers expose named, purpose-specific regions only when
   their cross-platform semantics are defined.
 
+The current master/detail extension stays inside those named semantics:
+`ListItem.detail` is secondary copy, `ListItem.value` is a trailing read-only
+value, and `ListItem.activate` is one declared row action; `Page.back` is one
+declared return action. They are not arbitrary children. Renderers advertise
+`listItemMetadata`, `listItemActivate`, and `pageBack` before receiving a tree
+that depends on them.
+
 Slot payloads are closed enums, not nested `UiNode` escape hatches. For
 example, a trailing `Toggle` remains a native SwiftUI list-row toggle and an
 accessible web checkbox while retaining its label, boolean value, and action
@@ -475,9 +482,16 @@ renderers.
 
 The pane-level degradation rule is explicit: if a renderer does not recognize
 the Page root, any named slot kind, or any required Page/List/ListItem/Toggle/
-Input capability, it keeps the attachment alive and requests the complete
-terminal view for that pane. It never rejects the attach merely because its
-component vocabulary is older.
+Input, ListItem metadata/activation, or Page-back capability, it keeps the
+attachment alive and requests the complete terminal view for that pane. It
+never rejects the attach merely because its component vocabulary is older.
+
+The sixteenth shared NDJSON fixture exercises the same Page family as a Usage
+master/detail screen: provider rows carry detail/value metadata and an
+activation action, while the detail Page carries a back action. Rich Ratatui
+meters remain App-owned, but native/web users can navigate and refresh the
+same authoritative provider model without introducing a generic dashboard or
+flex container.
 
 ## MarkdownEditor v1
 
@@ -517,6 +531,21 @@ nodes. AppKit and web implement the same vocabulary locally over their native
 text controls. The terminal App remains authoritative: choosing a native/web
 menu item becomes the same range edit as ordinary typing, then returns through
 the existing revision/ack path.
+
+The terminal insert menu uses a compact bordered shortcut/name/sample layout
+anchored to the caret, with a full-row gray keyboard or pointer selection.
+The native popover deliberately contains no focusable row controls: the
+`NSTextView` remains first responder, and a scoped key monitor routes Up/Down,
+Home/End, Return/Tab, and Escape while the menu is open. This prevents the
+popover from stealing document typing. Web keeps focus in its textarea for
+the same reason.
+
+`markdown_delta_operations(previous, next)` turns an App-owned projection
+change into one Unicode-safe contiguous range edit plus independent selection,
+presentation, dirty, and metadata operations. Terminal multi-line drags and
+double/triple-click selections therefore synchronize through the same
+revision stream as native and web selections instead of replacing the whole
+document root.
 
 ### Wiring the first vertical slice
 

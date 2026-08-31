@@ -1,6 +1,31 @@
 import AppKit
 import SwiftUI
 
+private final class MarkdownInsertKeyMonitor: @unchecked Sendable {
+    private let token: Any?
+
+    init(handler: @escaping (NSEvent) -> NSEvent?) {
+        token = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: handler)
+    }
+
+    deinit {
+        if let token {
+            NSEvent.removeMonitor(token)
+        }
+    }
+}
+
+func shouldApplyAuthoritativeMarkdownSelection(
+    editorOwnsFocus: Bool,
+    currentRange: NSRange,
+    previousRange: NSRange?,
+    incomingRange: NSRange
+) -> Bool {
+    !editorOwnsFocus
+        || currentRange == previousRange
+        || currentRange == incomingRange
+}
+
 /// Native renderer for App Kit's first opinionated component.
 ///
 /// The terminal-backed Rust App remains authoritative. This view applies its
@@ -203,12 +228,14 @@ private struct MarkdownTextView: NSViewRepresentable {
         private var hasAppliedSnapshot = false
         private var authoritativeRevision: Int
         private var authoritativeText: String
+        private var authoritativeSelection: UITextSelection
         private var inFlightText: String?
         private var flushWorkItem: DispatchWorkItem?
         private var insertPopover: NSPopover?
         private var insertContext: MarkdownSlashContext?
         private var visibleInsertItems: [MarkdownInsertItem] = []
         private var selectedInsertIndex = 0
+        private var insertKeyMonitor: MarkdownInsertKeyMonitor?
 
         init(
             nodeID: String,
@@ -221,6 +248,7 @@ private struct MarkdownTextView: NSViewRepresentable {
             self.onAction = onAction
             authoritativeRevision = revision
             authoritativeText = editor.text
+            authoritativeSelection = editor.selection
         }
 
         func attach(_ textView: NSTextView) {
@@ -251,6 +279,8 @@ private struct MarkdownTextView: NSViewRepresentable {
             textView.isEditable = !editor.readOnly && editor.actions.replaceRange != nil
             textView.isSelectable = true
             var shouldApplyAuthoritativeSelection = false
+            let previousSelection = authoritativeSelection
+            let selectionChanged = editor.selection != previousSelection
 
             if !hasAppliedSnapshot {
                 hasAppliedSnapshot = true
@@ -282,6 +312,29 @@ private struct MarkdownTextView: NSViewRepresentable {
                             && editor.text != previousAuthority
                     }
                 }
+            }
+            authoritativeSelection = editor.selection
+
+            // Selection-only revisions are common when the terminal performs
+            // a drag, double-click, or triple-click. Apply those when the
+            // native editor still reflects the previous authoritative range.
+            // If the user is concurrently moving the native selection, keep
+            // that optimistic local range until its own event is echoed.
+            if !shouldApplyAuthoritativeSelection,
+               selectionChanged,
+               textView.string == editor.text,
+               inFlightText == nil,
+               let incomingRange = Self.nsRange(for: editor.selection, in: editor.text)
+            {
+                let currentRange = textView.selectedRange()
+                let previousRange = Self.nsRange(for: previousSelection, in: editor.text)
+                let ownsFocus = textView.window?.firstResponder === textView
+                shouldApplyAuthoritativeSelection = shouldApplyAuthoritativeMarkdownSelection(
+                    editorOwnsFocus: ownsFocus,
+                    currentRange: currentRange,
+                    previousRange: previousRange,
+                    incomingRange: incomingRange
+                )
             }
 
             if shouldApplyAuthoritativeSelection,
@@ -420,6 +473,7 @@ private struct MarkdownTextView: NSViewRepresentable {
                 selectedInsertIndex,
                 max(0, visibleInsertItems.count - 1)
             )
+            installInsertKeyMonitor(for: textView)
             showInsertPopover(relativeTo: textView)
         }
 
@@ -443,26 +497,62 @@ private struct MarkdownTextView: NSViewRepresentable {
             )
             popover.contentViewController = NSHostingController(rootView: menu)
             popover.contentSize = NSSize(
-                width: 270,
+                width: 238,
                 height: min(330, CGFloat(max(1, visibleInsertItems.count) * 30 + 12))
             )
-            guard !popover.isShown, let window = textView.window else { return }
-            let screenRect = textView.firstRect(
-                forCharacterRange: textView.selectedRange(),
-                actualRange: nil
-            )
-            let localRect = textView.convert(window.convertFromScreen(screenRect), from: nil)
-            let anchor = NSRect(
-                x: localRect.minX,
-                y: localRect.minY,
-                width: max(1, localRect.width),
-                height: max(16, localRect.height)
-            )
-            let wasFirstResponder = window.firstResponder === textView
-            popover.show(relativeTo: anchor, of: textView, preferredEdge: .maxY)
-            if wasFirstResponder {
+            guard let window = textView.window else { return }
+            if !popover.isShown {
+                let screenRect = textView.firstRect(
+                    forCharacterRange: textView.selectedRange(),
+                    actualRange: nil
+                )
+                let localRect = textView.convert(window.convertFromScreen(screenRect), from: nil)
+                let anchor = NSRect(
+                    x: localRect.minX,
+                    y: localRect.minY,
+                    width: max(1, localRect.width),
+                    height: max(16, localRect.height)
+                )
+                popover.show(relativeTo: anchor, of: textView, preferredEdge: .maxY)
+            }
+            // NSPopover hosts a second window. Keep all typing and menu keys
+            // owned by the document rather than allowing its SwiftUI content
+            // to become the first responder.
+            window.makeFirstResponder(textView)
+            DispatchQueue.main.async { [weak window, weak textView] in
+                guard let window, let textView else { return }
                 window.makeFirstResponder(textView)
             }
+        }
+
+        private func installInsertKeyMonitor(for textView: NSTextView) {
+            guard insertKeyMonitor == nil else { return }
+            insertKeyMonitor = MarkdownInsertKeyMonitor { [weak self, weak textView] event in
+                guard let self, let textView, self.insertContext != nil,
+                      textView.window?.isKeyWindow == true
+                else { return event }
+                return self.handleInsertMenuKey(event, in: textView) ? nil : event
+            }
+        }
+
+        private func handleInsertMenuKey(_ event: NSEvent, in textView: NSTextView) -> Bool {
+            switch event.keyCode {
+            case 126: // Up arrow
+                moveInsertSelection(-1, in: textView)
+            case 125: // Down arrow
+                moveInsertSelection(1, in: textView)
+            case 115: // Home
+                setInsertSelection(0, in: textView)
+            case 119: // End
+                setInsertSelection(visibleInsertItems.count - 1, in: textView)
+            case 36, 76, 48: // Return, keypad Enter, Tab
+                applySelectedInsert(in: textView)
+            case 53: // Escape
+                clearSlashCommand(in: textView)
+            default:
+                return false
+            }
+            return true
         }
 
         private func moveInsertSelection(_ delta: Int, in textView: NSTextView) {
@@ -470,6 +560,12 @@ private struct MarkdownTextView: NSViewRepresentable {
             selectedInsertIndex = (
                 selectedInsertIndex + delta + visibleInsertItems.count
             ) % visibleInsertItems.count
+            showInsertPopover(relativeTo: textView)
+        }
+
+        private func setInsertSelection(_ index: Int, in textView: NSTextView) {
+            guard !visibleInsertItems.isEmpty else { return }
+            selectedInsertIndex = min(max(0, index), visibleInsertItems.count - 1)
             showInsertPopover(relativeTo: textView)
         }
 
@@ -531,6 +627,7 @@ private struct MarkdownTextView: NSViewRepresentable {
         private func closeInsertMenu() {
             insertPopover?.performClose(nil)
             insertPopover = nil
+            insertKeyMonitor = nil
             insertContext = nil
             visibleInsertItems = []
             selectedInsertIndex = 0

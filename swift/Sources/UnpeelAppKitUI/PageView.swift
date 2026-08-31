@@ -18,7 +18,7 @@ public struct PageView: View {
     public var body: some View {
         switch snapshot.root.component {
         case let .page(page):
-            PageContent(page: page, onAction: onAction)
+            PageContent(nodeID: snapshot.root.id, page: page, onAction: onAction)
         case .markdownEditor, .media, .unsupported:
             EmptyView()
         }
@@ -27,11 +27,13 @@ public struct PageView: View {
 
 @MainActor
 private struct PageContent: View {
+    let nodeID: String
     let page: PageSpec
     let onAction: (UIAction) -> Void
     @State private var draft = ""
 
-    init(page: PageSpec, onAction: @escaping (UIAction) -> Void) {
+    init(nodeID: String, page: PageSpec, onAction: @escaping (UIAction) -> Void) {
+        self.nodeID = nodeID
         self.page = page
         self.onAction = onAction
         if case let .input(input) = page.header {
@@ -41,8 +43,23 @@ private struct PageContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(page.title)
-                .font(.title2.weight(.semibold))
+            HStack(spacing: 8) {
+                if let back = page.back {
+                    Button {
+                        onAction(UIAction(
+                            nodeID: nodeID,
+                            action: back,
+                            kind: .cancel
+                        ))
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Back")
+                }
+                Text(page.title)
+                    .font(.title2.weight(.semibold))
+            }
                 .padding(.horizontal)
                 .padding(.top)
             if case let .input(input) = page.header {
@@ -112,10 +129,26 @@ private struct PageContent: View {
     private func itemRow(_ item: UIListItemSpec) -> some View {
         HStack {
             slot(item.leading)
-            Text(item.label)
-                .strikethrough(item.done)
-                .foregroundStyle(item.done ? .secondary : .primary)
+            if let activate = item.activate {
+                Button {
+                    onAction(UIAction(
+                        nodeID: item.id,
+                        action: activate,
+                        kind: .activate
+                    ))
+                } label: {
+                    itemLabel(item)
+                }
+                .buttonStyle(.plain)
+            } else {
+                itemLabel(item)
+            }
             Spacer(minLength: 12)
+            if let value = item.value {
+                Text(value)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
             slot(item.trailing)
             slot(item.accessory)
             if let action = item.delete {
@@ -132,6 +165,20 @@ private struct PageContent: View {
                 .accessibilityLabel("Delete \(item.label)")
             }
         }
+    }
+
+    private func itemLabel(_ item: UIListItemSpec) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(item.label)
+                .strikethrough(item.done)
+                .foregroundStyle(item.done ? .secondary : .primary)
+            if let detail = item.detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder

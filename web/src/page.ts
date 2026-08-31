@@ -45,9 +45,22 @@ export class PageRenderer {
     body: ListSpec;
   }): void {
     this.element.replaceChildren();
+    const pageHeader = document.createElement("header");
+    pageHeader.className = "unpeel-page__header";
+    if (page.back !== undefined) {
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "unpeel-page__back";
+      back.textContent = "Back";
+      back.addEventListener("click", () => {
+        this.onAction(uiAction(page.id, page.back!, "cancel"));
+      });
+      pageHeader.append(back);
+    }
     const heading = document.createElement("h1");
     heading.textContent = page.title;
-    this.element.append(heading);
+    pageHeader.append(heading);
+    this.element.append(pageHeader);
 
     if (page.header !== undefined) this.element.append(this.input(page.header));
 
@@ -119,10 +132,36 @@ export class PageRenderer {
     row.dataset.id = item.id;
     row.dataset.done = String(item.done ?? false);
     this.appendSlot(row, item.leading);
+    const labelContent = document.createElement("span");
+    labelContent.className = "unpeel-list-item__content";
     const label = document.createElement("span");
     label.className = "unpeel-list-item__label";
     label.textContent = item.label;
-    row.append(label);
+    labelContent.append(label);
+    if (item.detail !== undefined) {
+      const detail = document.createElement("span");
+      detail.className = "unpeel-list-item__detail";
+      detail.textContent = item.detail;
+      labelContent.append(detail);
+    }
+    if (item.activate !== undefined) {
+      const activate = document.createElement("button");
+      activate.type = "button";
+      activate.className = "unpeel-list-item__activate";
+      activate.append(labelContent);
+      activate.addEventListener("click", () => {
+        this.onAction(uiAction(item.id, item.activate!, "activate"));
+      });
+      row.append(activate);
+    } else {
+      row.append(labelContent);
+    }
+    if (item.value !== undefined) {
+      const value = document.createElement("span");
+      value.className = "unpeel-list-item__value";
+      value.textContent = item.value;
+      row.append(value);
+    }
     this.appendSlot(row, item.trailing);
     this.appendSlot(row, item.accessory);
     if (item.delete !== undefined) {

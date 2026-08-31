@@ -30,7 +30,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(15);
+    expect(messages).toHaveLength(16);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -91,6 +91,21 @@ describe("shared protocol", () => {
     const updatedTodo = applyUiDelta(todoSnapshot, todoDelta);
     if (!isRenderablePageNode(updatedTodo.root)) throw new Error("expected Todo Page delta");
     expect(updatedTodo.root.body.items[1]?.done).toBe(true);
+
+    const usageSnapshot = messages[15] as UiSnapshot;
+    if (!isRenderablePageNode(usageSnapshot.root)) throw new Error("expected Usage Page fixture");
+    expect(usageSnapshot.root.back).toBe("close-provider");
+    expect(usageSnapshot.root.body.items[0]?.detail).toBe("Resets in 6d 18h");
+    expect(usageSnapshot.root.body.items[0]?.value).toBe("3% used");
+    expect(usageSnapshot.root.body.items[1]?.activate).toBe("refresh-usage");
+    expect(uiNodeCapabilities(usageSnapshot.root)).toEqual([
+      "page",
+      "list",
+      "listItem",
+      "pageBack",
+      "listItemMetadata",
+      "listItemActivate",
+    ]);
   });
 
   test("builds the same command envelope", () => {

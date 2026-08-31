@@ -787,6 +787,111 @@ impl UiNode {
     }
 }
 
+/// Builds component-specific operations between two Markdown projections.
+///
+/// Text is reduced to one contiguous UTF-16 range replacement and selection
+/// is emitted independently, so terminal pointer selection and native/web
+/// selection stay synchronized without replacing a potentially large root.
+/// A root replacement is returned when the nodes are not the same Markdown
+/// component.
+#[must_use]
+pub fn markdown_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOperation> {
+    let (UiComponent::MarkdownEditor(previous_editor), UiComponent::MarkdownEditor(next_editor)) =
+        (&previous.element, &next.element)
+    else {
+        return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+    };
+    if previous.id != next.id {
+        return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+    }
+
+    let mut operations = Vec::new();
+    if previous_editor.text != next_editor.text {
+        operations.push(UiDeltaOperation::MarkdownReplaceRange {
+            node_id: next.id.clone(),
+            edit: contiguous_text_edit(&previous_editor.text, &next_editor.text),
+        });
+    }
+    if previous_editor.selection != next_editor.selection {
+        operations.push(UiDeltaOperation::MarkdownSetSelection {
+            node_id: next.id.clone(),
+            selection: next_editor.selection,
+        });
+    }
+    if previous_editor.presentation != next_editor.presentation {
+        operations.push(UiDeltaOperation::MarkdownSetPresentation {
+            node_id: next.id.clone(),
+            presentation: next_editor.presentation,
+        });
+    }
+    if previous_editor.dirty != next_editor.dirty {
+        operations.push(UiDeltaOperation::MarkdownSetDirty {
+            node_id: next.id.clone(),
+            dirty: next_editor.dirty,
+        });
+    }
+    if previous_editor.read_only != next_editor.read_only {
+        operations.push(UiDeltaOperation::MarkdownSetReadOnly {
+            node_id: next.id.clone(),
+            read_only: next_editor.read_only,
+        });
+    }
+    if previous_editor.title != next_editor.title {
+        operations.push(UiDeltaOperation::MarkdownSetTitle {
+            node_id: next.id.clone(),
+            title: next_editor.title.clone(),
+        });
+    }
+    if previous_editor.placeholder != next_editor.placeholder {
+        operations.push(UiDeltaOperation::MarkdownSetPlaceholder {
+            node_id: next.id.clone(),
+            placeholder: next_editor.placeholder.clone(),
+        });
+    }
+    if previous_editor.actions != next_editor.actions {
+        operations.push(UiDeltaOperation::MarkdownSetActions {
+            node_id: next.id.clone(),
+            actions: next_editor.actions.clone(),
+        });
+    }
+    operations
+}
+
+fn contiguous_text_edit(previous: &str, next: &str) -> TextEdit {
+    let previous = previous.chars().collect::<Vec<_>>();
+    let next = next.chars().collect::<Vec<_>>();
+    let mut prefix = 0usize;
+    while prefix < previous.len() && prefix < next.len() && previous[prefix] == next[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < previous.len().saturating_sub(prefix)
+        && suffix < next.len().saturating_sub(prefix)
+        && previous[previous.len() - suffix - 1] == next[next.len() - suffix - 1]
+    {
+        suffix += 1;
+    }
+    let start = text_position_at_character_offset(&previous, prefix);
+    let end = text_position_at_character_offset(&previous, previous.len() - suffix);
+    let replacement = next[prefix..next.len() - suffix].iter().collect::<String>();
+    TextEdit::new(TextRange::new(start, end), replacement)
+}
+
+fn text_position_at_character_offset(characters: &[char], offset: usize) -> TextPosition {
+    let mut line = 0u32;
+    let mut utf16_column = 0u32;
+    for character in characters.iter().take(offset) {
+        if *character == '\n' {
+            line = line.saturating_add(1);
+            utf16_column = 0;
+        } else {
+            utf16_column = utf16_column
+                .saturating_add(u32::try_from(character.len_utf16()).unwrap_or(u32::MAX));
+        }
+    }
+    TextPosition::new(line, utf16_column)
+}
+
 /// Complete projection for one logical view and renderer client.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2303,6 +2408,42 @@ mod tests {
         assert!(encoded.contains(r#""maxProtocolVersion":1"#));
         assert!(!encoded.contains(r#""protocolVersion""#));
         assert_eq!(decode_ui_frame(&frame[..frame.len() - 1]).unwrap(), message);
+    }
+
+    #[test]
+    fn markdown_projection_diff_syncs_unicode_text_and_multiline_selection() {
+        let previous = UiNode::markdown_editor(
+            "editor",
+            MarkdownEditorSpec::new(
+                "alpha 🙂\nbeta",
+                TextSelection::caret(TextPosition::new(0, 0)),
+            ),
+        );
+        let next = UiNode::markdown_editor(
+            "editor",
+            MarkdownEditorSpec::new(
+                "alpha brave 🙂\nbeta!",
+                TextSelection {
+                    anchor: TextPosition::new(0, 6),
+                    head: TextPosition::new(1, 5),
+                },
+            )
+            .dirty(true),
+        );
+        let operations = markdown_delta_operations(&previous, &next);
+        assert!(matches!(
+            operations.first(),
+            Some(UiDeltaOperation::MarkdownReplaceRange { .. })
+        ));
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            UiDeltaOperation::MarkdownSetSelection { selection, .. }
+                if selection.anchor.line == 0 && selection.head.line == 1
+        )));
+
+        let mut applied = previous;
+        applied.apply_delta_operations(&operations).unwrap();
+        assert_eq!(applied, next);
     }
 
     #[test]

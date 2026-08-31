@@ -27,10 +27,16 @@ pub const PAGE_COMPONENT_CAPABILITY: &str = "page";
 pub const LIST_COMPONENT_CAPABILITY: &str = "list";
 /// Renderer capability for the v1 ListItem row.
 pub const LIST_ITEM_COMPONENT_CAPABILITY: &str = "listItem";
+/// Renderer capability for ListItem subtitle/trailing-value metadata.
+pub const LIST_ITEM_METADATA_CAPABILITY: &str = "listItemMetadata";
+/// Renderer capability for an activatable ListItem row.
+pub const LIST_ITEM_ACTIVATE_CAPABILITY: &str = "listItemActivate";
 /// Renderer capability for the v1 Toggle control.
 pub const TOGGLE_COMPONENT_CAPABILITY: &str = "toggle";
 /// Renderer capability for the v1 Input control.
 pub const INPUT_COMPONENT_CAPABILITY: &str = "input";
+/// Renderer capability for Page-level back navigation.
+pub const PAGE_BACK_CAPABILITY: &str = "pageBack";
 
 const MAX_ITEMS: usize = 100_000;
 const MAX_SHORT_TEXT_BYTES: usize = 4 * 1024;
@@ -125,6 +131,10 @@ impl ListItemSlot {
 pub struct ListItem {
     pub id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     #[serde(default)]
     pub done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +145,8 @@ pub struct ListItem {
     pub accessory: Option<ListItemSlot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activate: Option<String>,
 }
 
 impl ListItem {
@@ -143,12 +155,30 @@ impl ListItem {
         Self {
             id: id.into(),
             label: label.into(),
+            detail: None,
+            value: None,
             done: false,
             leading: None,
             trailing: None,
             accessory: None,
             delete: None,
+            activate: None,
         }
+    }
+
+    /// Secondary row text, rendered beneath the label natively and inline in
+    /// compact terminal lists.
+    #[must_use]
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// Trailing read-only value such as a quota, date, or status.
+    #[must_use]
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(value.into());
+        self
     }
 
     #[must_use]
@@ -181,9 +211,22 @@ impl ListItem {
         self
     }
 
+    /// Declares the idempotent action used to open or select this row.
+    #[must_use]
+    pub fn activate_action(mut self, action: impl Into<String>) -> Self {
+        self.activate = Some(action.into());
+        self
+    }
+
     pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
         validate_identifier(&self.id, &format!("{path}.id"))?;
         validate_text(&self.label, MAX_LABEL_BYTES, &format!("{path}.label"))?;
+        if let Some(detail) = &self.detail {
+            validate_text(detail, MAX_LABEL_BYTES, &format!("{path}.detail"))?;
+        }
+        if let Some(value) = &self.value {
+            validate_text(value, MAX_SHORT_TEXT_BYTES, &format!("{path}.value"))?;
+        }
         for (name, slot) in [
             ("leading", self.leading.as_ref()),
             ("trailing", self.trailing.as_ref()),
@@ -213,6 +256,9 @@ impl ListItem {
         }
         if let Some(action) = &self.delete {
             validate_identifier(action, &format!("{path}.delete"))?;
+        }
+        if let Some(action) = &self.activate {
+            validate_identifier(action, &format!("{path}.activate"))?;
         }
         Ok(())
     }
@@ -266,12 +312,21 @@ impl ListItem {
             theme.item
         };
         spans.push(Span::styled(self.label.clone(), label_style));
+        if let Some(detail) = &self.detail {
+            spans.push(Span::styled(format!("  {detail}"), theme.detail));
+        }
+        if let Some(value) = &self.value {
+            spans.push(Span::styled(format!("  {value}"), theme.value));
+        }
         for slot in [&self.trailing, &self.accessory].into_iter().flatten() {
             let toggle = slot.as_toggle();
             spans.push(Span::styled(format!("  {}", toggle.marker()), theme.toggle));
         }
         if self.delete.is_some() {
             spans.push(Span::styled("  [d]", theme.delete));
+        }
+        if self.activate.is_some() {
+            spans.push(Span::styled("  ›", theme.navigation));
         }
         RatatuiListItem::new(Line::from(spans))
     }
@@ -509,6 +564,8 @@ impl PageBodySlot {
 pub struct Page {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<PageHeaderSlot>,
     pub body: PageBodySlot,
 }
@@ -518,6 +575,7 @@ impl Page {
     pub fn new(title: impl Into<String>, list: List) -> Self {
         Self {
             title: title.into(),
+            back: None,
             header: None,
             body: PageBodySlot::List(list),
         }
@@ -526,6 +584,13 @@ impl Page {
     #[must_use]
     pub fn input(mut self, input: Input) -> Self {
         self.header = Some(PageHeaderSlot::Input(input));
+        self
+    }
+
+    /// Declares a Page-level action that returns to the previous semantic view.
+    #[must_use]
+    pub fn back_action(mut self, action: impl Into<String>) -> Self {
+        self.back = Some(action.into());
         self
     }
 
@@ -550,6 +615,20 @@ impl Page {
         if self.header.is_some() {
             capabilities.push(INPUT_COMPONENT_CAPABILITY);
         }
+        if self.back.is_some() {
+            capabilities.push(PAGE_BACK_CAPABILITY);
+        }
+        if self
+            .list()
+            .items
+            .iter()
+            .any(|item| item.detail.is_some() || item.value.is_some())
+        {
+            capabilities.push(LIST_ITEM_METADATA_CAPABILITY);
+        }
+        if self.list().items.iter().any(|item| item.activate.is_some()) {
+            capabilities.push(LIST_ITEM_ACTIVATE_CAPABILITY);
+        }
         if self
             .list()
             .items
@@ -564,6 +643,9 @@ impl Page {
     /// Validates the closed tree, including globally unique nested ids.
     pub fn validate(&self) -> Result<(), ComponentValidationError> {
         validate_text(&self.title, MAX_SHORT_TEXT_BYTES, "page.title")?;
+        if let Some(back) = &self.back {
+            validate_identifier(back, "page.back")?;
+        }
         if let Some(header) = &self.header {
             header.validate("page.header")?;
         }
@@ -677,11 +759,14 @@ pub struct PageTheme {
     pub style: Style,
     pub title: Style,
     pub item: Style,
+    pub detail: Style,
+    pub value: Style,
     pub done: Style,
     pub toggle: Style,
     pub delete: Style,
     pub empty: Style,
     pub selected: Style,
+    pub navigation: Style,
     pub left_padding: u16,
 }
 
@@ -692,11 +777,14 @@ impl PageTheme {
             style: Style::new(),
             title: Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
             item: Style::new().fg(theme.text),
+            detail: Style::new().fg(theme.muted),
+            value: Style::new().fg(theme.muted),
             done: Style::new().fg(theme.muted),
             toggle: Style::new().fg(theme.accent),
             delete: Style::new().fg(theme.subtle),
             empty: Style::new().fg(theme.subtle),
             selected: theme.selected_row,
+            navigation: Style::new().fg(theme.subtle),
             left_padding: SELECTABLE_LEFT_PADDING,
         }
     }
@@ -750,8 +838,13 @@ impl Widget for PageWidget<'_> {
             .constraints(constraints)
             .split(area);
         Paragraph::new(format!(
-            "{}{}",
+            "{}{}{}",
             " ".repeat(usize::from(self.theme.left_padding)),
+            if self.page.back.is_some() {
+                "‹  "
+            } else {
+                ""
+            },
             self.page.title
         ))
         .style(self.theme.title)
@@ -917,6 +1010,47 @@ mod tests {
         assert!(text.contains("Todos"));
         assert!(text.contains("[x]"));
         assert!(text.contains("Run the standalone TUI"));
+        let selected_y = 4;
+        assert_eq!(
+            rendered[(0, selected_y)].bg,
+            ratatui::style::Color::Rgb(63, 63, 70)
+        );
+        assert_eq!(
+            rendered[(49, selected_y)].bg,
+            ratatui::style::Color::Rgb(63, 63, 70)
+        );
+        assert_eq!(rendered[(0, selected_y)].symbol(), " ");
+        assert_eq!(rendered[(1, selected_y)].symbol(), " ");
+        assert_eq!(rendered[(2, selected_y)].symbol(), "R");
+    }
+
+    #[test]
+    fn master_detail_fields_require_explicit_renderer_capabilities() {
+        let page = Page::new(
+            "Usage",
+            List::new(
+                "providers",
+                vec![
+                    ListItem::new("codex", "Codex")
+                        .detail("Pro")
+                        .value("7-day 3% used")
+                        .activate_action("open-provider"),
+                ],
+            ),
+        )
+        .back_action("close-provider");
+        page.validate().unwrap();
+        assert_eq!(
+            page.required_capabilities(),
+            vec![
+                "page",
+                "list",
+                "listItem",
+                "pageBack",
+                "listItemMetadata",
+                "listItemActivate",
+            ]
+        );
     }
 
     #[test]

@@ -8,16 +8,22 @@ export const UI_MEDIA_CAPABILITY = "media" as const;
 export const UI_PAGE_CAPABILITY = "page" as const;
 export const UI_LIST_CAPABILITY = "list" as const;
 export const UI_LIST_ITEM_CAPABILITY = "listItem" as const;
+export const UI_LIST_ITEM_METADATA_CAPABILITY = "listItemMetadata" as const;
+export const UI_LIST_ITEM_ACTIVATE_CAPABILITY = "listItemActivate" as const;
 export const UI_TOGGLE_CAPABILITY = "toggle" as const;
 export const UI_INPUT_CAPABILITY = "input" as const;
+export const UI_PAGE_BACK_CAPABILITY = "pageBack" as const;
 export const UI_COMPONENT_CAPABILITIES = [
   UI_MARKDOWN_EDITOR_CAPABILITY,
   UI_MEDIA_CAPABILITY,
   UI_PAGE_CAPABILITY,
   UI_LIST_CAPABILITY,
   UI_LIST_ITEM_CAPABILITY,
+  UI_LIST_ITEM_METADATA_CAPABILITY,
+  UI_LIST_ITEM_ACTIVATE_CAPABILITY,
   UI_TOGGLE_CAPABILITY,
   UI_INPUT_CAPABILITY,
+  UI_PAGE_BACK_CAPABILITY,
 ] as const;
 export const MAX_INLINE_MEDIA_BYTES = 256 * 1024;
 
@@ -190,11 +196,14 @@ export type ListItemSlot = ToggleSpec | UnsupportedComponentSlot;
 export interface ListItemSpec {
   id: string;
   label: string;
+  detail?: string;
+  value?: string;
   done?: boolean;
   leading?: ListItemSlot;
   trailing?: ListItemSlot;
   accessory?: ListItemSlot;
   delete?: string;
+  activate?: string;
 }
 
 export interface ListSpec {
@@ -218,6 +227,7 @@ export interface PageNode {
   id: string;
   type: "page";
   title: string;
+  back?: string;
   header?: InputSpec | UnsupportedComponentSlot;
   body: ListSpec | UnsupportedComponentSlot;
 }
@@ -282,6 +292,13 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
     UI_LIST_ITEM_CAPABILITY,
   ];
   if (node.header !== undefined) capabilities.push(UI_INPUT_CAPABILITY);
+  if (node.back !== undefined) capabilities.push(UI_PAGE_BACK_CAPABILITY);
+  if (node.body.items.some((item) => item.detail !== undefined || item.value !== undefined)) {
+    capabilities.push(UI_LIST_ITEM_METADATA_CAPABILITY);
+  }
+  if (node.body.items.some((item) => item.activate !== undefined)) {
+    capabilities.push(UI_LIST_ITEM_ACTIVATE_CAPABILITY);
+  }
   if (node.body.items.some((item) => [item.leading, item.trailing, item.accessory]
     .some((slot) => slot?.type === "toggle"))) {
     capabilities.push(UI_TOGGLE_CAPABILITY);

@@ -199,31 +199,37 @@ struct MarkdownInsertMenuView: View {
                     .frame(height: 30)
             } else {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    Button {
-                        onSelect(item.kind)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Text(item.sample)
-                                .font(.system(.body, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 54, alignment: .leading)
-                            Text(item.label)
-                            Spacer(minLength: 6)
-                        }
-                        .padding(.horizontal, 8)
-                        .frame(height: 28)
-                        .contentShape(Rectangle())
+                    HStack(spacing: 8) {
+                        Text(String(item.shortcut))
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 14, alignment: .leading)
+                        Text(item.label)
+                            .frame(width: 116, alignment: .leading)
+                        Text(item.sample)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                    .contentShape(Rectangle())
                     .background(
                         index == selectedIndex ? Color.accentColor.opacity(0.18) : .clear,
                         in: RoundedRectangle(cornerRadius: 5)
                     )
+                    .onTapGesture {
+                        onSelect(item.kind)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAddTraits(index == selectedIndex ? .isSelected : [])
                 }
             }
         }
         .padding(6)
-        .frame(width: 270)
+        .frame(width: 238, alignment: .leading)
         .background(.regularMaterial)
     }
 }

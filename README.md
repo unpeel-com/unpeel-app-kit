@@ -64,6 +64,12 @@ to open the closed block menu; keep typing to filter, use Up/Down and
 Enter/Tab, and use Escape to remove the pending slash command. Backspace at a
 heading, list, task, or quote marker converts that block back to plain text.
 The same menu and Backspace rules are built into the AppKit and web renderers.
+The terminal menu is a compact bordered shortcut/name/sample dropdown. The
+native popover keeps the document as first responder, so Up/Down, Home/End,
+Enter/Tab, and Escape navigate it without stealing typing. Terminal drag,
+double-click word, triple-click line, and multi-line selections publish
+selection deltas alongside Unicode-safe text deltas, keeping the hosted view
+on the same authoritative range.
 
 ## Standalone TUI usage
 
@@ -111,8 +117,9 @@ The standalone component layer currently provides:
 | --- | --- |
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
-| `Page` | Top-level standalone Ratatui presentation with constrained Input header and List body slots |
-| `List` / `ListItem` | Ratatui List rows with stable semantic ids and named, closed control slots |
+| `Page` | Top-level standalone Ratatui presentation with constrained Input header/List body slots and one optional back action |
+| `List` / `ListItem` | Ratatui List rows with stable ids, detail/value metadata, one optional activate action, and named closed control slots |
+| `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
 | `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
 | `KitTheme` / `ThemeMonitor` | Shared dark/light defaults plus a live hosted project/workspace accent for selectable rows, menus, text, and scrollbars |
@@ -150,7 +157,7 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
-| Page semantic projection | Closed Page/List/ListItem/Toggle/Input trees with compact row/control deltas and native SwiftUI/DOM wrappers |
+| Page semantic projection | Closed Page/List/ListItem/Toggle/Input trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
 
 The hosted vocabulary is deliberately small and opinionated rather than a
 portable encoding of every possible Ratatui widget:
@@ -724,7 +731,10 @@ auto-scroll, and the shared proportional scrollbar. `MarkdownEditorInteraction`
 adds the opinionated editing layer used by the example: character/word/line
 selection, list continuation, marker-aware Backspace, and the closed `/`
 insert menu (`Heading 1`–`6`, Text, Bulleted/Numbered list, To-do, Quote, Code,
-and Divider). App-specific commands and syntax highlighting remain App-owned
+and Divider). Its terminal dropdown is caret-anchored, compact, bordered, and
+keyboard/pointer navigable. `markdown_delta_operations` synchronizes the
+resulting Unicode-safe text edit and oriented selection without replacing the
+whole document. App-specific commands and syntax highlighting remain App-owned
 and can use `text_area_mut()` (or normal `DerefMut` coercion) to reach the
 underlying editor.
 

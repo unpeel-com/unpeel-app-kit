@@ -4,6 +4,36 @@ import Testing
 @testable import UnpeelAppKitUI
 
 @Test
+func nativeMarkdownSelectionReconciliationPreservesOnlyUnsyncedLocalRanges() {
+    let previous = NSRange(location: 2, length: 0)
+    let incoming = NSRange(location: 2, length: 8)
+    #expect(shouldApplyAuthoritativeMarkdownSelection(
+        editorOwnsFocus: true,
+        currentRange: previous,
+        previousRange: previous,
+        incomingRange: incoming
+    ))
+    #expect(shouldApplyAuthoritativeMarkdownSelection(
+        editorOwnsFocus: true,
+        currentRange: incoming,
+        previousRange: previous,
+        incomingRange: incoming
+    ))
+    #expect(!shouldApplyAuthoritativeMarkdownSelection(
+        editorOwnsFocus: true,
+        currentRange: NSRange(location: 5, length: 3),
+        previousRange: previous,
+        incomingRange: incoming
+    ))
+    #expect(shouldApplyAuthoritativeMarkdownSelection(
+        editorOwnsFocus: false,
+        currentRange: NSRange(location: 5, length: 3),
+        previousRange: previous,
+        incomingRange: incoming
+    ))
+}
+
+@Test
 func sharedProtocolFixturesDecode() throws {
     let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let fixture = testDirectory
@@ -14,7 +44,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 15)
+    #expect(messages.count == 16)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -112,6 +142,21 @@ func sharedProtocolFixturesDecode() throws {
         return
     }
     #expect(updatedList.items[1].done)
+
+    guard case let .snapshot(usageSnapshot) = messages[15],
+          case let .page(usagePage) = usageSnapshot.root.component,
+          case let .list(usageList) = usagePage.body
+    else {
+        Issue.record("sixteenth fixture must contain the Usage master/detail Page")
+        return
+    }
+    #expect(usagePage.back == "close-provider")
+    #expect(usageList.items[0].detail == "Resets in 6d 18h")
+    #expect(usageList.items[0].value == "3% used")
+    #expect(usageList.items[1].activate == "refresh-usage")
+    #expect(usagePage.requiredCapabilities == [
+        "page", "list", "listItem", "pageBack", "listItemMetadata", "listItemActivate",
+    ])
 }
 
 @Test

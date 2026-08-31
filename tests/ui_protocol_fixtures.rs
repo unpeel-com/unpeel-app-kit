@@ -16,7 +16,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 15);
+    assert_eq!(messages.len(), 16);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -117,4 +117,21 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         panic!("Todo delta must preserve Page");
     };
     assert!(page.list().items[1].done);
+
+    let UiMessage::Snapshot(usage_snapshot) = &messages[15] else {
+        panic!("sixteenth fixture must contain the Usage master/detail Page");
+    };
+    let UiComponent::Page(page) = &usage_snapshot.root.element else {
+        panic!("Usage fixture must contain Page");
+    };
+    assert_eq!(page.back.as_deref(), Some("close-provider"));
+    assert_eq!(
+        page.list().items[0].detail.as_deref(),
+        Some("Resets in 6d 18h")
+    );
+    assert_eq!(page.list().items[0].value.as_deref(), Some("3% used"));
+    assert_eq!(
+        page.list().items[1].activate.as_deref(),
+        Some("refresh-usage")
+    );
 }

@@ -11,16 +11,22 @@ public enum UnpeelUIProtocol {
     public static let pageCapability = "page"
     public static let listCapability = "list"
     public static let listItemCapability = "listItem"
+    public static let listItemMetadataCapability = "listItemMetadata"
+    public static let listItemActivateCapability = "listItemActivate"
     public static let toggleCapability = "toggle"
     public static let inputCapability = "input"
+    public static let pageBackCapability = "pageBack"
     public static let supportedComponentCapabilities = [
         markdownEditorCapability,
         mediaCapability,
         pageCapability,
         listCapability,
         listItemCapability,
+        listItemMetadataCapability,
+        listItemActivateCapability,
         toggleCapability,
         inputCapability,
+        pageBackCapability,
     ]
     private static let maximumWireVersion = Int(UInt32.max)
 
@@ -798,43 +804,55 @@ extension UIListItemSlot: Codable {
 public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendable {
     public let id: String
     public let label: String
+    public let detail: String?
+    public let value: String?
     public var done: Bool
     public var leading: UIListItemSlot?
     public var trailing: UIListItemSlot?
     public var accessory: UIListItemSlot?
     public let delete: String?
+    public let activate: String?
 
     public init(
         id: String,
         label: String,
+        detail: String? = nil,
+        value: String? = nil,
         done: Bool = false,
         leading: UIListItemSlot? = nil,
         trailing: UIListItemSlot? = nil,
         accessory: UIListItemSlot? = nil,
-        delete: String? = nil
+        delete: String? = nil,
+        activate: String? = nil
     ) {
         self.id = id
         self.label = label
+        self.detail = detail
+        self.value = value
         self.done = done
         self.leading = leading
         self.trailing = trailing
         self.accessory = accessory
         self.delete = delete
+        self.activate = activate
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, done, leading, trailing, accessory, delete
+        case id, label, detail, value, done, leading, trailing, accessory, delete, activate
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         label = try container.decode(String.self, forKey: .label)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        value = try container.decodeIfPresent(String.self, forKey: .value)
         done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
         leading = try container.decodeIfPresent(UIListItemSlot.self, forKey: .leading)
         trailing = try container.decodeIfPresent(UIListItemSlot.self, forKey: .trailing)
         accessory = try container.decodeIfPresent(UIListItemSlot.self, forKey: .accessory)
         delete = try container.decodeIfPresent(String.self, forKey: .delete)
+        activate = try container.decodeIfPresent(String.self, forKey: .activate)
         let toggles = [leading, trailing, accessory].compactMap { slot -> UIToggleSpec? in
             guard case let .toggle(toggle) = slot else { return nil }
             return toggle
@@ -967,11 +985,18 @@ extension UIPageBodySlot: Codable {
 
 public struct PageSpec: Codable, Equatable, Hashable, Sendable {
     public let title: String
+    public let back: String?
     public var header: UIPageHeaderSlot?
     public var body: UIPageBodySlot
 
-    public init(title: String, header: UIPageHeaderSlot? = nil, body: UIPageBodySlot) {
+    public init(
+        title: String,
+        back: String? = nil,
+        header: UIPageHeaderSlot? = nil,
+        body: UIPageBodySlot
+    ) {
         self.title = title
+        self.back = back
         self.header = header
         self.body = body
     }
@@ -987,6 +1012,13 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
             capabilities.append(UnpeelUIProtocol.inputCapability)
         }
         guard case let .list(list) = body else { return nil }
+        if back != nil { capabilities.append(UnpeelUIProtocol.pageBackCapability) }
+        if list.items.contains(where: { $0.detail != nil || $0.value != nil }) {
+            capabilities.append(UnpeelUIProtocol.listItemMetadataCapability)
+        }
+        if list.items.contains(where: { $0.activate != nil }) {
+            capabilities.append(UnpeelUIProtocol.listItemActivateCapability)
+        }
         var hasToggle = false
         for item in list.items {
             for slot in [item.leading, item.trailing, item.accessory].compactMap({ $0 }) {
