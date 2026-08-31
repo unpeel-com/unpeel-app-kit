@@ -557,6 +557,115 @@ animation state. If an animated raster format reaches the terminal decoder,
 only its first decoded frame is rendered; animation support for native/web is
 a future component version, not part of this contract.
 
+## Surface embed plan (design only)
+
+Surface is App Kit's planned canvas embed, not another component-rendering
+engine. The Media component and canonical Todo App are now landed; this
+section records the integration boundary only. It does not add a
+`UiComponent::Surface` variant, Cargo dependency, protocol fixture, or
+renderer adapter yet.
+
+The design follows the working `unpeel-surface` runtime rather than copying
+it. Its `host/src/ratatui.rs` already owns `SurfaceLayer`, `SurfaceView`, the
+wgpu/WGSL renderer, mmap frame ring, Kitty image lifecycle, cell-to-logical
+coordinate mapping, and automatic `UNPEEL_SURFACE_SOCKET` detection. Its
+`host/src/remote.rs` owns the framed `USRF` v1 retained-scene/resource stream
+and reverse event/resize packets. On Apple,
+`RemoteSurfacePresenterView` consumes arbitrary USRF chunks and renders into a
+`CAMetalLayer`; on web, `web/src/remote.rs` already combines `SceneDecoder`
+with the shared WebGPU renderer and emits normalized Surface input.
+
+The planned leaf component has a deliberately small closed specification:
+
+- `reference { sessionId, streamId }` contains opaque, Host-resolved
+  identifiers only. It never contains a Unix socket path, URL, credential,
+  producer generation, scene command, resource body, or rendered pixel.
+- `cells { w, h }` describes the terminal footprint and `points { w, h }`
+  describes the native footprint; web treats points as CSS pixels. As with
+  Media, either sizing object may be absent and either object may specify one
+  axis, deriving the other from the current Surface logical-viewport aspect.
+  With neither present, the containing pane or explicitly enumerated slot
+  supplies the box.
+- `background` is a closed policy: transparent, or a solid sRGBA color. It is
+  the compositing background behind the Surface scene, not a scene command or
+  arbitrary style map.
+- `inputPolicy` is one of `none`, `pointer`, or `pointerAndKeyboard`.
+  `pointer` covers pointer/touch, drag, scroll, and zoom. Keyboard events are
+  forwarded only while the embed owns focus and only when USRF represents the
+  event; text/document editing remains an App Kit semantic control rather than
+  an invented canvas text protocol.
+
+`Surface` has no arbitrary children, component slots, semantic actions, or
+scene-shaped JSON. It may appear only as a root or in a future named slot whose
+container schema explicitly admits a Surface. The effective input permission
+is the intersection of `inputPolicy` and the attached participant's existing
+session grants; referencing a stream never grants permission to view or drive
+it.
+
+### Renderer integration
+
+- **Terminal:** a future, default-off `surface-embed` Cargo feature adds an
+  optional `unpeel-surface` dependency. App authors bind the opaque reference
+  to their App-owned `SurfaceLayer`; App Kit reserves the Ratatui cell rect,
+  renders `SurfaceView` there, and delegates drawing, presentation, clearing,
+  resizing, and coordinate conversion. Default and ordinary pure-TUI builds
+  continue to pull neither `unpeel-surface` nor wgpu. The current
+  `SurfaceLayer` is intentionally full-terminal, so arbitrary embedded rects
+  require a small origin/rect API in `unpeel-surface`; App Kit must consume
+  that API rather than reaching into `TerminalPresenter` or recreating its
+  Kitty protocol.
+- **Swift:** wrap Surface's transport-free `RemoteSurfacePresenterView` in the
+  component's allocated point-size box and feed it USRF chunks from the
+  existing authenticated Host route. The existing UIKit/CAMetalLayer
+  presenter is the reference implementation; a macOS `NSView` adapter should
+  remain in `unpeel-surface`, not be rebuilt in App Kit.
+- **Web:** factor or wrap the existing `web/src/remote.rs`
+  `SceneDecoder`/WebGPU presenter around an allocated canvas. The App Kit
+  wrapper supplies Host-routed chunks directly; it must not use the
+  `surface-connect` development HTTP endpoint or implement another USRF
+  decoder.
+
+The connected Swift and web presenters currently normalize pointer, touch,
+scroll, and zoom input, while their fixture shells keep terminal keyboard
+input separate. Before `pointerAndKeyboard` lands, `unpeel-surface` should
+expose focused key/action packet forwarding through those presenter adapters;
+App Kit must call that API rather than inventing a parallel key encoding. The
+presenters' current fixed background defaults likewise need an upstream
+configuration seam for the component's background policy.
+
+Pointer and supported key events inside the allocated rectangle travel back
+as USRF input after the Surface adapter maps them into logical coordinates.
+All interaction outside that rectangle, plus App Kit controls over or beside
+the canvas, stays on `unpeel.ui`. The same gesture or key must never be emitted
+on both protocols.
+
+The Host associates `sessionId`/`streamId` with its existing private Surface
+producer connection and authorizes the requesting Controller or agent before
+opening the stream. Those identifiers are broker routing metadata, not new
+USRF header fields. A producer-generation change resets only the Surface
+decoder/resource cache; an App Kit revision change resets neither Surface nor
+the terminal. UI snapshots and deltas change only when the reference, sizing,
+background, or input policy changes, so animation never drives semantic JSON.
+
+### D14/D16 boundary
+
+This composition is the scenes-versus-components split decided by D14 and
+D16. Surface/USRF owns canvas scenes, GPU resources, pixels, presenter input,
+and producer generations. App Kit/`unpeel.ui` owns Page, List, status, forms,
+documents, accessibility, participant-aware actions, and semantic revisions.
+App Kit Apps do not consume or project Surface guest capability exports such
+as `surface_list_ptr/len` or `surface_status_ptr/len`; controls around an
+embedded canvas use the App Kit vocabulary instead, so the protocols never
+compete for the same UI.
+
+Static Media remains a separate, simpler path: `ratatui-image` may use Kitty
+for one referenced image, while Surface owns its dynamic wgpu/mmap/Kitty
+pipeline. Neither implementation calls into or substitutes for the other.
+If a renderer recognizes App Kit but lacks the Surface capability, cannot
+resolve the authorized stream, or does not recognize the component version,
+it keeps the attachment alive and falls back to the terminal view for the
+complete pane.
+
 ## Revision and collaboration semantics
 
 An event names the snapshot revision on which the interaction occurred. The
@@ -605,6 +714,7 @@ The next useful vocabulary is intentionally conventional:
 
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
+| `Surface` (design only) | optional `unpeel-surface::ratatui::SurfaceLayer` behind the planned default-off `surface-embed` feature | reference-only canvas embed: Host-resolved session/stream id, cells/points sizing, background, and input policy; existing Metal/WebGPU USRF presenters; no scene or pixel JSON |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
 | `Explorer` | existing `Explorer` | hierarchical file navigation and drops |
