@@ -1,9 +1,14 @@
 # unpeel-app-kit
 
-Reusable, borderless [Ratatui](https://ratatui.rs/) components for
-terminal-native Unpeel Apps. The crate is standalone-safe: Unpeel-specific
-integration becomes an inert no-op or an explicit availability error when an
-App runs outside an Unpeel-hosted session.
+An opinionated, Ratatui-first component library for terminal-powered Unpeel
+Apps. An App remains a normal terminal process and renders through
+[Ratatui](https://ratatui.rs/) everywhere. Components can additionally publish
+the same state to native SwiftUI/AppKit or web renderers when hosted by
+Unpeel—similar to an Ionic-style component vocabulary with platform-specific
+renderers.
+
+The crate is standalone-safe: Unpeel-specific integration becomes an inert
+no-op or an explicit availability error outside an Unpeel-hosted session.
 
 The kit currently provides:
 
@@ -25,10 +30,64 @@ The kit currently provides:
 | `Navigator<Route>` | Rendering-neutral root/detail view stack with consistent back semantics |
 | `display_path_from_root` | Render paths project-relative without weakening absolute semantic path operations |
 | `VerticalScrollbar` | Shared proportional, capless scrollbar |
-| `MarkdownTextArea` | Wrapped Markdown editing surface behind the `markdown-text-area` feature |
+| `MarkdownTextArea` | Ratatui-backed Markdown editor behind the `markdown-text-area` feature |
+| `UiBridge` / `unpeel.ui/1` | App-owned, reconnectable Unix endpoint for multi-renderer snapshots, authenticated actions, presence, and acknowledgements without touching the PTY |
+| `MarkdownEditor` | First cross-renderer component: Ratatui editing plus SwiftUI/AppKit and web wrappers |
 
 The crate owns reusable component behavior, not an App's event loop, key map,
 commands, or surrounding chrome.
+
+## Component UI preview
+
+App Kit is growing into a deliberately small component system rather than a
+portable encoding of every possible Ratatui widget:
+
+```text
+SwiftUI/AppKit Host ───────────────┐
+                                  │ trusted local unpeel.ui/1
+browser ─ authenticated WSS ─▶ workspace broker
+                                  ▼
+terminal-backed Rust App + UiBridge
+├─ model + reducer
+├─ App Kit/Ratatui → the normal PTY
+└─ semantic snapshots/actions → native or DOM component UI
+```
+
+The Rust App remains authoritative for state, validation, persistence, and
+commands. Native and web wrappers render component snapshots and return
+stable actions; they never scrape ANSI output. Raw Ratatui remains the escape
+hatch for App-specific terminal UI and simply has no native/web projection
+until an App Kit component exists for it.
+
+The App binds the Host-provided Unix socket, so GUI or workspace-server
+restarts can reconnect while the terminal process keeps running. Multiple
+authenticated participants can attach to the same view with broker-attested
+grants and presence. When the Host hides the PTY in favor of component UI,
+`UiBridge::should_render_terminal()` lets the App suspend Ratatui drawing
+without suspending its model or process.
+
+At startup, `UiBridge::detect()` consumes and scrubs the inherited socket path
+and bearer token before child processes can inherit them. The endpoint uses
+mode-`0600` Unix sockets plus same-user peer credentials where supported,
+requires a bounded-time authenticated attach, negotiates a min/max protocol
+range, and isolates slow or flooding renderers with per-connection and
+per-client quotas.
+
+`MarkdownEditor` is the first vertical slice. `Page`, `List`, `ListItem`,
+`Input`, and later richer components such as `DataGrid` can join the same
+closed, versioned vocabulary. See [the component architecture](docs/ui-components.md),
+the trusted [`unpeel.ui/1` schema](protocol/unpeel-ui-v1.schema.json), and the
+separate [browser-to-workspace schema](protocol/unpeel-workspace-ui-v1.schema.json).
+
+The renderer packages live with the component definitions so the contract
+cannot drift:
+
+- `swift/` — `UnpeelAppKitUI`, including a real `NSTextView` in SwiftUI and a
+  reconnecting trusted Unix client;
+- `web/` — `@unpeel/app-kit-ui`, including a DOM Markdown renderer and the
+  untrusted `WorkspaceUiSession` WebSocket transport; and
+- `protocol/` — validated, forward-compatible schemas and shared fixtures
+  consumed by Rust, Swift, and web tests.
 
 ## Explorer filter focus
 
@@ -587,6 +646,8 @@ match drops.poll()? {
 cargo test --no-default-features
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
+(cd swift && swift test)
+(cd web && bun install --frozen-lockfile && bun run check && bun test)
 ```
 
 The Explorer and drag tests render into Ratatui's `Buffer`/`TestBackend` and

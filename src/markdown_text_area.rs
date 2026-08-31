@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::{Deref, DerefMut};
 
 use ratatui::Frame;
@@ -9,7 +10,11 @@ use tui_textarea::{CursorMove, CursorRenderMode, Input, Key, TextArea, WrapMode}
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
-use crate::VerticalScrollbar;
+use crate::{
+    ActionId, MarkdownEditorActions, MarkdownEditorSpec, MarkdownPresentation, NodeId, TextEdit,
+    TextPosition, TextSelection, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION,
+    UI_PROTOCOL_NAME, UiEvent, UiEventKind, UiEventValue, UiNode, VerticalScrollbar,
+};
 
 const DEFAULT_LEFT_PADDING: u16 = 1;
 const DEFAULT_TAB_LENGTH: u8 = 2;
@@ -41,7 +46,136 @@ pub struct MarkdownTextAreaStyle {
     pub scrollbar_thumb: Style,
 }
 
-/// A reusable Markdown editing surface built on `tui-textarea-2`.
+/// Cross-renderer component-library name for [`MarkdownTextAreaStyle`].
+pub type MarkdownEditorStyle = MarkdownTextAreaStyle;
+
+/// Cross-renderer presentation metadata paired with a [`MarkdownTextArea`].
+///
+/// The text, cursor, selection, and placeholder continue to come directly
+/// from `tui-textarea`. This configuration contains only cross-renderer state
+/// that belongs to the surrounding App.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkdownEditorConfig {
+    node_id: NodeId,
+    presentation: MarkdownPresentation,
+    read_only: bool,
+    dirty: bool,
+    title: Option<String>,
+    actions: MarkdownEditorActions,
+}
+
+impl MarkdownEditorConfig {
+    /// Creates editable Markdown component metadata with the standard actions.
+    #[must_use]
+    pub fn new(node_id: impl Into<NodeId>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            presentation: MarkdownPresentation::Source,
+            read_only: false,
+            dirty: false,
+            title: None,
+            actions: MarkdownEditorActions::editable(),
+        }
+    }
+
+    #[must_use]
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
+    #[must_use]
+    pub const fn presentation(mut self, presentation: MarkdownPresentation) -> Self {
+        self.presentation = presentation;
+        self
+    }
+
+    #[must_use]
+    pub const fn dirty(mut self, dirty: bool) -> Self {
+        self.dirty = dirty;
+        self
+    }
+
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    #[must_use]
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self.actions = if read_only {
+            MarkdownEditorActions::read_only()
+        } else {
+            MarkdownEditorActions::editable()
+        };
+        self
+    }
+
+    /// Replaces standard action identifiers for an App-specific reducer.
+    #[must_use]
+    pub fn actions(mut self, actions: MarkdownEditorActions) -> Self {
+        self.actions = actions;
+        self
+    }
+}
+
+/// Result of applying one native/web Markdown action to the Ratatui component.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownEditorEvent {
+    TextChanged { changed: bool },
+    SelectionChanged,
+    Undo { changed: bool },
+    Redo { changed: bool },
+    SaveRequested,
+    PresentationRequested(MarkdownPresentation),
+}
+
+/// A matching Markdown action that cannot safely be applied.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MarkdownEditorEventError {
+    UnexpectedProtocol { protocol: String, version: u32 },
+    StaleRevision { expected: u64, received: u64 },
+    ReadOnly,
+    UnsupportedAction(String),
+    InvalidEvent(String),
+    InvalidPosition(TextPosition),
+    PositionTooLarge(TextPosition),
+}
+
+impl fmt::Display for MarkdownEditorEventError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedProtocol { protocol, version } => write!(
+                formatter,
+                "unexpected UI protocol {protocol}/{version}; expected {UI_PROTOCOL_NAME}/{UI_PROTOCOL_MIN_VERSION}..={UI_PROTOCOL_MAX_VERSION}"
+            ),
+            Self::StaleRevision { expected, received } => write!(
+                formatter,
+                "stale Markdown event revision {received}; current revision is {expected}"
+            ),
+            Self::ReadOnly => formatter.write_str("Markdown editor is read-only"),
+            Self::UnsupportedAction(action) => {
+                write!(formatter, "unsupported Markdown action {action:?}")
+            }
+            Self::InvalidEvent(message) => write!(formatter, "invalid Markdown event: {message}"),
+            Self::InvalidPosition(position) => write!(
+                formatter,
+                "invalid Markdown position {}:{} (UTF-16)",
+                position.line, position.utf16_column
+            ),
+            Self::PositionTooLarge(position) => write!(
+                formatter,
+                "Markdown position {}:{} exceeds the Ratatui editor cursor range",
+                position.line, position.utf16_column
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MarkdownEditorEventError {}
+
+/// A reusable Markdown editor built on `tui-textarea-2`.
 ///
 /// The component owns the visual concerns that otherwise tend to drift
 /// between Apps: soft wrapping, a continuation-aware line-number gutter,
@@ -56,8 +190,16 @@ pub struct MarkdownTextArea<'a> {
     left_padding: u16,
 }
 
+/// Opinionated App Kit Markdown component.
+///
+/// The current terminal implementation is [`MarkdownTextArea`], so existing
+/// Apps retain their API while new component-oriented code can use this name.
+/// Its `render` method is Ratatui-backed; [`MarkdownTextArea::ui_node`] and
+/// [`MarkdownTextArea::handle_ui_event`] drive Swift and web wrappers.
+pub type MarkdownEditor<'a> = MarkdownTextArea<'a>;
+
 impl<'a> MarkdownTextArea<'a> {
-    /// Creates a Markdown editing surface from an iterator of logical lines.
+    /// Creates a Markdown editor from an iterator of logical lines.
     pub fn new<I, S>(lines: I, style: MarkdownTextAreaStyle) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -112,6 +254,124 @@ impl<'a> MarkdownTextArea<'a> {
     pub fn set_lines(&mut self, lines: Vec<String>, cursor: (usize, usize)) {
         self.text_area.set_lines(lines, cursor);
         self.scroll_top = (0, 0);
+    }
+
+    /// Builds the owned component rendered by Swift or web clients.
+    ///
+    /// This is a second rendering path over the same `tui-textarea` state.
+    /// Calling it never changes terminal behavior or requires an Unpeel Host.
+    #[must_use]
+    pub fn ui_node(&self, config: &MarkdownEditorConfig) -> UiNode {
+        let mut editor = MarkdownEditorSpec::new(
+            markdown_document(self.text_area.lines()),
+            semantic_selection(&self.text_area),
+        )
+        .presentation(config.presentation)
+        .dirty(config.dirty)
+        .read_only(config.read_only)
+        .placeholder(self.text_area.placeholder_text());
+        editor.actions = config.actions.clone();
+        editor.title.clone_from(&config.title);
+        UiNode::markdown_editor(config.node_id.clone(), editor)
+    }
+
+    /// Applies one matching native/web action to the same state Ratatui uses.
+    ///
+    /// `Ok(None)` means the event targets another component. Commands whose
+    /// state belongs to the App, such as save and presentation changes, are
+    /// returned for the App reducer rather than applied inside the text area.
+    pub fn handle_ui_event(
+        &mut self,
+        revision: u64,
+        config: &MarkdownEditorConfig,
+        event: &UiEvent,
+    ) -> Result<Option<MarkdownEditorEvent>, MarkdownEditorEventError> {
+        if event.action.node_id != config.node_id {
+            return Ok(None);
+        }
+        if event.protocol != UI_PROTOCOL_NAME
+            || !(UI_PROTOCOL_MIN_VERSION..=UI_PROTOCOL_MAX_VERSION)
+                .contains(&event.protocol_version)
+        {
+            return Err(MarkdownEditorEventError::UnexpectedProtocol {
+                protocol: event.protocol.clone(),
+                version: event.protocol_version,
+            });
+        }
+        if event.base_revision != revision {
+            return Err(MarkdownEditorEventError::StaleRevision {
+                expected: revision,
+                received: event.base_revision,
+            });
+        }
+
+        let action = event.action.action.as_str();
+        if action_matches(config.actions.replace_range.as_ref(), action) {
+            if config.read_only {
+                return Err(MarkdownEditorEventError::ReadOnly);
+            }
+            require_kind(event, UiEventKind::Change)?;
+            let UiEventValue::TextEdit(edit) = &event.action.value else {
+                return Err(MarkdownEditorEventError::InvalidEvent(
+                    "replace-range requires a textEdit value".to_owned(),
+                ));
+            };
+            let changed = apply_text_edit(&mut self.text_area, edit)?;
+            self.scroll_top = (0, 0);
+            return Ok(Some(MarkdownEditorEvent::TextChanged { changed }));
+        }
+        if action_matches(config.actions.set_selection.as_ref(), action) {
+            require_kind(event, UiEventKind::Select)?;
+            let UiEventValue::TextSelection(selection) = &event.action.value else {
+                return Err(MarkdownEditorEventError::InvalidEvent(
+                    "set-selection requires a textSelection value".to_owned(),
+                ));
+            };
+            apply_text_selection(&mut self.text_area, *selection)?;
+            return Ok(Some(MarkdownEditorEvent::SelectionChanged));
+        }
+        if action_matches(config.actions.undo.as_ref(), action) {
+            if config.read_only {
+                return Err(MarkdownEditorEventError::ReadOnly);
+            }
+            require_command(event)?;
+            return Ok(Some(MarkdownEditorEvent::Undo {
+                changed: self.text_area.undo(),
+            }));
+        }
+        if action_matches(config.actions.redo.as_ref(), action) {
+            if config.read_only {
+                return Err(MarkdownEditorEventError::ReadOnly);
+            }
+            require_command(event)?;
+            return Ok(Some(MarkdownEditorEvent::Redo {
+                changed: self.text_area.redo(),
+            }));
+        }
+        if action_matches(config.actions.save.as_ref(), action) {
+            require_command(event)?;
+            return Ok(Some(MarkdownEditorEvent::SaveRequested));
+        }
+        if action_matches(config.actions.set_presentation.as_ref(), action) {
+            require_kind(event, UiEventKind::Change)?;
+            let UiEventValue::Text(presentation) = &event.action.value else {
+                return Err(MarkdownEditorEventError::InvalidEvent(
+                    "set-presentation requires a text value".to_owned(),
+                ));
+            };
+            let presentation = presentation.parse().map_err(|_| {
+                MarkdownEditorEventError::InvalidEvent(format!(
+                    "unknown Markdown presentation {presentation:?}"
+                ))
+            })?;
+            return Ok(Some(MarkdownEditorEvent::PresentationRequested(
+                presentation,
+            )));
+        }
+
+        Err(MarkdownEditorEventError::UnsupportedAction(
+            action.to_owned(),
+        ))
     }
 
     /// The most recently rendered editor body, including the gutter but not
@@ -406,6 +666,134 @@ impl<'a> Deref for MarkdownTextArea<'a> {
 impl DerefMut for MarkdownTextArea<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.text_area
+    }
+}
+
+fn markdown_document(lines: &[String]) -> String {
+    lines.join("\n")
+}
+
+fn semantic_selection(text_area: &TextArea<'_>) -> TextSelection {
+    let head = cursor_to_text_position(text_area.lines(), text_area.cursor());
+    let Some((start, end)) = text_area.selection_range() else {
+        return TextSelection::caret(head);
+    };
+    let start = cursor_to_text_position(text_area.lines(), start);
+    let end = cursor_to_text_position(text_area.lines(), end);
+    let anchor = if head == start { end } else { start };
+    TextSelection { anchor, head }
+}
+
+fn cursor_to_text_position(lines: &[String], cursor: (usize, usize)) -> TextPosition {
+    let (line_index, character_column) = cursor;
+    let line = lines.get(line_index).map(String::as_str).unwrap_or("");
+    let utf16_column = line
+        .chars()
+        .take(character_column)
+        .map(char::len_utf16)
+        .sum::<usize>();
+    TextPosition::new(
+        u32::try_from(line_index).unwrap_or(u32::MAX),
+        u32::try_from(utf16_column).unwrap_or(u32::MAX),
+    )
+}
+
+fn text_position_to_cursor(
+    lines: &[String],
+    position: TextPosition,
+) -> Result<(u16, u16), MarkdownEditorEventError> {
+    let line_index = usize::try_from(position.line)
+        .map_err(|_| MarkdownEditorEventError::PositionTooLarge(position))?;
+    let Some(line) = lines.get(line_index) else {
+        return Err(MarkdownEditorEventError::InvalidPosition(position));
+    };
+    let target = usize::try_from(position.utf16_column)
+        .map_err(|_| MarkdownEditorEventError::PositionTooLarge(position))?;
+    let mut utf16_column = 0usize;
+    let mut character_column = 0usize;
+    if target != 0 {
+        for character in line.chars() {
+            utf16_column += character.len_utf16();
+            character_column += 1;
+            if utf16_column == target {
+                break;
+            }
+            if utf16_column > target {
+                return Err(MarkdownEditorEventError::InvalidPosition(position));
+            }
+        }
+        if utf16_column != target {
+            return Err(MarkdownEditorEventError::InvalidPosition(position));
+        }
+    }
+
+    Ok((
+        u16::try_from(line_index)
+            .map_err(|_| MarkdownEditorEventError::PositionTooLarge(position))?,
+        u16::try_from(character_column)
+            .map_err(|_| MarkdownEditorEventError::PositionTooLarge(position))?,
+    ))
+}
+
+fn apply_text_edit(
+    text_area: &mut TextArea<'_>,
+    edit: &TextEdit,
+) -> Result<bool, MarkdownEditorEventError> {
+    if edit.range.start > edit.range.end {
+        return Err(MarkdownEditorEventError::InvalidEvent(
+            "replace-range range is reversed".to_owned(),
+        ));
+    }
+    let start = text_position_to_cursor(text_area.lines(), edit.range.start)?;
+    let end = text_position_to_cursor(text_area.lines(), edit.range.end)?;
+    text_area.cancel_selection();
+    text_area.move_cursor(CursorMove::Jump(start.0, start.1));
+    if start != end {
+        text_area.start_selection();
+        text_area.move_cursor(CursorMove::Jump(end.0, end.1));
+    }
+    Ok(text_area.insert_str(&edit.text))
+}
+
+fn apply_text_selection(
+    text_area: &mut TextArea<'_>,
+    selection: TextSelection,
+) -> Result<(), MarkdownEditorEventError> {
+    let anchor = text_position_to_cursor(text_area.lines(), selection.anchor)?;
+    let head = text_position_to_cursor(text_area.lines(), selection.head)?;
+    text_area.cancel_selection();
+    text_area.move_cursor(CursorMove::Jump(anchor.0, anchor.1));
+    if anchor != head {
+        text_area.start_selection();
+    }
+    text_area.move_cursor(CursorMove::Jump(head.0, head.1));
+    Ok(())
+}
+
+fn action_matches(configured: Option<&ActionId>, received: &str) -> bool {
+    configured.is_some_and(|action| action.as_str() == received)
+}
+
+fn require_kind(event: &UiEvent, expected: UiEventKind) -> Result<(), MarkdownEditorEventError> {
+    if event.action.kind == expected {
+        Ok(())
+    } else {
+        Err(MarkdownEditorEventError::InvalidEvent(format!(
+            "action {} requires {expected:?}, received {:?}",
+            event.action.action, event.action.kind
+        )))
+    }
+}
+
+fn require_command(event: &UiEvent) -> Result<(), MarkdownEditorEventError> {
+    require_kind(event, UiEventKind::Command)?;
+    if event.action.value == UiEventValue::None {
+        Ok(())
+    } else {
+        Err(MarkdownEditorEventError::InvalidEvent(format!(
+            "command {} must not carry a value",
+            event.action.action
+        )))
     }
 }
 
@@ -740,6 +1128,19 @@ mod tests {
         terminal
     }
 
+    fn ui_event(revision: u64, action: crate::UiAction) -> UiEvent {
+        UiEvent::new(
+            "app-1",
+            "person-1",
+            "client-1",
+            "renderer-1",
+            "main",
+            format!("event-{revision}"),
+            revision,
+            action,
+        )
+    }
+
     #[test]
     fn gutter_counts_digits_and_marks_only_logical_line_starts() {
         let style = MarkdownTextAreaStyle {
@@ -828,5 +1229,114 @@ mod tests {
         assert!(editor.position_drop_cursor(Position::new(8, 4)));
         assert_eq!(editor.scroll_top().0, 2);
         assert_eq!(editor.cursor(), (6, 2));
+    }
+
+    #[test]
+    fn semantic_snapshot_uses_the_live_ratatui_document_and_utf16_selection() {
+        let mut editor =
+            MarkdownTextArea::new(["a🙂b", "second"], MarkdownTextAreaStyle::default());
+        editor.move_cursor(CursorMove::Jump(0, 2));
+        let config = MarkdownEditorConfig::new("markdown-editor")
+            .title("README.md")
+            .dirty(true)
+            .presentation(MarkdownPresentation::Split);
+
+        let node = editor.ui_node(&config);
+        assert_eq!(node.id.as_str(), "markdown-editor");
+        let crate::UiComponent::MarkdownEditor(spec) = node.element;
+        assert_eq!(spec.text, "a🙂b\nsecond");
+        assert_eq!(
+            spec.selection,
+            TextSelection::caret(TextPosition::new(0, 3))
+        );
+        assert_eq!(spec.presentation, MarkdownPresentation::Split);
+        assert_eq!(spec.title.as_deref(), Some("README.md"));
+        assert!(spec.dirty);
+    }
+
+    #[test]
+    fn semantic_text_edits_apply_to_the_same_ratatui_state() {
+        let mut editor =
+            MarkdownTextArea::new(["a🙂b", "second"], MarkdownTextAreaStyle::default());
+        let config = MarkdownEditorConfig::new("markdown-editor");
+        let event = ui_event(
+            9,
+            crate::UiAction::replace_range(
+                "markdown-editor",
+                TextEdit::new(
+                    crate::TextRange::new(TextPosition::new(0, 1), TextPosition::new(0, 3)),
+                    "native",
+                ),
+            ),
+        );
+
+        assert_eq!(
+            editor.handle_ui_event(9, &config, &event).unwrap(),
+            Some(MarkdownEditorEvent::TextChanged { changed: true })
+        );
+        assert_eq!(editor.lines(), ["anativeb", "second"]);
+        assert_eq!(editor.cursor(), (0, 7));
+    }
+
+    #[test]
+    fn semantic_selection_preserves_anchor_direction_and_rejects_stale_events() {
+        let mut editor = MarkdownTextArea::new(["abcdef"], MarkdownTextAreaStyle::default());
+        let config = MarkdownEditorConfig::new("markdown-editor");
+        let selection = TextSelection {
+            anchor: TextPosition::new(0, 5),
+            head: TextPosition::new(0, 2),
+        };
+        let event = ui_event(
+            2,
+            crate::UiAction::set_selection("markdown-editor", selection),
+        );
+
+        assert_eq!(
+            editor.handle_ui_event(2, &config, &event).unwrap(),
+            Some(MarkdownEditorEvent::SelectionChanged)
+        );
+        assert_eq!(editor.cursor(), (0, 2));
+        assert_eq!(editor.selection_range(), Some(((0, 2), (0, 5))));
+        let node = editor.ui_node(&config);
+        let crate::UiComponent::MarkdownEditor(spec) = node.element;
+        assert_eq!(spec.selection, selection);
+
+        assert!(matches!(
+            editor.handle_ui_event(3, &config, &event),
+            Err(MarkdownEditorEventError::StaleRevision {
+                expected: 3,
+                received: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn semantic_commands_return_app_owned_intent() {
+        let mut editor = MarkdownTextArea::new(["# Hello"], MarkdownTextAreaStyle::default());
+        let config = MarkdownEditorConfig::new("markdown-editor");
+        let save = ui_event(
+            1,
+            crate::UiAction::command("markdown-editor", MarkdownEditorActions::SAVE),
+        );
+        assert_eq!(
+            editor.handle_ui_event(1, &config, &save).unwrap(),
+            Some(MarkdownEditorEvent::SaveRequested)
+        );
+
+        let presentation = ui_event(
+            1,
+            crate::UiAction::new(
+                "markdown-editor",
+                MarkdownEditorActions::SET_PRESENTATION,
+                UiEventKind::Change,
+                UiEventValue::Text("preview".to_owned()),
+            ),
+        );
+        assert_eq!(
+            editor.handle_ui_event(1, &config, &presentation).unwrap(),
+            Some(MarkdownEditorEvent::PresentationRequested(
+                MarkdownPresentation::Preview
+            ))
+        );
     }
 }
