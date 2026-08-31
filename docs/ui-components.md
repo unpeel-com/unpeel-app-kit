@@ -263,9 +263,19 @@ overlap is rejected without affecting other renderers.
 
 All Rust, Swift, Web, and JSON Schema implementations follow the same forward
 compatibility rule: ignore unknown fields inside a recognized message,
-component, or typed value. Unknown discriminators—message type, component
-type, event kind, or value type—remain errors because old code cannot safely
-guess their behavior.
+component, or typed value. Unknown message, event-kind, and value-kind
+discriminators remain errors because old code cannot safely guess their
+behavior.
+
+Component kinds require a different rule once the vocabulary contains more
+than `MarkdownEditor`. The second component slice must add capability/version
+handling that lets an attached renderer decline an unrecognized component and
+show the complete terminal view for that pane instead. An unsupported
+component must not reject or close the renderer's attachment, and renderers
+must not guess at a partial native representation. This graceful-degradation
+path must cover an absent advertised capability, an incompatible component
+version, and an unknown component discriminator before the second component
+is considered complete.
 
 ## Multi-user workspaces
 
@@ -343,6 +353,28 @@ retaining the same item identities and selection actions.
 Raw Ratatui widgets remain supported in the terminal. They do not acquire
 native meaning automatically, because a painted cell buffer cannot recover
 labels, selection, validation, accessibility, or intent.
+
+### Closed composition and slots
+
+Containment is component-specific and slot-based, never a generic flexbox or
+an arbitrary `UiNode.children` tree. Each container owns a deliberately closed
+schema that preserves the meaning needed by Ratatui, native renderers, the
+web, and agent participants:
+
+- `List` contains only keyed `ListItem` values, not arbitrary nodes;
+- `ListItem` owns row fields such as label and detail plus enumerated slots
+  such as `leading`, `trailing`, and `accessory`;
+- each slot accepts only the schema-enumerated controls allowed in that role,
+  such as a `Badge`, `Toggle`, `Input`, or `Menu` as the vocabulary grows; and
+- `Page` and later containers expose named, purpose-specific regions only when
+  their cross-platform semantics are defined.
+
+Slot payloads are closed enums, not nested `UiNode` escape hatches. For
+example, a trailing `Toggle` remains a native SwiftUI list-row toggle and an
+accessible web checkbox while retaining its label, boolean value, and action
+identity for an agent. Adding a new embeddable control therefore requires an
+explicit schema and renderer change. This is the D16 boundary that prevents
+App Kit from becoming an unbounded remote widget toolkit.
 
 ## MarkdownEditor v1
 
@@ -447,15 +479,18 @@ The next useful vocabulary is intentionally conventional:
 
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
-| `Page` | layout + block | top-level content and safe-area/chrome contract |
-| `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | native tab selection and accessibility |
-| `List` | `ratatui::widgets::List` | native list with selection and reorder |
-| `ListItem` | Ratatui `ListItem` | keyed row, label, detail, icon, actions |
+| `Page` | layout + block | top-level content with named regions and a safe-area/chrome contract |
+| `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
+| `List` | `ratatui::widgets::List` | contains only keyed `ListItem` values; native list selection and reorder |
+| `ListItem` | Ratatui `ListItem` | semantically keyed row with label/detail and constrained `leading`, `trailing`, and `accessory` slots |
+| `Toggle` | styled boolean row/control | boolean value, label, and one idempotent `set-value(bool)` action; SwiftUI `Toggle`; accessible web checkbox/switch |
 | `Input` | existing `InputField` | native single-line input and validation |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
 | `Explorer` | existing `Explorer` | hierarchical file navigation and drops |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared
-fixtures. That keeps App Kit opinionated and prevents its public API from
-becoming an unbounded remote widget toolkit.
+fixtures. The second component must additionally ship the pane-level terminal
+fallback for renderers that do not advertise or recognize its kind. That keeps
+App Kit opinionated and prevents its public API from becoming an unbounded
+remote widget toolkit.

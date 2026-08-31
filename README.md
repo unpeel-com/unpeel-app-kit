@@ -115,11 +115,14 @@ Kit. Its standalone invariant is strict: every App must remain fully
 functional through its TUI, and semantic rendering is only an optional
 presentation path over that fallback.
 
-`MarkdownEditor` is the first vertical slice. `Page`, `Tabs`, `List`, `ListItem`,
-`Input`, and later richer components such as `DataGrid` can join the same
-closed, versioned vocabulary. See [the component architecture](docs/ui-components.md),
-the trusted [`unpeel.ui/1` schema](protocol/unpeel-ui-v1.schema.json), and the
-separate [browser-to-workspace schema](protocol/unpeel-workspace-ui-v1.schema.json).
+`MarkdownEditor` is the first vertical slice. `Page`, `Tabs`, `List`,
+`ListItem`, `Toggle`, `Input`, and later richer components such as `DataGrid`
+can join the same closed, versioned vocabulary. Containment is slot-based:
+`List` accepts only `ListItem` values, and row slots accept only explicitly
+enumerated controls rather than arbitrary child nodes. See [the component
+architecture](docs/ui-components.md), the trusted [`unpeel.ui/1`
+schema](protocol/unpeel-ui-v1.schema.json), and the separate
+[browser-to-workspace schema](protocol/unpeel-workspace-ui-v1.schema.json).
 
 The renderer packages live with the component definitions so the contract
 cannot drift:
