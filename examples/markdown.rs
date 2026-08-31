@@ -26,7 +26,7 @@ use tui_textarea::{Input as TextInput, Key as TextKey};
 use unpeel_app_kit::{
     AppMetadata, MarkdownEditor, MarkdownEditorConfig, MarkdownEditorEvent,
     MarkdownEditorInteraction, MarkdownEditorStyle, MarkdownPresentation, UiBridge, UiBridgeEvent,
-    UiDeltaOperation, UiEventOutcome, UiNode,
+    UiEventOutcome, UiNode, markdown_delta_operations,
 };
 
 const STATE_FORMAT: &str = "unpeel.app-kit.example.markdown";
@@ -67,6 +67,7 @@ impl Default for MarkdownState {
 
 struct MarkdownApp {
     state: MarkdownState,
+    revision: u64,
     state_path: PathBuf,
     editor: MarkdownEditor<'static>,
     interaction: MarkdownEditorInteraction,
@@ -99,8 +100,10 @@ impl MarkdownApp {
         editor
             .text_area_mut()
             .set_placeholder_text("Write Markdown… Type / on an empty line for blocks.");
+        let revision = state.revision;
         Ok(Self {
             state,
+            revision,
             state_path,
             editor,
             interaction: MarkdownEditorInteraction::new(),
@@ -127,18 +130,25 @@ impl MarkdownApp {
     }
 
     fn commit_projection_change(&mut self) -> Result<(u64, u64), Box<dyn Error>> {
-        let base = self.state.revision;
-        self.state.revision = base
+        let (base, revision) = self.advance_projection_revision()?;
+        self.state.revision = revision;
+        self.state.text = markdown_document(self.editor.lines());
+        save_state(&self.state_path, &self.state)?;
+        self.status = format!("Saved revision {}", self.revision);
+        Ok((base, revision))
+    }
+
+    fn advance_projection_revision(&mut self) -> Result<(u64, u64), Box<dyn Error>> {
+        let base = self.revision;
+        self.revision = base
             .checked_add(1)
             .filter(|revision| *revision <= MAX_SAFE_INTEGER)
             .ok_or("revision space is exhausted")?;
-        self.state.text = markdown_document(self.editor.lines());
-        save_state(&self.state_path, &self.state)?;
-        self.status = format!("Saved revision {}", self.state.revision);
-        Ok((base, self.state.revision))
+        Ok((base, self.revision))
     }
 
     fn save_without_revision(&mut self) -> Result<(), Box<dyn Error>> {
+        self.state.revision = self.revision;
         self.state.text = markdown_document(self.editor.lines());
         save_state(&self.state_path, &self.state)?;
         self.status = format!("Saved {}", self.state_path.display());
@@ -229,18 +239,24 @@ fn text_input(key: KeyEvent) -> TextInput {
     }
 }
 
-fn publish_root(
-    app: &MarkdownApp,
+fn publish_projection_change(
+    app: &mut MarkdownApp,
     bridge: &mut UiBridge,
-    base_revision: u64,
-) -> Result<(), Box<dyn Error>> {
-    bridge.publish_delta(
-        VIEW_ID,
-        base_revision,
-        app.state.revision,
-        vec![UiDeltaOperation::ReplaceRoot { root: app.node() }],
-    )?;
-    Ok(())
+    previous: UiNode,
+    persist_model: bool,
+) -> Result<bool, Box<dyn Error>> {
+    let next = app.node();
+    let operations = markdown_delta_operations(&previous, &next);
+    if operations.is_empty() {
+        return Ok(false);
+    }
+    let (base_revision, revision) = if persist_model {
+        app.commit_projection_change()?
+    } else {
+        app.advance_projection_revision()?
+    };
+    bridge.publish_delta(VIEW_ID, base_revision, revision, operations)?;
+    Ok(true)
 }
 
 fn drain_bridge(app: &mut MarkdownApp, bridge: &mut UiBridge) -> Result<(), Box<dyn Error>> {
@@ -258,43 +274,44 @@ fn drain_bridge(app: &mut MarkdownApp, bridge: &mut UiBridge) -> Result<(), Box<
                 bridge.publish_to(
                     client_id,
                     VIEW_ID,
-                    app.state.revision,
+                    app.revision,
                     app.personalized_node(name),
                 )?;
             }
             UiBridgeEvent::Action { event, .. } => {
+                let previous = app.node();
                 let config = app.config();
-                let outcome = match app
-                    .editor
-                    .handle_ui_event(app.state.revision, &config, &event)
-                {
+                let outcome = match app.editor.handle_ui_event(app.revision, &config, &event) {
                     Ok(Some(MarkdownEditorEvent::TextChanged { changed: true }))
                     | Ok(Some(MarkdownEditorEvent::Undo { changed: true }))
                     | Ok(Some(MarkdownEditorEvent::Redo { changed: true })) => {
-                        let (base, _) = app.commit_projection_change()?;
-                        publish_root(app, bridge, base)?;
+                        publish_projection_change(app, bridge, previous, true)?;
                         UiEventOutcome::Applied
                     }
                     Ok(Some(MarkdownEditorEvent::PresentationRequested(presentation))) => {
                         app.state.presentation = presentation;
-                        let (base, _) = app.commit_projection_change()?;
-                        publish_root(app, bridge, base)?;
+                        publish_projection_change(app, bridge, previous, true)?;
                         UiEventOutcome::Applied
                     }
                     Ok(Some(MarkdownEditorEvent::SaveRequested)) => {
                         app.save_without_revision()?;
                         UiEventOutcome::Applied
                     }
+                    Ok(Some(MarkdownEditorEvent::SelectionChanged)) => {
+                        publish_projection_change(app, bridge, previous, false)?;
+                        UiEventOutcome::Applied
+                    }
                     Ok(Some(MarkdownEditorEvent::TextChanged { changed: false }))
                     | Ok(Some(MarkdownEditorEvent::Undo { changed: false }))
-                    | Ok(Some(MarkdownEditorEvent::Redo { changed: false }))
-                    | Ok(Some(MarkdownEditorEvent::SelectionChanged)) => UiEventOutcome::Applied,
+                    | Ok(Some(MarkdownEditorEvent::Redo { changed: false })) => {
+                        UiEventOutcome::Applied
+                    }
                     Ok(None) => {
                         UiEventOutcome::Rejected("Action targets a different component".to_owned())
                     }
                     Err(error) => UiEventOutcome::Rejected(error.to_string()),
                 };
-                bridge.acknowledge(&event, outcome, app.state.revision)?;
+                bridge.acknowledge(&event, outcome, app.revision)?;
             }
             UiBridgeEvent::Attached { .. }
             | UiBridgeEvent::Detached { .. }
@@ -315,7 +332,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         )
         .description("Standalone Ratatui and hosted SwiftUI Markdown editor"),
     )?;
-    bridge.publish(VIEW_ID, app.state.revision, app.node())?;
+    bridge.publish(VIEW_ID, app.revision, app.node())?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -383,22 +400,33 @@ fn run() -> Result<(), Box<dyn Error>> {
                         app.save_without_revision()?;
                         continue;
                     }
+                    let previous = app.node();
                     let outcome = app
                         .interaction
                         .handle_input(&mut app.editor, text_input(key));
-                    if outcome.text_changed() {
-                        let (base, _) = app.commit_projection_change()?;
-                        publish_root(&app, &mut bridge, base)?;
+                    if outcome.is_handled() {
+                        publish_projection_change(
+                            &mut app,
+                            &mut bridge,
+                            previous,
+                            outcome.text_changed(),
+                        )?;
                     }
                 }
                 Event::Paste(text) => {
+                    let previous = app.node();
                     let outcome = app.interaction.handle_paste(&mut app.editor, &text);
-                    if outcome.text_changed() {
-                        let (base, _) = app.commit_projection_change()?;
-                        publish_root(&app, &mut bridge, base)?;
+                    if outcome.is_handled() {
+                        publish_projection_change(
+                            &mut app,
+                            &mut bridge,
+                            previous,
+                            outcome.text_changed(),
+                        )?;
                     }
                 }
                 Event::Mouse(mouse) => {
+                    let previous = app.node();
                     let position = Position::new(mouse.column, mouse.row);
                     let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
                     let outcome = match mouse.kind {
@@ -425,9 +453,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                         }
                         _ => Default::default(),
                     };
-                    if outcome.text_changed() {
-                        let (base, _) = app.commit_projection_change()?;
-                        publish_root(&app, &mut bridge, base)?;
+                    if outcome.is_handled() {
+                        publish_projection_change(
+                            &mut app,
+                            &mut bridge,
+                            previous,
+                            outcome.text_changed(),
+                        )?;
                     }
                 }
                 Event::Resize(_, _) => terminal.autoresize()?,
@@ -465,6 +497,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tui_textarea::CursorMove;
 
     #[test]
     fn durable_document_restores_after_a_committed_edit() {
@@ -477,5 +510,33 @@ mod tests {
         let restored = MarkdownApp::load(path).unwrap();
         assert!(markdown_document(restored.editor.lines()).starts_with("persisted "));
         assert_eq!(restored.state.revision, 2);
+    }
+
+    #[test]
+    fn selection_only_projection_advances_runtime_without_rewriting_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("markdown.json");
+        let mut app = MarkdownApp::load(path.clone()).unwrap();
+        app.save_without_revision().unwrap();
+        let saved = fs::read(&path).unwrap();
+        let previous = app.node();
+
+        app.editor
+            .text_area_mut()
+            .move_cursor(CursorMove::Jump(0, 2));
+        app.editor.text_area_mut().start_selection();
+        app.editor
+            .text_area_mut()
+            .move_cursor(CursorMove::Jump(0, 8));
+        let operations = markdown_delta_operations(&previous, &app.node());
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            unpeel_app_kit::UiDeltaOperation::MarkdownSetSelection { .. }
+        )));
+
+        assert_eq!(app.advance_projection_revision().unwrap(), (1, 2));
+        assert_eq!(app.revision, 2);
+        assert_eq!(app.state.revision, 1);
+        assert_eq!(fs::read(path).unwrap(), saved);
     }
 }

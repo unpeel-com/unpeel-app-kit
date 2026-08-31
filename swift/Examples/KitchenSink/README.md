@@ -40,6 +40,12 @@ For the Markdown session, click either pane before typing. The terminal PTY
 supports editor-owned drag, word, and line selection; the native pane uses
 `NSTextView` selection. Type `/` on an empty line for the shared block menu and
 use Backspace at a Markdown marker to turn the block back into plain text.
+The mini-host mirrors Markdown gestures into SwiftTerm selection while still
+reporting them to Ratatui, so the same drag or double-click is both an editor
+selection and a native terminal selection. Command-C copies it normally; the
+synchronized semantic selection remains the fallback when screen redraws make
+SwiftTerm drop its range. Hold Shift while dragging to select raw scrollback
+without changing the editor selection.
 Native typing is optimistic and coalesced before it enters the semantic
 revision stream, which keeps rapid input responsive without generating stale
 same-revision events.

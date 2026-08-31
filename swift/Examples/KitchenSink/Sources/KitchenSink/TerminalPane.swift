@@ -12,6 +12,8 @@ struct TerminalLaunch: Sendable {
 /// The mini-host makes that explicit so a click always arms the PTY for typing.
 final class KitchenSinkTerminalView: LocalProcessTerminalView {
     var wantsInitialFocus = false
+    var applicationSelectedText: String?
+    var mirrorsApplicationMouseSelection = false
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -28,8 +30,66 @@ final class KitchenSinkTerminalView: LocalProcessTerminalView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
+        // Arm the terminal before SwiftTerm decides whether this press belongs
+        // to the child application's mouse protocol or local text selection.
         window?.makeFirstResponder(self)
+        guard shouldMirrorApplicationSelection(event) else {
+            super.mouseDown(with: event)
+            return
+        }
+        performNativeSelectionPass { super.mouseDown(with: event) }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard shouldMirrorApplicationSelection(event) else {
+            super.mouseDragged(with: event)
+            return
+        }
+        performNativeSelectionPass { super.mouseDragged(with: event) }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard shouldMirrorApplicationSelection(event) else {
+            super.mouseUp(with: event)
+            return
+        }
+        // Let SwiftTerm finish its selection before its second pass reports
+        // the release to the Ratatui application.
+        performNativeSelectionPass { super.mouseUp(with: event) }
+        super.mouseUp(with: event)
+    }
+
+    override func copy(_ sender: Any) {
+        // Shift-drag belongs to SwiftTerm and should keep its normal copy path.
+        // Ordinary pointer gestures belong to the TUI while mouse reporting is
+        // active, so its synchronized semantic selection is the only source of
+        // selected text in that case.
+        if !selection.getSelectedText().isEmpty || applicationSelectedText == nil {
+            super.copy(sender)
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(applicationSelectedText ?? "", forType: .string)
+    }
+
+    private func shouldMirrorApplicationSelection(_ event: NSEvent) -> Bool {
+        guard mirrorsApplicationMouseSelection, allowMouseReporting else { return false }
+        if event.modifierFlags.contains(.shift), !terminal.mouseShiftCapture {
+            return false
+        }
+        if case .off = terminal.mouseMode { return false }
+        return true
+    }
+
+    private func performNativeSelectionPass(_ body: () -> Void) {
+        let reportingWasEnabled = allowMouseReporting
+        allowMouseReporting = false
+        body()
+        allowMouseReporting = reportingWasEnabled
     }
 }
 
@@ -48,6 +108,7 @@ final class TerminalEngineController: NSObject {
             options: TerminalOptions(termName: "xterm-256color", scrollback: 20_000)
         )
         super.init()
+        view.allowMouseReporting = true
         view.processDelegate = self
         view.nativeBackgroundColor = NSColor(
             calibratedRed: 0.055,
@@ -105,6 +166,8 @@ extension TerminalEngineController: @preconcurrency LocalProcessTerminalViewDele
 struct TerminalPane: NSViewRepresentable {
     let engine: TerminalEngineController
     let autoFocus: Bool
+    let applicationSelectedText: String?
+    let mirrorsApplicationMouseSelection: Bool
 
     final class Coordinator {
         var autoFocus: Bool
@@ -120,10 +183,14 @@ struct TerminalPane: NSViewRepresentable {
 
     func makeNSView(context _: Context) -> KitchenSinkTerminalView {
         engine.view.wantsInitialFocus = autoFocus
+        engine.view.applicationSelectedText = applicationSelectedText
+        engine.view.mirrorsApplicationMouseSelection = mirrorsApplicationMouseSelection
         return engine.view
     }
 
     func updateNSView(_ view: KitchenSinkTerminalView, context: Context) {
+        view.applicationSelectedText = applicationSelectedText
+        view.mirrorsApplicationMouseSelection = mirrorsApplicationMouseSelection
         let becameAutoFocused = autoFocus && !context.coordinator.autoFocus
         context.coordinator.autoFocus = autoFocus
         guard becameAutoFocused, view.window?.firstResponder !== view else { return }

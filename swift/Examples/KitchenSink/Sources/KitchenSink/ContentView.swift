@@ -157,7 +157,9 @@ private struct TerminalCard: View {
             Color(red: 0.055, green: 0.063, blue: 0.078)
             TerminalPane(
                 engine: session.terminalEngine,
-                autoFocus: session.paneMode != .native
+                autoFocus: session.paneMode != .native,
+                applicationSelectedText: session.terminalSelectionText,
+                mirrorsApplicationMouseSelection: session.kind == .markdown
             )
                 .padding(.top, 28)
             paneHeader("TERMINAL", detail: "SwiftTerm · real PTY")

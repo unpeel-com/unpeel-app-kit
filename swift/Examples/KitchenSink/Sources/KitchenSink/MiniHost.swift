@@ -294,6 +294,21 @@ final class HostedAppSession: ObservableObject, Identifiable {
         }
     }
 
+    /// Text selected by the terminal application rather than by the terminal
+    /// emulator. This lets the engine wrapper preserve standard macOS Copy
+    /// while Ratatui owns mouse selection through terminal mouse reporting.
+    var terminalSelectionText: String? {
+        guard let snapshot,
+              case let .markdownEditor(editor) = snapshot.root.component,
+              let anchor = Self.utf16Offset(for: editor.selection.anchor, in: editor.text),
+              let head = Self.utf16Offset(for: editor.selection.head, in: editor.text),
+              anchor != head else {
+            return nil
+        }
+        let range = NSRange(location: min(anchor, head), length: abs(head - anchor))
+        return NSString(string: editor.text).substring(with: range)
+    }
+
     func killProcess() {
         guard terminalEngine.isRunning else { return }
         restartAfterTermination = false
@@ -568,6 +583,25 @@ final class HostedAppSession: ObservableObject, Identifiable {
             }
             lastAttachResumed = resumed
         }
+    }
+
+    private static func utf16Offset(for position: UITextPosition, in text: String) -> Int? {
+        guard position.line >= 0, position.utf16Column >= 0 else { return nil }
+        let units = text.utf16
+        var lineStart = units.startIndex
+        for _ in 0..<position.line {
+            guard let newline = units[lineStart...].firstIndex(of: 10) else { return nil }
+            lineStart = units.index(after: newline)
+        }
+        let lineEnd = units[lineStart...].firstIndex(of: 10) ?? units.endIndex
+        guard let target = units.index(
+            lineStart,
+            offsetBy: position.utf16Column,
+            limitedBy: lineEnd
+        ), target <= lineEnd, String.Index(target, within: text) != nil else {
+            return nil
+        }
+        return units.distance(from: units.startIndex, to: target)
     }
 
     private static func connectionLabel(_ state: UIUnixSessionClient.ConnectionState) -> String {
