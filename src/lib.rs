@@ -1,13 +1,9 @@
-//! Opinionated Ratatui-first components for terminal-powered Unpeel Apps.
+//! Opinionated Ratatui components for ordinary terminal Apps.
 //!
-//! Apps render normally through Ratatui and can optionally publish the same
-//! component state to SwiftUI/AppKit or web wrappers through `unpeel.ui/1`.
-//! Components cover a borderless filesystem explorer and single-line input,
-//! dark/light theming, popup menus, adjacent-agent handoff, Host-local path
-//! dragging, typed workspace/project/worktree/user detection,
-//! project-relative path labels, preferred-editor opening, consistent
-//! proportional scrollbars, and an optional Markdown editor built
-//! on `tui-textarea-2`.
+//! The component APIs require no Unpeel runtime or bridge setup and work in any
+//! terminal. The default-on `ui-bridge` feature additionally lets a hosted App
+//! publish semantic state to SwiftUI or web; disabling default features removes
+//! all socket, authentication, persistence-envelope, and UI protocol code.
 
 #![deny(unsafe_code)]
 
@@ -26,13 +22,18 @@ mod markdown_text_area;
 mod menu;
 mod navigator;
 mod path;
+#[cfg(feature = "ui-bridge")]
 #[allow(unsafe_code)]
 mod process_security;
 mod scrollbar;
 mod theme;
+#[cfg(feature = "ui-bridge")]
 mod ui;
+#[cfg(feature = "ui-bridge")]
 mod ui_auth;
+#[cfg(feature = "ui-bridge")]
 mod ui_bridge;
+#[cfg(feature = "ui-bridge")]
 mod ui_state;
 mod widgets;
 
@@ -58,9 +59,10 @@ pub use input::{InputField, InputFieldAction, InputFieldTheme, InputFieldWidget}
 pub use keyboard::KeyboardEnhancementGuard;
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_text_area::{
-    MarkdownEditor, MarkdownEditorConfig, MarkdownEditorEvent, MarkdownEditorEventError,
-    MarkdownEditorStyle, MarkdownTextArea, MarkdownTextAreaStyle,
+    MarkdownEditor, MarkdownEditorStyle, MarkdownTextArea, MarkdownTextAreaStyle,
 };
+#[cfg(all(feature = "markdown-text-area", feature = "ui-bridge"))]
+pub use markdown_text_area::{MarkdownEditorConfig, MarkdownEditorEvent, MarkdownEditorEventError};
 pub use menu::{MenuItem, MenuItemTone, MenuTheme, PopupMenu};
 pub use navigator::Navigator;
 pub use path::display_path_from_root;
@@ -69,6 +71,7 @@ pub use theme::{
     APP_ACCENT_ENV, ColorScheme, KitTheme, SELECTABLE_LEFT_PADDING, ThemeMonitor, hosted_accent,
     hosted_accent_for_scheme,
 };
+#[cfg(feature = "ui-bridge")]
 pub use ui::{
     ActionId, AppInstanceId, AppMetadata, ClientId, EventId, MAX_SAFE_UI_INTEGER,
     MAX_UI_FRAME_BYTES, MarkdownEditorActions, MarkdownEditorSpec, MarkdownPresentation, NodeId,
@@ -81,11 +84,14 @@ pub use ui::{
     UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId, decode_ui_frame, encode_ui_frame,
     negotiate_ui_protocol_version, read_ui_message, write_ui_message,
 };
+#[cfg(feature = "ui-bridge")]
 pub use ui_auth::{
     UI_PARTICIPANT_TOKEN_PREFIX, UI_PARTICIPANT_TOKEN_VERSION, UiParticipantTokenClaims,
     UiParticipantTokenError, UiParticipantTokenIssuer, UiParticipantTokenVerifier,
 };
+#[cfg(feature = "ui-bridge")]
 pub use ui_bridge::{UiBridge, UiBridgeError, UiBridgeEvent, UiEventOutcome};
+#[cfg(feature = "ui-bridge")]
 pub use ui_state::{
     UI_STATE_FILENAME, UI_STATE_FORMAT, UI_STATE_FORMAT_VERSION, UiSavedState, UiStateError,
     UiStateStore,

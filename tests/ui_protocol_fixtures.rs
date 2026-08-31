@@ -1,3 +1,5 @@
+#![cfg(feature = "ui-bridge")]
+
 use std::io::{BufReader, Cursor};
 
 use unpeel_app_kit::{UiComponent, UiEventValue, UiMessage, read_ui_message};

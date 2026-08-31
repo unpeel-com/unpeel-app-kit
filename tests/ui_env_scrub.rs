@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(all(unix, feature = "ui-bridge"))]
 
 use std::process::Command;
 

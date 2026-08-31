@@ -1,16 +1,36 @@
 # unpeel-app-kit
 
-An opinionated, Ratatui-first component library for terminal-powered Unpeel
-Apps. An App remains a normal terminal process and renders through
-[Ratatui](https://ratatui.rs/) everywhere. Components can additionally publish
-the same state to native SwiftUI/AppKit or web renderers when hosted by
-Unpeel—similar to an Ionic-style component vocabulary with platform-specific
-renderers.
+An opinionated [Ratatui](https://ratatui.rs/) component library for building
+normal standalone TUI Apps. Use the components in an ordinary terminal
+process, ship the binary anywhere Ratatui runs, and keep ownership of the event
+loop, commands, and model. Unpeel is not required at build time or runtime.
 
-The crate is standalone-safe: Unpeel-specific integration becomes an inert
-no-op or an explicit availability error outside an Unpeel-hosted session.
+## Standalone TUI usage
 
-The kit currently provides:
+The base components need no socket, protocol, account, environment variables,
+or bridge plumbing:
+
+```toml
+[dependencies]
+unpeel-app-kit = { path = "../unpeel-app-kit", default-features = false }
+```
+
+Enable the Ratatui Markdown editor independently when needed:
+
+```toml
+[dependencies.unpeel-app-kit]
+path = "../unpeel-app-kit"
+default-features = false
+features = ["markdown-text-area"]
+```
+
+The `ui-bridge` feature is default-on for API compatibility. It only makes the
+optional hosted types available; it opens no socket and starts no background
+work unless the App explicitly calls `UiBridge::detect()`. A pure-TUI build can
+disable default features as above, which removes the socket, authentication,
+persistence-envelope, and `unpeel.ui/1` protocol modules from compilation.
+
+The standalone component layer currently provides:
 
 | Component | Responsibility |
 | --- | --- |
@@ -30,17 +50,27 @@ The kit currently provides:
 | `Navigator<Route>` | Rendering-neutral root/detail view stack with consistent back semantics |
 | `display_path_from_root` | Render paths project-relative without weakening absolute semantic path operations |
 | `VerticalScrollbar` | Shared proportional, capless scrollbar |
-| `MarkdownTextArea` | Ratatui-backed Markdown editor behind the `markdown-text-area` feature |
-| `UiBridge` / `unpeel.ui/1` | App-owned Unix endpoint for scoped human/agent participants, snapshots, deltas, actions, presence, and acknowledgements without touching the PTY |
-| `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
-| `MarkdownEditor` | First cross-renderer component: Ratatui editing plus SwiftUI/AppKit and web wrappers |
+| `MarkdownEditor` / `MarkdownTextArea` | Ratatui-backed Markdown editor behind the independent `markdown-text-area` feature |
 
 The crate owns reusable component behavior, not an App's event loop, key map,
-commands, or surrounding chrome.
+commands, or surrounding chrome. Hosted helpers elsewhere in the table are
+optional calls and retain their documented standalone no-op, unavailable, or
+platform-fallback behavior.
 
-## Component UI preview
+## Optional hosted UI bridge
 
-App Kit is growing into a deliberately small, opt-in component system rather than a
+With `ui-bridge` enabled, an App may additionally publish the same component
+state to native SwiftUI/AppKit or web renderers when Unpeel hosts it. This is an
+enhancement over the complete TUI, similar to an Ionic-style component
+vocabulary with platform-specific renderers—not a second required runtime.
+
+| Optional API | Responsibility |
+| --- | --- |
+| `UiBridge` / `unpeel.ui/1` | App-owned Unix endpoint for scoped human/agent participants, snapshots, deltas, actions, presence, and acknowledgements without touching the PTY |
+| `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
+| Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
+
+The hosted vocabulary is deliberately small and opinionated rather than a
 portable encoding of every possible Ratatui widget:
 
 ```text
@@ -63,24 +93,27 @@ stable actions; they never scrape ANSI output. Raw Ratatui remains the escape
 hatch for App-specific terminal UI and simply has no native/web projection
 until an App Kit component exists for it.
 
-The App binds `~/.unpeel/app-sessions/<id>/ui.sock`; the existing Unpeel Host
-brokers it through the already-authenticated `/mobile` transports, so there is
-no standalone workspace server. Multiple human and agent participants attach
-with Host-minted, route-bound scoped tokens. When the Host hides the PTY in favor of component UI,
-`UiBridge::should_render_terminal()` lets the App suspend Ratatui drawing
-without suspending its model or process.
+When a hosted App explicitly calls `UiBridge::detect()`, it binds
+`~/.unpeel/app-sessions/<id>/ui.sock`; the existing Unpeel Host brokers it
+through the already-authenticated `/mobile` transports, so there is no
+standalone workspace server. Multiple human and agent participants attach
+with Host-minted, route-bound scoped tokens. When the Host hides the PTY in
+favor of component UI, `UiBridge::should_render_terminal()` lets the App
+suspend Ratatui drawing without suspending its model or process.
 
-At startup, `UiBridge::detect()` consumes and scrubs the inherited socket path
-and per-session signing key before child processes can inherit them. The endpoint uses
-mode-`0600` Unix sockets plus same-user peer credentials where supported,
-requires a bounded-time authenticated attach, negotiates a min/max protocol
-range, and isolates slow or flooding renderers with per-connection and
-per-client quotas. Delta-capable renderers receive only contiguous
-server-to-client operations; any gap automatically falls back to a snapshot.
+On that hosted path, `UiBridge::detect()` consumes and scrubs the inherited
+socket path and per-session signing key before child processes can inherit
+them. The endpoint uses mode-`0600` Unix sockets plus same-user peer
+credentials where supported, requires a bounded-time authenticated attach,
+negotiates a min/max protocol range, and isolates slow or flooding renderers
+with per-connection and per-client quotas. Delta-capable renderers receive only
+contiguous server-to-client operations; any gap automatically falls back to a
+snapshot.
 
-This channel lives entirely in App Kit and does not alter Unpeel core's
-Ratatui-first rule: every App must remain fully functional through its TUI,
-and semantic rendering is an optional enhancement over that fallback.
+This channel is sanctioned by Unpeel's D16 decision and lives entirely in App
+Kit. Its standalone invariant is strict: every App must remain fully
+functional through its TUI, and semantic rendering is only an optional
+presentation path over that fallback.
 
 `MarkdownEditor` is the first vertical slice. `Page`, `Tabs`, `List`, `ListItem`,
 `Input`, and later richer components such as `DataGrid` can join the same
@@ -195,22 +228,25 @@ it out once beside the Apps that use it, then add the local dependency:
 mkdir -p ~/Dev && cd ~/Dev
 git clone https://github.com/unpeel-com/unpeel-app-kit.git
 cd your-ratatui-app
-cargo add unpeel-app-kit --path ../unpeel-app-kit
+cargo add unpeel-app-kit --path ../unpeel-app-kit --no-default-features
 ```
 
 The resulting dependency is:
 
 ```toml
 [dependencies]
-unpeel-app-kit = { path = "../unpeel-app-kit" }
+unpeel-app-kit = { path = "../unpeel-app-kit", default-features = false }
 ```
 
 It targets Ratatui `0.30`. Enable the Markdown text area only in Apps that
 need it:
 
 ```toml
-unpeel-app-kit = { path = "../unpeel-app-kit", features = ["markdown-text-area"] }
+unpeel-app-kit = { path = "../unpeel-app-kit", default-features = false, features = ["markdown-text-area"] }
 ```
+
+An App opting into D16 hosted presentation can add `ui-bridge`, or use the
+crate's default feature set.
 
 ## Native path dragging
 
@@ -653,6 +689,7 @@ match drops.poll()? {
 
 ```sh
 cargo test --no-default-features
+cargo test --no-default-features --features markdown-text-area
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 (cd swift && swift test)

@@ -1,3 +1,4 @@
+#[cfg(feature = "ui-bridge")]
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
@@ -10,10 +11,12 @@ use tui_textarea::{CursorMove, CursorRenderMode, Input, Key, TextArea, WrapMode}
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
+use crate::VerticalScrollbar;
+#[cfg(feature = "ui-bridge")]
 use crate::{
     ActionId, MarkdownEditorActions, MarkdownEditorSpec, MarkdownPresentation, NodeId, TextEdit,
     TextPosition, TextSelection, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION,
-    UI_PROTOCOL_NAME, UiEvent, UiEventKind, UiEventValue, UiNode, VerticalScrollbar,
+    UI_PROTOCOL_NAME, UiEvent, UiEventKind, UiEventValue, UiNode,
 };
 
 const DEFAULT_LEFT_PADDING: u16 = 1;
@@ -54,6 +57,7 @@ pub type MarkdownEditorStyle = MarkdownTextAreaStyle;
 /// The text, cursor, selection, and placeholder continue to come directly
 /// from `tui-textarea`. This configuration contains only cross-renderer state
 /// that belongs to the surrounding App.
+#[cfg(feature = "ui-bridge")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkdownEditorConfig {
     node_id: NodeId,
@@ -64,6 +68,7 @@ pub struct MarkdownEditorConfig {
     actions: MarkdownEditorActions,
 }
 
+#[cfg(feature = "ui-bridge")]
 impl MarkdownEditorConfig {
     /// Creates editable Markdown component metadata with the standard actions.
     #[must_use]
@@ -121,6 +126,7 @@ impl MarkdownEditorConfig {
 }
 
 /// Result of applying one native/web Markdown action to the Ratatui component.
+#[cfg(feature = "ui-bridge")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownEditorEvent {
     TextChanged { changed: bool },
@@ -132,6 +138,7 @@ pub enum MarkdownEditorEvent {
 }
 
 /// A matching Markdown action that cannot safely be applied.
+#[cfg(feature = "ui-bridge")]
 #[derive(Debug, PartialEq, Eq)]
 pub enum MarkdownEditorEventError {
     UnexpectedProtocol { protocol: String, version: u32 },
@@ -143,6 +150,7 @@ pub enum MarkdownEditorEventError {
     PositionTooLarge(TextPosition),
 }
 
+#[cfg(feature = "ui-bridge")]
 impl fmt::Display for MarkdownEditorEventError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -173,6 +181,7 @@ impl fmt::Display for MarkdownEditorEventError {
     }
 }
 
+#[cfg(feature = "ui-bridge")]
 impl std::error::Error for MarkdownEditorEventError {}
 
 /// A reusable Markdown editor built on `tui-textarea-2`.
@@ -194,8 +203,8 @@ pub struct MarkdownTextArea<'a> {
 ///
 /// The current terminal implementation is [`MarkdownTextArea`], so existing
 /// Apps retain their API while new component-oriented code can use this name.
-/// Its `render` method is Ratatui-backed; [`MarkdownTextArea::ui_node`] and
-/// [`MarkdownTextArea::handle_ui_event`] drive Swift and web wrappers.
+/// Its `render` method is always Ratatui-backed. With the `ui-bridge` feature,
+/// the same editor can also project state to Swift and web wrappers.
 pub type MarkdownEditor<'a> = MarkdownTextArea<'a>;
 
 impl<'a> MarkdownTextArea<'a> {
@@ -260,6 +269,7 @@ impl<'a> MarkdownTextArea<'a> {
     ///
     /// This is a second rendering path over the same `tui-textarea` state.
     /// Calling it never changes terminal behavior or requires an Unpeel Host.
+    #[cfg(feature = "ui-bridge")]
     #[must_use]
     pub fn ui_node(&self, config: &MarkdownEditorConfig) -> UiNode {
         let mut editor = MarkdownEditorSpec::new(
@@ -280,6 +290,7 @@ impl<'a> MarkdownTextArea<'a> {
     /// `Ok(None)` means the event targets another component. Commands whose
     /// state belongs to the App, such as save and presentation changes, are
     /// returned for the App reducer rather than applied inside the text area.
+    #[cfg(feature = "ui-bridge")]
     pub fn handle_ui_event(
         &mut self,
         revision: u64,
@@ -669,10 +680,12 @@ impl DerefMut for MarkdownTextArea<'_> {
     }
 }
 
+#[cfg(feature = "ui-bridge")]
 fn markdown_document(lines: &[String]) -> String {
     lines.join("\n")
 }
 
+#[cfg(feature = "ui-bridge")]
 fn semantic_selection(text_area: &TextArea<'_>) -> TextSelection {
     let head = cursor_to_text_position(text_area.lines(), text_area.cursor());
     let Some((start, end)) = text_area.selection_range() else {
@@ -684,6 +697,7 @@ fn semantic_selection(text_area: &TextArea<'_>) -> TextSelection {
     TextSelection { anchor, head }
 }
 
+#[cfg(feature = "ui-bridge")]
 fn cursor_to_text_position(lines: &[String], cursor: (usize, usize)) -> TextPosition {
     let (line_index, character_column) = cursor;
     let line = lines.get(line_index).map(String::as_str).unwrap_or("");
@@ -698,6 +712,7 @@ fn cursor_to_text_position(lines: &[String], cursor: (usize, usize)) -> TextPosi
     )
 }
 
+#[cfg(feature = "ui-bridge")]
 fn text_position_to_cursor(
     lines: &[String],
     position: TextPosition,
@@ -735,6 +750,7 @@ fn text_position_to_cursor(
     ))
 }
 
+#[cfg(feature = "ui-bridge")]
 fn apply_text_edit(
     text_area: &mut TextArea<'_>,
     edit: &TextEdit,
@@ -755,6 +771,7 @@ fn apply_text_edit(
     Ok(text_area.insert_str(&edit.text))
 }
 
+#[cfg(feature = "ui-bridge")]
 fn apply_text_selection(
     text_area: &mut TextArea<'_>,
     selection: TextSelection,
@@ -770,10 +787,12 @@ fn apply_text_selection(
     Ok(())
 }
 
+#[cfg(feature = "ui-bridge")]
 fn action_matches(configured: Option<&ActionId>, received: &str) -> bool {
     configured.is_some_and(|action| action.as_str() == received)
 }
 
+#[cfg(feature = "ui-bridge")]
 fn require_kind(event: &UiEvent, expected: UiEventKind) -> Result<(), MarkdownEditorEventError> {
     if event.action.kind == expected {
         Ok(())
@@ -785,6 +804,7 @@ fn require_kind(event: &UiEvent, expected: UiEventKind) -> Result<(), MarkdownEd
     }
 }
 
+#[cfg(feature = "ui-bridge")]
 fn require_command(event: &UiEvent) -> Result<(), MarkdownEditorEventError> {
     require_kind(event, UiEventKind::Command)?;
     if event.action.value == UiEventValue::None {
@@ -1128,6 +1148,7 @@ mod tests {
         terminal
     }
 
+    #[cfg(feature = "ui-bridge")]
     fn ui_event(revision: u64, action: crate::UiAction) -> UiEvent {
         UiEvent::new(
             "app-1",
@@ -1232,6 +1253,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ui-bridge")]
     fn semantic_snapshot_uses_the_live_ratatui_document_and_utf16_selection() {
         let mut editor =
             MarkdownTextArea::new(["a🙂b", "second"], MarkdownTextAreaStyle::default());
@@ -1255,6 +1277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ui-bridge")]
     fn semantic_text_edits_apply_to_the_same_ratatui_state() {
         let mut editor =
             MarkdownTextArea::new(["a🙂b", "second"], MarkdownTextAreaStyle::default());
@@ -1279,6 +1302,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ui-bridge")]
     fn semantic_selection_preserves_anchor_direction_and_rejects_stale_events() {
         let mut editor = MarkdownTextArea::new(["abcdef"], MarkdownTextAreaStyle::default());
         let config = MarkdownEditorConfig::new("markdown-editor");
@@ -1311,6 +1335,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "ui-bridge")]
     fn semantic_commands_return_app_owned_intent() {
         let mut editor = MarkdownTextArea::new(["# Hello"], MarkdownTextAreaStyle::default());
         let config = MarkdownEditorConfig::new("markdown-editor");

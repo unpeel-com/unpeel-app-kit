@@ -1,13 +1,54 @@
-# App Kit UI components
+# App Kit components
 
-App Kit is an opinionated component library for terminal-powered Apps. Its
-author-facing model is component-first—`MarkdownEditor`, then `Page`, `List`,
-`ListItem`, `Input`, and other deliberate primitives—not a serialization of
-terminal cells and not a portable clone of every Ratatui widget.
+App Kit is first an opinionated Ratatui library for normal standalone TUI
+Apps. Build with its components, own the event loop and model, and run the same
+binary in any terminal with no Unpeel process, account, socket, protocol, or
+environment variables present. Component construction, input handling, and
+Ratatui rendering require zero bridge plumbing.
 
-The Rust terminal process is the App. It owns the model, reducer, validation,
-persistence, and commands. Ratatui, SwiftUI/AppKit, and DOM are renderers of
-the same semantic component state.
+## Standalone component layer
+
+A pure-TUI App can compile out the hosted presentation layer entirely:
+
+```toml
+[dependencies]
+unpeel-app-kit = { path = "../unpeel-app-kit", default-features = false }
+```
+
+The Ratatui Markdown editor is independently selectable:
+
+```toml
+[dependencies.unpeel-app-kit]
+path = "../unpeel-app-kit"
+default-features = false
+features = ["markdown-text-area"]
+```
+
+| Cargo features | Compiled API |
+| --- | --- |
+| `default-features = false` | Core Ratatui components and standalone-safe helpers; no socket or UI protocol modules |
+| `markdown-text-area` | Adds the Ratatui `MarkdownEditor` / `MarkdownTextArea` |
+| `ui-bridge` (default) | Adds the optional protocol, socket, scoped-token, and state-envelope APIs |
+| `markdown-text-area` + `ui-bridge` | Also adds the Markdown semantic projection/event adapter |
+
+Keeping `ui-bridge` default-on preserves the existing API, not a runtime
+requirement. Merely compiling it starts no listener or worker and changes no
+terminal behavior. An App that never calls `UiBridge::detect()` loses nothing;
+an App built without the feature contains none of the bridge modules.
+
+API ergonomics follow that boundary. Authors construct, render, and drive the
+Ratatui component first. Bridge-only projections and events are additional
+methods/types available under `ui-bridge`; they are never constructor
+parameters or prerequisites for terminal input and rendering.
+
+## Optional hosted presentation layer
+
+When Unpeel hosts the App, it may opt into a component-first semantic model—
+`MarkdownEditor`, then `Page`, `List`, `ListItem`, `Input`, and other deliberate
+primitives—not a serialization of terminal cells or a portable clone of every
+Ratatui widget. The Rust terminal process remains the App and owns the model,
+reducer, validation, persistence, and commands. SwiftUI/AppKit and DOM become
+optional renderers of the same state alongside Ratatui.
 
 This channel is the decided presentation path in Unpeel's decision log,
 `docs/MASTER PLAN.md` §10 **D16 — The App Kit semantic component channel is a
@@ -41,7 +82,7 @@ D16's invariants are load-bearing conformance requirements:
 Unsupported components and older Hosts keep using the PTY. These boundaries
 are architectural invariants, not graceful-degradation suggestions.
 
-## Runtime architecture
+## Hosted runtime architecture
 
 ```text
 paired Controller / browser / remote Mac / agent Session
