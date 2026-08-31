@@ -602,6 +602,38 @@ is the intersection of `inputPolicy` and the attached participant's existing
 session grants; referencing a stream never grants permission to view or drive
 it.
 
+### Local-GPU invariant: scenes, never frames
+
+Every attached Surface client **must reconstruct and render the retained scene
+locally on that client's own GPU** at its own resolution and backing scale.
+USRF v1 scene commands and one-time, digest-verified immutable resources travel
+to the presenter; rendered framebuffer images never do. An immutable RGBA image
+resource referenced by a scene is permitted protocol input. A rasterized RGBA,
+PNG, JPEG, video, or other per-frame representation of the composed scene is
+not.
+
+The existing Unpeel Host is a transport broker for this stream, never a
+Surface renderer. After authentication and authorization it may envelope,
+multiplex, journal/checkpoint, encrypt, and relay the USRF byte stream through
+the existing Direct, SSH, or Link route, but the ordered USRF message bytes
+forwarded to a presenter remain byte-for-byte unchanged. It must never decode
+the scene for server-side rasterization, read a GPU framebuffer, transcode
+frames, or substitute a frame-streaming protocol. Relay latency, an older
+client, or a missing presenter capability does not relax this rule: the pane
+uses its terminal fallback instead of silently moving rendering to the Host.
+
+The mmap-backed Kitty path is exclusively a presentation medium for the local
+terminal whose process can open the referenced frame files. Those file paths
+and Kitty frame placements do not work across SSH and must never be forwarded
+as a remote-Surface fallback. A remote terminal may still receive its ordinary
+PTY stream, but its Surface layer travels separately over the connected USRF
+presenter path and is rendered by that client's local wgpu/WebGPU/Metal
+renderer. Apple connected presentation remains decoder-to-`CAMetalLayer` with
+no frame readback, and web connected presentation remains decoder-to-WebGPU.
+
+This scenes-never-frames rule is a load-bearing D14 invariant for every App Kit
+Surface implementation, Host adapter, journal, relay, and reconnect path.
+
 ### Renderer integration
 
 - **Terminal:** a future, default-off `surface-embed` Cargo feature adds an
@@ -714,7 +746,7 @@ The next useful vocabulary is intentionally conventional:
 
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
-| `Surface` (design only) | optional `unpeel-surface::ratatui::SurfaceLayer` behind the planned default-off `surface-embed` feature | reference-only canvas embed: Host-resolved session/stream id, cells/points sizing, background, and input policy; existing Metal/WebGPU USRF presenters; no scene or pixel JSON |
+| `Surface` (design only) | optional `unpeel-surface::ratatui::SurfaceLayer` behind the planned default-off `surface-embed` feature | reference-only canvas embed: Host-resolved session/stream id, cells/points sizing, background, and input policy; retained scenes/resources go to local-GPU USRF presenters, never rendered frames or UI JSON |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
 | `Explorer` | existing `Explorer` | hierarchical file navigation and drops |
