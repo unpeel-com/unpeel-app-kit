@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://unpeel.com/protocol/unpeel-workspace-ui-v1.schema.json",
-  "title": "Unpeel browser-to-workspace UI protocol v1",
-  "description": "Untrusted client messages sent over an authenticated workspace WebSocket. Participant identity, grants, and the local App token are intentionally absent and must be supplied by the workspace server. Implementations ignore unknown fields inside recognized message and value kinds for forward compatibility, but reject unknown discriminated kinds.",
+  "title": "Unpeel Controller-to-Host workspace UI protocol v1",
+  "description": "Untrusted renderer messages carried as an additive extension of the authenticated /mobile Host contract over Direct, SSH, or Link relay. Participant identity, grants, and local participant tokens are intentionally absent and must be derived by the existing Host from ControllerPrincipal. Implementations ignore unknown fields inside recognized message and value kinds for forward compatibility, but reject unknown discriminated kinds.",
   "oneOf": [
     { "$ref": "#/$defs/resume" },
     { "$ref": "#/$defs/action" },

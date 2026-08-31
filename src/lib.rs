@@ -31,7 +31,9 @@ mod process_security;
 mod scrollbar;
 mod theme;
 mod ui;
+mod ui_auth;
 mod ui_bridge;
+mod ui_state;
 mod widgets;
 
 pub use agent::{
@@ -71,12 +73,21 @@ pub use ui::{
     ActionId, AppInstanceId, AppMetadata, ClientId, EventId, MAX_SAFE_UI_INTEGER,
     MAX_UI_FRAME_BYTES, MarkdownEditorActions, MarkdownEditorSpec, MarkdownPresentation, NodeId,
     ParticipantId, RendererId, TextEdit, TextPosition, TextRange, TextSelection,
-    UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UI_PROTOCOL_VERSION,
-    UI_SOCKET_ENV, UI_TOKEN_ENV, UiAck, UiAckStatus, UiAction, UiAttach, UiAttached, UiComponent,
-    UiErrorMessage, UiEvent, UiEventKind, UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode,
-    UiParticipant, UiPresence, UiPresenceMember, UiProtocolError, UiRendererMetadata,
-    UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId, decode_ui_frame,
-    encode_ui_frame, negotiate_ui_protocol_version, read_ui_message, write_ui_message,
+    UI_DELTA_CAPABILITY, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME,
+    UI_PROTOCOL_VERSION, UI_SOCKET_ENV, UI_TOKEN_ENV, UiAck, UiAckStatus, UiAction, UiAttach,
+    UiAttached, UiComponent, UiDelta, UiDeltaOperation, UiErrorMessage, UiEvent, UiEventKind,
+    UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode, UiParticipant, UiParticipantKind,
+    UiPresence, UiPresenceMember, UiProtocolError, UiRendererMetadata, UiRendererState,
+    UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId, decode_ui_frame, encode_ui_frame,
+    negotiate_ui_protocol_version, read_ui_message, write_ui_message,
+};
+pub use ui_auth::{
+    UI_PARTICIPANT_TOKEN_PREFIX, UI_PARTICIPANT_TOKEN_VERSION, UiParticipantTokenClaims,
+    UiParticipantTokenError, UiParticipantTokenIssuer, UiParticipantTokenVerifier,
 };
 pub use ui_bridge::{UiBridge, UiBridgeError, UiBridgeEvent, UiEventOutcome};
+pub use ui_state::{
+    UI_STATE_FILENAME, UI_STATE_FORMAT, UI_STATE_FORMAT_VERSION, UiSavedState, UiStateError,
+    UiStateStore,
+};
 pub use widgets::{DragSource, DraggablePath};

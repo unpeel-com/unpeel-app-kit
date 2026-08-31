@@ -21,11 +21,13 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 use crate::{
     AppInstanceId, AppMetadata, ClientId, EventId, MAX_SAFE_UI_INTEGER, MAX_UI_FRAME_BYTES,
-    UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UI_SOCKET_ENV,
-    UI_TOKEN_ENV, UiAck, UiAckStatus, UiAttach, UiAttached, UiErrorMessage, UiEvent, UiEventKind,
-    UiGrant, UiLifecycle, UiMessage, UiNode, UiParticipant, UiPresence, UiPresenceMember,
-    UiProtocolError, UiRendererMetadata, UiRendererState, UiRequestSnapshot, UiSnapshot, ViewId,
-    decode_ui_frame, encode_ui_frame, negotiate_ui_protocol_version,
+    UI_DELTA_CAPABILITY, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME,
+    UI_SOCKET_ENV, UI_TOKEN_ENV, UiAck, UiAckStatus, UiAttach, UiAttached, UiDelta,
+    UiDeltaOperation, UiErrorMessage, UiEvent, UiEventKind, UiGrant, UiLifecycle, UiMessage,
+    UiNode, UiParticipant, UiParticipantTokenError, UiParticipantTokenVerifier, UiPresence,
+    UiPresenceMember, UiProtocolError, UiRendererMetadata, UiRendererState, UiRequestSnapshot,
+    UiSnapshot, UiStateError, UiStateStore, ViewId, decode_ui_frame, encode_ui_frame,
+    negotiate_ui_protocol_version,
 };
 
 const MAX_CONNECTIONS: usize = 256;
@@ -78,7 +80,9 @@ pub enum UiEventOutcome {
 pub struct UiBridge {
     app: AppMetadata,
     app_instance_id: AppInstanceId,
-    auth_token: String,
+    app_session_id: Option<String>,
+    participant_tokens: Option<UiParticipantTokenVerifier>,
+    state_store: Option<UiStateStore>,
     #[cfg(unix)]
     server: Option<UiServer>,
     #[cfg(not(unix))]
@@ -96,7 +100,9 @@ impl fmt::Debug for UiBridge {
             .debug_struct("UiBridge")
             .field("app", &self.app)
             .field("app_instance_id", &self.app_instance_id)
-            .field("auth_token", &"[REDACTED]")
+            .field("app_session_id", &self.app_session_id)
+            .field("participant_tokens", &"[REDACTED]")
+            .field("state_store", &self.state_store)
             .field("available", &self.is_available())
             .field("views", &self.views)
             .field("client_views", &self.client_views)
@@ -110,10 +116,10 @@ impl UiBridge {
     /// Binds the Host-provided endpoint, or remains inert in a normal terminal.
     ///
     /// A hosted endpoint requires both [`UI_SOCKET_ENV`] and [`UI_TOKEN_ENV`].
-    /// The token authenticates the trusted local workspace broker; browsers
-    /// and remote clients must never receive it. Both variables are scrubbed
-    /// before this function returns so subsequently spawned children cannot
-    /// inherit the endpoint credential.
+    /// The token is a per-session signing key used to verify scoped participant
+    /// credentials minted by the Host; renderers never receive that key. Both
+    /// variables are scrubbed before this function returns so subsequently
+    /// spawned children cannot inherit the endpoint credential.
     ///
     /// Call this during single-threaded App startup. Rust 2024 environment
     /// mutation cannot be soundly synchronized with arbitrary foreign code.
@@ -124,26 +130,54 @@ impl UiBridge {
             return Ok(Self::disabled(app));
         };
         let token = token.map_err(|_| UiBridgeError::MissingToken)?;
-        Self::listen(path, token, app)
+        let path = PathBuf::from(path);
+        let app_session_id = std::env::var("UNPEEL_SESSION_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| session_id_from_socket_path(&path));
+        Self::listen_for_session(path, token, app_session_id, app)
     }
 
-    /// Binds an explicit app-owned socket with a broker authentication token.
+    /// Binds an explicit app-owned socket with a participant-token signing key.
+    ///
+    /// The App Session id is inferred from the socket's parent directory. Hosts
+    /// with another layout should call [`Self::listen_for_session`].
     pub fn listen(
         path: impl AsRef<Path>,
-        auth_token: impl Into<String>,
+        signing_key: impl Into<String>,
         app: AppMetadata,
     ) -> Result<Self, UiBridgeError> {
-        let auth_token = auth_token.into();
-        if auth_token.is_empty() {
+        let path = path.as_ref();
+        let app_session_id = session_id_from_socket_path(path);
+        Self::listen_for_session(path, signing_key, app_session_id, app)
+    }
+
+    /// Binds an explicit endpoint and participant-token audience.
+    pub fn listen_for_session(
+        path: impl AsRef<Path>,
+        signing_key: impl Into<String>,
+        app_session_id: impl Into<String>,
+        app: AppMetadata,
+    ) -> Result<Self, UiBridgeError> {
+        let signing_key = signing_key.into();
+        if signing_key.is_empty() {
             return Err(UiBridgeError::MissingToken);
         }
+        let app_session_id = app_session_id.into();
+        let participant_tokens =
+            UiParticipantTokenVerifier::new(signing_key.as_bytes(), app_session_id.clone())?;
         #[cfg(unix)]
         {
-            let server = UiServer::bind(path.as_ref())?;
+            let path = path.as_ref();
+            let state_store =
+                UiStateStore::beside_socket(path, app.id.clone(), app.version.clone())?;
+            let server = UiServer::bind(path)?;
             Ok(Self {
                 app,
                 app_instance_id: new_app_instance_id(),
-                auth_token,
+                app_session_id: Some(app_session_id),
+                participant_tokens: Some(participant_tokens),
+                state_store: Some(state_store),
                 server: Some(server),
                 views: HashMap::new(),
                 client_views: HashMap::new(),
@@ -155,6 +189,7 @@ impl UiBridge {
         #[cfg(not(unix))]
         {
             let _ = path;
+            let _ = participant_tokens;
             Err(UiBridgeError::UnsupportedPlatform)
         }
     }
@@ -165,7 +200,9 @@ impl UiBridge {
         Self {
             app,
             app_instance_id: new_app_instance_id(),
-            auth_token: String::new(),
+            app_session_id: None,
+            participant_tokens: None,
+            state_store: None,
             #[cfg(unix)]
             server: None,
             #[cfg(not(unix))]
@@ -182,6 +219,18 @@ impl UiBridge {
     #[must_use]
     pub fn app_instance_id(&self) -> &AppInstanceId {
         &self.app_instance_id
+    }
+
+    /// Host Session whose scoped participant tokens this endpoint accepts.
+    #[must_use]
+    pub fn app_session_id(&self) -> Option<&str> {
+        self.app_session_id.as_deref()
+    }
+
+    /// Crash-safe state file next to `ui.sock` when running under a Host.
+    #[must_use]
+    pub fn state_store(&self) -> Option<&UiStateStore> {
+        self.state_store.as_ref()
     }
 
     /// Whether the App successfully owns a renderer attachment endpoint.
@@ -255,6 +304,36 @@ impl UiBridge {
         self.broadcast_view(&view_id)
     }
 
+    /// Applies and publishes a compact shared change from `base_revision`.
+    ///
+    /// Delta-capable renderers receive the operations only when the bridge
+    /// knows their queued state is exactly the base shared projection. Any
+    /// renderer that is behind, targeted, or lacks delta support receives the
+    /// resulting complete snapshot instead.
+    pub fn publish_delta(
+        &mut self,
+        view_id: impl Into<ViewId>,
+        base_revision: u64,
+        revision: u64,
+        operations: Vec<UiDeltaOperation>,
+    ) -> Result<usize, UiBridgeError> {
+        let view_id = view_id.into();
+        let Some(previous) = self.views.get(&view_id).cloned() else {
+            return Err(UiBridgeError::MissingBaseProjection(view_id));
+        };
+        validate_delta_base(&view_id, &previous, base_revision, revision, &operations)?;
+        let mut root = previous.root;
+        root.apply_delta_operations(&operations)
+            .map_err(UiProtocolError::InvalidView)?;
+        validate_projection(revision, &root)?;
+        self.views
+            .insert(view_id.clone(), Projection { revision, root });
+        self.client_views.retain(|(_, targeted_view), projection| {
+            targeted_view != &view_id || projection.revision >= revision
+        });
+        self.broadcast_shared_delta(&view_id, base_revision, revision, operations)
+    }
+
     /// Publishes a participant-specific projection for focus, selection, or
     /// other state that should not be shared with every collaborator.
     pub fn publish_to(
@@ -283,6 +362,33 @@ impl UiBridge {
             root,
         )?;
         self.send_projection_to(&client_id, &view_id)
+    }
+
+    /// Applies a compact participant-specific change to the currently resolved
+    /// projection for one stable client.
+    pub fn publish_delta_to(
+        &mut self,
+        client_id: impl Into<ClientId>,
+        view_id: impl Into<ViewId>,
+        base_revision: u64,
+        revision: u64,
+        operations: Vec<UiDeltaOperation>,
+    ) -> Result<usize, UiBridgeError> {
+        let client_id = client_id.into();
+        let view_id = view_id.into();
+        let Some(previous) = self.projection_for(&client_id, &view_id).cloned() else {
+            return Err(UiBridgeError::MissingBaseProjection(view_id));
+        };
+        validate_delta_base(&view_id, &previous, base_revision, revision, &operations)?;
+        let mut root = previous.root;
+        root.apply_delta_operations(&operations)
+            .map_err(UiProtocolError::InvalidView)?;
+        validate_projection(revision, &root)?;
+        self.client_views.insert(
+            (client_id.clone(), view_id.clone()),
+            Projection { revision, root },
+        );
+        self.send_delta_to(&client_id, &view_id, base_revision, revision, operations)
     }
 
     /// Polls one accepted attachment, lifecycle transition, action, or detach.
@@ -496,6 +602,7 @@ impl UiBridge {
             UiMessage::Attach(_)
             | UiMessage::Attached(_)
             | UiMessage::Snapshot(_)
+            | UiMessage::Delta(_)
             | UiMessage::Ack(_)
             | UiMessage::Presence(_)
             | UiMessage::Error(_) => {
@@ -521,15 +628,27 @@ impl UiBridge {
             )?;
             return Ok(());
         };
-        if !constant_time_eq(attach.auth_token.as_bytes(), self.auth_token.as_bytes()) {
-            self.reject_connection(
-                connection_id,
-                "unauthorized",
-                "workspace broker authentication failed",
-            )?;
-            return Ok(());
-        }
-        if !participant_allows(&attach.participant, UiGrant::VIEW) {
+        let participant = match self
+            .participant_tokens
+            .as_ref()
+            .expect("hosted verifier")
+            .verify(
+                &attach.participant_token,
+                &attach.client_id,
+                &attach.renderer.id,
+                &attach.view_id,
+            ) {
+            Ok(claims) => claims.participant,
+            Err(_) => {
+                self.reject_connection(
+                    connection_id,
+                    "unauthorized",
+                    "participant credential verification failed",
+                )?;
+                return Ok(());
+            }
+        };
+        if !participant_allows(&participant, UiGrant::VIEW) {
             self.reject_connection(
                 connection_id,
                 "forbidden",
@@ -543,12 +662,14 @@ impl UiBridge {
             .as_ref()
             .is_some_and(|expected| expected == &self.app_instance_id);
         let attachment = Attachment {
-            participant: attach.participant,
+            participant,
             client_id: attach.client_id,
             renderer: attach.renderer,
             view_id: attach.view_id,
             state: attach.state,
             protocol_version,
+            last_sent_revision: None,
+            last_sent_was_targeted: false,
         };
 
         let duplicate_ids: Vec<u64> = self
@@ -810,6 +931,128 @@ impl UiBridge {
     }
 
     #[cfg(unix)]
+    fn broadcast_shared_delta(
+        &mut self,
+        view_id: &ViewId,
+        base_revision: u64,
+        revision: u64,
+        operations: Vec<UiDeltaOperation>,
+    ) -> Result<usize, UiBridgeError> {
+        let recipients: Vec<u64> = self
+            .server
+            .as_ref()
+            .map(|server| {
+                server
+                    .connections
+                    .iter()
+                    .filter_map(|connection| {
+                        let attachment = connection.attachment.as_ref()?;
+                        (&attachment.view_id == view_id).then_some(connection.id)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut queued = 0;
+        for connection_id in recipients {
+            let can_apply = self
+                .connection(connection_id)
+                .and_then(|connection| connection.attachment.as_ref())
+                .is_some_and(|attachment| {
+                    attachment.renderer.supports(UI_DELTA_CAPABILITY)
+                        && attachment.last_sent_revision == Some(base_revision)
+                        && !attachment.last_sent_was_targeted
+                });
+            let did_queue = if can_apply {
+                self.queue_delta_message(
+                    connection_id,
+                    base_revision,
+                    revision,
+                    operations.clone(),
+                    false,
+                )?
+            } else {
+                self.queue_projection(connection_id)?
+            };
+            queued += usize::from(did_queue);
+        }
+        self.flush_available();
+        Ok(queued)
+    }
+
+    #[cfg(not(unix))]
+    fn broadcast_shared_delta(
+        &mut self,
+        _view_id: &ViewId,
+        _base_revision: u64,
+        _revision: u64,
+        _operations: Vec<UiDeltaOperation>,
+    ) -> Result<usize, UiBridgeError> {
+        Ok(0)
+    }
+
+    #[cfg(unix)]
+    fn send_delta_to(
+        &mut self,
+        client_id: &ClientId,
+        view_id: &ViewId,
+        base_revision: u64,
+        revision: u64,
+        operations: Vec<UiDeltaOperation>,
+    ) -> Result<usize, UiBridgeError> {
+        let recipients: Vec<u64> = self
+            .server
+            .as_ref()
+            .map(|server| {
+                server
+                    .connections
+                    .iter()
+                    .filter_map(|connection| {
+                        let attachment = connection.attachment.as_ref()?;
+                        (&attachment.client_id == client_id && &attachment.view_id == view_id)
+                            .then_some(connection.id)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut queued = 0;
+        for connection_id in recipients {
+            let can_apply = self
+                .connection(connection_id)
+                .and_then(|connection| connection.attachment.as_ref())
+                .is_some_and(|attachment| {
+                    attachment.renderer.supports(UI_DELTA_CAPABILITY)
+                        && attachment.last_sent_revision == Some(base_revision)
+                });
+            let did_queue = if can_apply {
+                self.queue_delta_message(
+                    connection_id,
+                    base_revision,
+                    revision,
+                    operations.clone(),
+                    true,
+                )?
+            } else {
+                self.queue_projection(connection_id)?
+            };
+            queued += usize::from(did_queue);
+        }
+        self.flush_available();
+        Ok(queued)
+    }
+
+    #[cfg(not(unix))]
+    fn send_delta_to(
+        &mut self,
+        _client_id: &ClientId,
+        _view_id: &ViewId,
+        _base_revision: u64,
+        _revision: u64,
+        _operations: Vec<UiDeltaOperation>,
+    ) -> Result<usize, UiBridgeError> {
+        Ok(0)
+    }
+
+    #[cfg(unix)]
     fn send_projection_to(
         &mut self,
         client_id: &ClientId,
@@ -857,9 +1100,9 @@ impl UiBridge {
         else {
             return Ok(false);
         };
-        let Some(projection) = self
-            .projection_for(&attachment.client_id, &attachment.view_id)
-            .cloned()
+        let Some((projection, was_targeted)) = self
+            .projection_for_with_source(&attachment.client_id, &attachment.view_id)
+            .map(|(projection, targeted)| (projection.clone(), targeted))
         else {
             return Ok(false);
         };
@@ -872,18 +1115,73 @@ impl UiBridge {
         );
         let mut snapshot = snapshot;
         snapshot.protocol_version = attachment.protocol_version;
-        self.queue_message(connection_id, snapshot.into())
+        let queued = self.queue_message(connection_id, snapshot.into())?;
+        if queued
+            && let Some(attachment) = self
+                .connection_mut(connection_id)
+                .and_then(|connection| connection.attachment.as_mut())
+        {
+            attachment.last_sent_revision = Some(projection.revision);
+            attachment.last_sent_was_targeted = was_targeted;
+        }
+        Ok(queued)
+    }
+
+    #[cfg(unix)]
+    fn queue_delta_message(
+        &mut self,
+        connection_id: u64,
+        base_revision: u64,
+        revision: u64,
+        operations: Vec<UiDeltaOperation>,
+        targeted: bool,
+    ) -> Result<bool, UiBridgeError> {
+        let Some(attachment) = self
+            .connection(connection_id)
+            .and_then(|connection| connection.attachment.clone())
+        else {
+            return Ok(false);
+        };
+        let mut delta = UiDelta::new(
+            self.app_instance_id.clone(),
+            attachment.client_id,
+            attachment.view_id,
+            base_revision,
+            revision,
+            operations,
+        );
+        delta.protocol_version = attachment.protocol_version;
+        let queued = self.queue_message(connection_id, delta.into())?;
+        if queued
+            && let Some(attachment) = self
+                .connection_mut(connection_id)
+                .and_then(|connection| connection.attachment.as_mut())
+        {
+            attachment.last_sent_revision = Some(revision);
+            attachment.last_sent_was_targeted = targeted;
+        }
+        Ok(queued)
     }
 
     fn projection_for(&self, client_id: &ClientId, view_id: &ViewId) -> Option<&Projection> {
+        self.projection_for_with_source(client_id, view_id)
+            .map(|(projection, _)| projection)
+    }
+
+    fn projection_for_with_source(
+        &self,
+        client_id: &ClientId,
+        view_id: &ViewId,
+    ) -> Option<(&Projection, bool)> {
         let shared = self.views.get(view_id);
         let targeted = self.client_views.get(&(client_id.clone(), view_id.clone()));
         match (shared, targeted) {
             (Some(shared), Some(targeted)) if targeted.revision >= shared.revision => {
-                Some(targeted)
+                Some((targeted, true))
             }
-            (Some(shared), _) => Some(shared),
-            (None, targeted) => targeted,
+            (Some(shared), _) => Some((shared, false)),
+            (None, Some(targeted)) => Some((targeted, true)),
+            (None, None) => None,
         }
     }
 
@@ -1153,6 +1451,8 @@ impl UiBridge {
 pub enum UiBridgeError {
     Io(io::Error),
     Protocol(UiProtocolError),
+    ParticipantToken(UiParticipantTokenError),
+    State(UiStateError),
     MissingToken,
     RelativeSocketPath(PathBuf),
     InvalidSocketPath(PathBuf),
@@ -1166,6 +1466,17 @@ pub enum UiBridgeError {
     RevisionConflict {
         view_id: ViewId,
         revision: u64,
+    },
+    MissingBaseProjection(ViewId),
+    DeltaBaseMismatch {
+        view_id: ViewId,
+        current: u64,
+        received: u64,
+    },
+    InvalidDeltaRevision {
+        view_id: ViewId,
+        base: u64,
+        received: u64,
     },
     InvalidRevision(u64),
     UnknownEvent {
@@ -1183,9 +1494,12 @@ impl fmt::Display for UiBridgeError {
         match self {
             Self::Io(error) => write!(formatter, "App Kit UI endpoint I/O error: {error}"),
             Self::Protocol(error) => write!(formatter, "App Kit UI protocol error: {error}"),
-            Self::MissingToken => {
-                formatter.write_str("hosted App Kit UI requires a non-empty UNPEEL_UI_TOKEN")
+            Self::ParticipantToken(error) => {
+                write!(formatter, "App Kit participant credential error: {error}")
             }
+            Self::State(error) => write!(formatter, "App Kit persistence error: {error}"),
+            Self::MissingToken => formatter
+                .write_str("hosted App Kit UI requires a strong UNPEEL_UI_TOKEN signing key"),
             Self::RelativeSocketPath(path) => write!(
                 formatter,
                 "App Kit UI socket path must be absolute: {}",
@@ -1216,6 +1530,28 @@ impl fmt::Display for UiBridgeError {
                 formatter,
                 "view {view_id} published different state for immutable revision {revision}"
             ),
+            Self::MissingBaseProjection(view_id) => {
+                write!(
+                    formatter,
+                    "view {view_id} has no base projection for a delta"
+                )
+            }
+            Self::DeltaBaseMismatch {
+                view_id,
+                current,
+                received,
+            } => write!(
+                formatter,
+                "view {view_id} delta base {received} does not match current revision {current}"
+            ),
+            Self::InvalidDeltaRevision {
+                view_id,
+                base,
+                received,
+            } => write!(
+                formatter,
+                "view {view_id} delta revision {received} must be greater than base revision {base}"
+            ),
             Self::InvalidRevision(revision) => {
                 write!(formatter, "revision {revision} is not cross-platform safe")
             }
@@ -1241,6 +1577,8 @@ impl std::error::Error for UiBridgeError {
         match self {
             Self::Io(error) => Some(error),
             Self::Protocol(error) => Some(error),
+            Self::ParticipantToken(error) => Some(error),
+            Self::State(error) => Some(error),
             _ => None,
         }
     }
@@ -1255,6 +1593,18 @@ impl From<io::Error> for UiBridgeError {
 impl From<UiProtocolError> for UiBridgeError {
     fn from(value: UiProtocolError) -> Self {
         Self::Protocol(value)
+    }
+}
+
+impl From<UiParticipantTokenError> for UiBridgeError {
+    fn from(value: UiParticipantTokenError) -> Self {
+        Self::ParticipantToken(value)
+    }
+}
+
+impl From<UiStateError> for UiBridgeError {
+    fn from(value: UiStateError) -> Self {
+        Self::State(value)
     }
 }
 
@@ -1280,6 +1630,8 @@ struct Attachment {
     view_id: ViewId,
     state: UiRendererState,
     protocol_version: u32,
+    last_sent_revision: Option<u64>,
+    last_sent_was_targeted: bool,
 }
 
 #[cfg(unix)]
@@ -1474,6 +1826,39 @@ fn validate_projection(revision: u64, root: &UiNode) -> Result<(), UiBridgeError
     Ok(())
 }
 
+fn validate_delta_base(
+    view_id: &ViewId,
+    previous: &Projection,
+    base_revision: u64,
+    revision: u64,
+    operations: &[UiDeltaOperation],
+) -> Result<(), UiBridgeError> {
+    if base_revision > MAX_SAFE_UI_INTEGER || revision > MAX_SAFE_UI_INTEGER {
+        return Err(UiBridgeError::InvalidRevision(base_revision.max(revision)));
+    }
+    if previous.revision != base_revision {
+        return Err(UiBridgeError::DeltaBaseMismatch {
+            view_id: view_id.clone(),
+            current: previous.revision,
+            received: base_revision,
+        });
+    }
+    if revision <= base_revision {
+        return Err(UiBridgeError::InvalidDeltaRevision {
+            view_id: view_id.clone(),
+            base: base_revision,
+            received: revision,
+        });
+    }
+    if operations.is_empty() || operations.len() > 4096 {
+        return Err(UiProtocolError::InvalidMessage(
+            "delta operations must contain 1..=4096 entries".to_owned(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn store_projection<K>(
     projections: &mut HashMap<K, Projection>,
     key: K,
@@ -1537,6 +1922,7 @@ fn message_protocol_version(message: &UiMessage) -> Option<u32> {
         UiMessage::Attach(_) => None,
         UiMessage::Attached(message) => Some(message.protocol_version),
         UiMessage::Snapshot(message) => Some(message.protocol_version),
+        UiMessage::Delta(message) => Some(message.protocol_version),
         UiMessage::Event(message) => Some(message.protocol_version),
         UiMessage::Ack(message) => Some(message.protocol_version),
         UiMessage::Lifecycle(message) => Some(message.protocol_version),
@@ -1588,15 +1974,13 @@ fn should_render_terminal(states: impl Iterator<Item = UiRendererState>) -> bool
     !any_attachment
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let mut difference = left.len() ^ right.len();
-    let length = left.len().max(right.len());
-    for index in 0..length {
-        let left_byte = left.get(index).copied().unwrap_or(0);
-        let right_byte = right.get(index).copied().unwrap_or(0);
-        difference |= usize::from(left_byte ^ right_byte);
-    }
-    difference == 0
+fn session_id_from_socket_path(path: &Path) -> String {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("app-session")
+        .to_owned()
 }
 
 fn new_app_instance_id() -> AppInstanceId {
@@ -1621,8 +2005,11 @@ mod tests {
     use super::*;
     use crate::{
         MarkdownEditorSpec, TextEdit, TextPosition, TextRange, TextSelection, UiAction,
-        UiComponent, read_ui_message, write_ui_message,
+        UiComponent, UiParticipantTokenIssuer, read_ui_message, write_ui_message,
     };
+
+    const TEST_SIGNING_KEY: &str = "0123456789abcdef0123456789abcdef";
+    const TEST_SESSION_ID: &str = "app-session-test";
 
     struct TestClient {
         writer: UnixStream,
@@ -1651,9 +2038,10 @@ mod tests {
 
     fn server() -> (TempDir, UiBridge) {
         let directory = tempfile::tempdir().unwrap();
-        let bridge = UiBridge::listen(
+        let bridge = UiBridge::listen_for_session(
             directory.path().join("app-ui.sock"),
-            "broker-token",
+            TEST_SIGNING_KEY,
+            TEST_SESSION_ID,
             AppMetadata::new("com.unpeel.markdown", "Markdown", "0.1.0"),
         )
         .unwrap();
@@ -1679,17 +2067,59 @@ mod tests {
         renderer_id: &str,
         state: UiRendererState,
     ) -> UiAttach {
-        UiAttach::new(
-            "broker-token",
-            participant(
-                participant_id,
-                &[UiGrant::VIEW, UiGrant::EDIT, UiGrant::COMMAND],
-            ),
+        attach_with_grants(
+            participant_id,
             client_id,
-            UiRendererMetadata::new(renderer_id, "web"),
+            renderer_id,
+            state,
+            &[UiGrant::VIEW, UiGrant::EDIT, UiGrant::COMMAND],
+        )
+    }
+
+    fn attach_with_grants(
+        participant_id: &str,
+        client_id: &str,
+        renderer_id: &str,
+        state: UiRendererState,
+        grants: &[&str],
+    ) -> UiAttach {
+        let renderer =
+            UiRendererMetadata::new(renderer_id, "web").capabilities([UI_DELTA_CAPABILITY]);
+        let token = UiParticipantTokenIssuer::new(TEST_SIGNING_KEY, TEST_SESSION_ID)
+            .unwrap()
+            .issue(
+                participant(participant_id, grants),
+                client_id,
+                renderer_id,
+                "main",
+                format!("token-{client_id}-{renderer_id}"),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        UiAttach::new(token, client_id, renderer, "main").state(state)
+    }
+
+    fn attach_without_delta(participant_id: &str, client_id: &str, renderer_id: &str) -> UiAttach {
+        let token = UiParticipantTokenIssuer::new(TEST_SIGNING_KEY, TEST_SESSION_ID)
+            .unwrap()
+            .issue(
+                participant(
+                    participant_id,
+                    &[UiGrant::VIEW, UiGrant::EDIT, UiGrant::COMMAND],
+                ),
+                client_id,
+                renderer_id,
+                "main",
+                format!("token-{client_id}-{renderer_id}"),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+        UiAttach::new(
+            token,
+            client_id,
+            UiRendererMetadata::new(renderer_id, "legacyWeb"),
             "main",
         )
-        .state(state)
     }
 
     fn poll_until(bridge: &mut UiBridge) -> UiBridgeEvent {
@@ -1914,16 +2344,115 @@ mod tests {
     }
 
     #[test]
+    fn contiguous_delta_updates_authoritative_snapshot_and_delta_capable_renderer() {
+        let (_directory, mut bridge) = server();
+        let root = UiNode::markdown_editor(
+            "editor",
+            MarkdownEditorSpec::new(
+                "# Hello\n🙂 world",
+                TextSelection::caret(TextPosition::new(1, 2)),
+            ),
+        );
+        bridge.publish("main", 7, root).unwrap();
+        let path = bridge.socket_path().unwrap().to_owned();
+        let mut client = TestClient::connect(
+            &path,
+            attach(
+                "person-1",
+                "client-1",
+                "renderer-1",
+                UiRendererState::component(),
+            ),
+        );
+        let _ = poll_until(&mut bridge);
+        let UiMessage::Attached(_) = client.read() else {
+            panic!("expected attached");
+        };
+        let UiMessage::Snapshot(initial) = client.read() else {
+            panic!("expected initial snapshot");
+        };
+        let UiMessage::Presence(_) = client.read() else {
+            panic!("expected presence");
+        };
+
+        bridge
+            .publish_delta(
+                "main",
+                7,
+                8,
+                vec![
+                    UiDeltaOperation::markdown_replace_range(
+                        "editor",
+                        TextEdit::new(
+                            TextRange::new(TextPosition::new(1, 0), TextPosition::new(1, 2)),
+                            "Hello",
+                        ),
+                    ),
+                    UiDeltaOperation::markdown_set_selection(
+                        "editor",
+                        TextSelection::caret(TextPosition::new(1, 5)),
+                    ),
+                ],
+            )
+            .unwrap();
+        let UiMessage::Delta(delta) = client.read() else {
+            panic!("delta-capable renderer must receive a delta");
+        };
+        let updated = initial.applying(&delta).unwrap();
+        let UiComponent::MarkdownEditor(editor) = &updated.root.element;
+        assert_eq!(updated.revision, 8);
+        assert_eq!(editor.text, "# Hello\nHello world");
+        assert_eq!(editor.selection.head, TextPosition::new(1, 5));
+
+        let stored = bridge
+            .projection_for(&"client-1".into(), &"main".into())
+            .unwrap();
+        assert_eq!(stored.revision, 8);
+        assert_eq!(stored.root, updated.root);
+    }
+
+    #[test]
+    fn renderer_without_delta_capability_receives_resulting_snapshot() {
+        let (_directory, mut bridge) = server();
+        bridge.publish("main", 1, node("hello", 0)).unwrap();
+        let path = bridge.socket_path().unwrap().to_owned();
+        let mut client = TestClient::connect(
+            &path,
+            attach_without_delta("person-1", "client-1", "renderer-legacy"),
+        );
+        let _ = poll_until(&mut bridge);
+        let _ = expect_initial(&mut client, 1);
+
+        bridge
+            .publish_delta(
+                "main",
+                1,
+                2,
+                vec![UiDeltaOperation::MarkdownSetDirty {
+                    node_id: "editor".into(),
+                    dirty: true,
+                }],
+            )
+            .unwrap();
+        let UiMessage::Snapshot(snapshot) = client.read() else {
+            panic!("legacy renderer must receive a complete snapshot");
+        };
+        assert_eq!(snapshot.revision, 2);
+        let UiComponent::MarkdownEditor(editor) = snapshot.root.element;
+        assert!(editor.dirty);
+    }
+
+    #[test]
     fn stale_and_unauthorized_edits_never_reach_the_app_reducer() {
         let (_directory, mut bridge) = server();
         bridge.publish("main", 5, node("hello", 0)).unwrap();
         let path = bridge.socket_path().unwrap().to_owned();
-        let view_only = UiAttach::new(
-            "broker-token",
-            participant("person-1", &[UiGrant::VIEW]),
+        let view_only = attach_with_grants(
+            "person-1",
             "client-1",
-            UiRendererMetadata::new("renderer-1", "web"),
-            "main",
+            "renderer-1",
+            UiRendererState::terminal(),
+            &[UiGrant::VIEW],
         );
         let mut client = TestClient::connect(&path, view_only);
         let _ = poll_until(&mut bridge);
@@ -1965,13 +2494,12 @@ mod tests {
     }
 
     #[test]
-    fn auth_tokens_are_redacted_and_wrong_brokers_are_rejected() {
+    fn signing_keys_are_redacted_and_invalid_participant_tokens_are_rejected() {
         let (_directory, mut bridge) = server();
-        assert!(!format!("{bridge:?}").contains("broker-token"));
+        assert!(!format!("{bridge:?}").contains(TEST_SIGNING_KEY));
         let path = bridge.socket_path().unwrap().to_owned();
         let wrong = UiAttach::new(
             "wrong-token",
-            participant("person-1", &[UiGrant::VIEW]),
             "client-1",
             UiRendererMetadata::new("renderer-1", "web"),
             "main",
@@ -1982,7 +2510,7 @@ mod tests {
             panic!("wrong broker needs a generic rejection");
         };
         assert_eq!(error.code, "unauthorized");
-        assert!(!error.message.contains("broker-token"));
+        assert!(!error.message.contains(TEST_SIGNING_KEY));
     }
 
     #[test]

@@ -3,28 +3,40 @@ import Network
 
 /// Reconnecting native client for an App-owned `unpeel.ui/1` Unix socket.
 ///
-/// This class belongs in the trusted native Host or workspace broker. Never
-/// instantiate it in web content or disclose its broker token to a WebView.
+/// This class belongs in the trusted native Host. Never instantiate it in web
+/// content or disclose a scoped participant token to a WebView.
 public final class UIUnixSessionClient: @unchecked Sendable {
     public struct Configuration: Sendable {
         public let socketPath: String
-        public let authToken: String
-        public let participant: UIParticipant
+        public let participantTokenProvider: @Sendable () throws -> String
         public let clientID: String
         public let renderer: UIRendererMetadata
         public let viewID: String
 
         public init(
             socketPath: String,
-            authToken: String,
-            participant: UIParticipant,
+            participantToken: String,
             clientID: String,
             renderer: UIRendererMetadata,
             viewID: String
         ) {
             self.socketPath = socketPath
-            self.authToken = authToken
-            self.participant = participant
+            participantTokenProvider = { participantToken }
+            self.clientID = clientID
+            self.renderer = renderer
+            self.viewID = viewID
+        }
+
+        /// A provider lets the Host mint a fresh short-lived token on reconnect.
+        public init(
+            socketPath: String,
+            participantTokenProvider: @escaping @Sendable () throws -> String,
+            clientID: String,
+            renderer: UIRendererMetadata,
+            viewID: String
+        ) {
+            self.socketPath = socketPath
+            self.participantTokenProvider = participantTokenProvider
             self.clientID = clientID
             self.renderer = renderer
             self.viewID = viewID
@@ -52,6 +64,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     private var rendererState = UIRendererState.terminal
     private var negotiatedProtocolVersion: Int?
     private var appInstanceID: String?
+    private var participantID: String?
     private var latestSnapshot: UISnapshot?
     private var pendingEvents: [String: UIEvent] = [:]
     private var pendingEventOrder: [String] = []
@@ -92,10 +105,10 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     /// Wraps a renderer-local action in authenticated session identity.
     public func send(_ action: UIAction, eventID: String = UUID().uuidString.lowercased()) {
         queue.async { [weak self] in
-            guard let self, let snapshot = latestSnapshot else { return }
+            guard let self, let snapshot = latestSnapshot, let participantID else { return }
             let event = UIEvent(
                 snapshot: snapshot,
-                participantID: configuration.participant.id,
+                participantID: participantID,
                 rendererID: configuration.renderer.id,
                 eventID: eventID,
                 action: action
@@ -130,8 +143,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     public func requestSnapshot() {
         queue.async { [weak self] in
             guard let self, ready,
-                  let appInstanceID,
-                  let snapshot = latestSnapshot
+                  let appInstanceID
             else { return }
             sendMessage(.requestSnapshot(UIRequestSnapshot(
                 protocolName: UnpeelUIProtocol.name,
@@ -139,7 +151,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                 appInstanceID: appInstanceID,
                 clientID: configuration.clientID,
                 rendererID: configuration.renderer.id,
-                viewID: snapshot.viewID
+                viewID: configuration.viewID
             )))
         }
     }
@@ -182,17 +194,29 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     }
 
     private func sendAttach() {
-        let attach = UIAttach(
-            authToken: configuration.authToken,
-            participant: configuration.participant,
-            clientID: configuration.clientID,
-            renderer: configuration.renderer,
-            viewID: configuration.viewID,
-            expectedAppInstanceID: appInstanceID,
-            lastSeenRevision: latestSnapshot?.revision,
-            state: rendererState
-        )
-        sendMessage(.attach(attach))
+        do {
+            let capabilities = Array(Set(
+                configuration.renderer.capabilities
+                    + [UnpeelUIProtocol.deltaCapability]
+            )).sorted()
+            let renderer = UIRendererMetadata(
+                id: configuration.renderer.id,
+                kind: configuration.renderer.kind,
+                capabilities: capabilities
+            )
+            let attach = UIAttach(
+                participantToken: try configuration.participantTokenProvider(),
+                clientID: configuration.clientID,
+                renderer: renderer,
+                viewID: configuration.viewID,
+                expectedAppInstanceID: appInstanceID,
+                lastSeenRevision: latestSnapshot?.revision,
+                state: rendererState
+            )
+            sendMessage(.attach(attach))
+        } catch {
+            connection?.cancel()
+        }
     }
 
     private func receiveNext() {
@@ -253,7 +277,6 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                     minimum: attached.minProtocolVersion,
                     maximum: attached.maxProtocolVersion
                   ) == attached.protocolVersion,
-                  attached.participantID == configuration.participant.id,
                   attached.clientID == configuration.clientID,
                   attached.rendererID == configuration.renderer.id,
                   attached.viewID == configuration.viewID
@@ -262,12 +285,14 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                 return
             }
             let sameInstance = appInstanceID == nil || appInstanceID == attached.appInstanceID
-            if !sameInstance {
+            let sameParticipant = participantID == nil || participantID == attached.participantID
+            if !sameInstance || !sameParticipant {
                 pendingEvents.removeAll()
                 pendingEventOrder.removeAll()
                 latestSnapshot = nil
             }
             appInstanceID = attached.appInstanceID
+            participantID = attached.participantID
             negotiatedProtocolVersion = attached.protocolVersion
             ready = true
             onState(.attached(
@@ -287,6 +312,20 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                   snapshot.appInstanceID == appInstanceID
             else { return }
             latestSnapshot = snapshot
+        case let .delta(delta):
+            guard delta.protocolVersion == negotiatedProtocolVersion else { return }
+            guard let snapshot = latestSnapshot else {
+                requestSnapshot()
+                return
+            }
+            do {
+                let next = try snapshot.applying(delta)
+                latestSnapshot = next
+                onMessage(.snapshot(next))
+            } catch {
+                requestSnapshot()
+            }
+            return
         case let .ack(ack):
             guard ack.protocolVersion == negotiatedProtocolVersion,
                   ack.clientID == configuration.clientID,

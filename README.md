@@ -31,7 +31,8 @@ The kit currently provides:
 | `display_path_from_root` | Render paths project-relative without weakening absolute semantic path operations |
 | `VerticalScrollbar` | Shared proportional, capless scrollbar |
 | `MarkdownTextArea` | Ratatui-backed Markdown editor behind the `markdown-text-area` feature |
-| `UiBridge` / `unpeel.ui/1` | App-owned, reconnectable Unix endpoint for multi-renderer snapshots, authenticated actions, presence, and acknowledgements without touching the PTY |
+| `UiBridge` / `unpeel.ui/1` | App-owned Unix endpoint for scoped human/agent participants, snapshots, deltas, actions, presence, and acknowledgements without touching the PTY |
+| `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
 | `MarkdownEditor` | First cross-renderer component: Ratatui editing plus SwiftUI/AppKit and web wrappers |
 
 The crate owns reusable component behavior, not an App's event loop, key map,
@@ -39,18 +40,21 @@ commands, or surrounding chrome.
 
 ## Component UI preview
 
-App Kit is growing into a deliberately small component system rather than a
+App Kit is growing into a deliberately small, opt-in component system rather than a
 portable encoding of every possible Ratatui widget:
 
 ```text
-SwiftUI/AppKit Host ───────────────┐
-                                  │ trusted local unpeel.ui/1
-browser ─ authenticated WSS ─▶ workspace broker
-                                  ▼
+Controller / browser / neighboring agent
+         │ unpeel.workspace.ui/1 inside existing /mobile
+         │ Direct · SSH · Link relay
+         ▼
+existing native or unpeel-serve Host
+         │ scoped local unpeel.ui/1
+         ▼
 terminal-backed Rust App + UiBridge
-├─ model + reducer
+├─ model + reducer + ui-state.json
 ├─ App Kit/Ratatui → the normal PTY
-└─ semantic snapshots/actions → native or DOM component UI
+└─ semantic snapshots/deltas/actions → native or DOM UI
 ```
 
 The Rust App remains authoritative for state, validation, persistence, and
@@ -59,21 +63,26 @@ stable actions; they never scrape ANSI output. Raw Ratatui remains the escape
 hatch for App-specific terminal UI and simply has no native/web projection
 until an App Kit component exists for it.
 
-The App binds the Host-provided Unix socket, so GUI or workspace-server
-restarts can reconnect while the terminal process keeps running. Multiple
-authenticated participants can attach to the same view with broker-attested
-grants and presence. When the Host hides the PTY in favor of component UI,
+The App binds `~/.unpeel/app-sessions/<id>/ui.sock`; the existing Unpeel Host
+brokers it through the already-authenticated `/mobile` transports, so there is
+no standalone workspace server. Multiple human and agent participants attach
+with Host-minted, route-bound scoped tokens. When the Host hides the PTY in favor of component UI,
 `UiBridge::should_render_terminal()` lets the App suspend Ratatui drawing
 without suspending its model or process.
 
 At startup, `UiBridge::detect()` consumes and scrubs the inherited socket path
-and bearer token before child processes can inherit them. The endpoint uses
+and per-session signing key before child processes can inherit them. The endpoint uses
 mode-`0600` Unix sockets plus same-user peer credentials where supported,
 requires a bounded-time authenticated attach, negotiates a min/max protocol
 range, and isolates slow or flooding renderers with per-connection and
-per-client quotas.
+per-client quotas. Delta-capable renderers receive only contiguous
+server-to-client operations; any gap automatically falls back to a snapshot.
 
-`MarkdownEditor` is the first vertical slice. `Page`, `List`, `ListItem`,
+This channel lives entirely in App Kit and does not alter Unpeel core's
+Ratatui-first rule: every App must remain fully functional through its TUI,
+and semantic rendering is an optional enhancement over that fallback.
+
+`MarkdownEditor` is the first vertical slice. `Page`, `Tabs`, `List`, `ListItem`,
 `Input`, and later richer components such as `DataGrid` can join the same
 closed, versioned vocabulary. See [the component architecture](docs/ui-components.md),
 the trusted [`unpeel.ui/1` schema](protocol/unpeel-ui-v1.schema.json), and the
@@ -85,7 +94,7 @@ cannot drift:
 - `swift/` — `UnpeelAppKitUI`, including a real `NSTextView` in SwiftUI and a
   reconnecting trusted Unix client;
 - `web/` — `@unpeel/app-kit-ui`, including a DOM Markdown renderer and the
-  untrusted `WorkspaceUiSession` WebSocket transport; and
+  `WorkspaceUiSession` transport for the existing Host's `/mobile` extension; and
 - `protocol/` — validated, forward-compatible schemas and shared fixtures
   consumed by Rust, Swift, and web tests.
 

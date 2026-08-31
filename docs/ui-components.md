@@ -9,37 +9,82 @@ The Rust terminal process is the App. It owns the model, reducer, validation,
 persistence, and commands. Ratatui, SwiftUI/AppKit, and DOM are renderers of
 the same semantic component state.
 
+This is deliberately compatible with Unpeel's 2026-08-24 “Apps stay
+Ratatui-first; no semantic SDK” decision. The semantic component channel lives
+entirely in **App Kit**, is opt-in, and enhances an App that is already a fully
+functional Ratatui TUI. It is not an SDK in `unpeel-core`, does not render
+Unpeel's shell, and is never required to launch, use, stream, or recover the
+terminal App. Unsupported components and old Hosts keep using the PTY.
+
 ## Runtime architecture
 
 ```text
-SwiftUI/AppKit Host ─────────────────────────────┐
-                                                │ trusted local unpeel.ui/1
-remote browser ── authenticated WSS ─▶ workspace broker
-                                                │ one Unix connection per renderer
-                                                ▼
-                                      terminal App process
-                                      ├─ model + reducer
-                                      ├─ UiBridge (App-owned socket)
-                                      └─ App Kit/Ratatui ─▶ PTY
+paired Controller / browser / remote Mac / agent Session
+                         │
+                         │ unpeel.workspace.ui/1 inside existing /mobile
+                         │ Direct · SSH · Link relay
+                         ▼
+existing Unpeel Host (native app or unpeel-serve driver)
+├─ ControllerPrincipal / paired-device authentication
+├─ authorization + scoped participant-token minting
+├─ one local unpeel.ui/1 connection per participant renderer
+└──────────────────────────────────────────────────────────┐
+                                                           ▼
+                                            terminal App process
+                                            ├─ model + reducer
+                                            ├─ UiBridge → ui.sock
+                                            └─ App Kit/Ratatui → PTY
 ```
 
-The session owner gives the App an absolute `UNPEEL_UI_SOCKET` path and a
-random `UNPEEL_UI_TOKEN`. `UiBridge::detect` binds that Unix socket; it is
-inert when the variables are absent, so the same executable remains a complete
-standalone TUI. A trusted native Host or workspace broker connects and
-authenticates with the token. JSON never shares stdin or stdout with ANSI
-terminal bytes.
+There is no standalone workspace server in this design. The broker is the
+existing Unpeel Host: today that is the native app Host or the
+`unpeel-serve`-backed headless driver. Remote-anywhere UI reuses the Host's
+paired-device/`ControllerPrincipal` authentication and the same Direct, SSH,
+and opaque Link-relay transports already carrying `/mobile`.
+
+The Host injects the endpoint at its existing Session-spawn choke point next
+to `UNPEEL_SESSION_ID` and `UNPEEL_SESSION_DIR`:
+
+```text
+UNPEEL_UI_SOCKET=~/.unpeel/app-sessions/<session-id>/ui.sock
+UNPEEL_UI_TOKEN=<random per-App-session signing key, at least 32 bytes>
+```
+
+`UiBridge::detect` binds that Unix socket; it is inert when the variables are
+absent, so the same executable remains a complete standalone TUI. JSON never
+shares stdin or stdout with ANSI terminal bytes.
 
 `UiBridge::detect` must run during single-threaded App startup, before the App
 spawns workers or children. It reads and removes both variables from the
 process environment before returning—even if endpoint detection fails—so an
-App-spawned command cannot inherit the bearer token or socket route. The socket
+App-spawned command cannot inherit the signing key or socket route. The socket
 is mode `0600`, and App Kit also compares the connecting process's effective
 user ID where the operating system exposes Unix peer credentials. Platforms
 without a supported peer-credential API retain the filesystem permission
-check. The token still represents the trusted broker and can attest arbitrary
-participant identities and grants, so it must remain server-only session
-metadata.
+check.
+
+`UNPEEL_UI_TOKEN` is never an attachment bearer credential. It is the HMAC key
+shared only by the Host and authoritative App process. The Host derives a
+short-lived `upui1` participant token whose signed claims bind:
+
+- App Session id;
+- participant id, `human` / `agent` / `service` kind, presentation metadata,
+  and exact grants;
+- client id, renderer id, and view id;
+- issued/expiry timestamps and a token id.
+
+The `attach` frame contains only that derived `participantToken`; it cannot
+claim a different participant or add `admin`. A neighboring agent Session may
+therefore attach to the same socket as a first-class participant with, for
+example, `view + edit`, its `sourceSessionId`, and no command/admin grant. The
+Host mints it after resolving the calling `UNPEEL_SESSION_ID`; it never hands
+the agent the per-App-session signing key.
+
+The Session supervisor retains that signing key in Host-private runtime state
+for as long as the App process is alive, so a restarted native or headless
+transport adapter can mint a fresh short-lived attachment token. A full Host
+or machine reboot relaunches the App with a newly generated key; the durable
+App model comes from `ui-state.json`, never from the credential.
 
 Connections must authenticate with `attach` within five seconds. A slow
 renderer has an independent bounded output queue, and each stable client has a
@@ -49,9 +94,34 @@ serving the other clients. Final acknowledgement records expire after their
 replay window, and one client's quota rotation never evicts another client's
 records.
 
-This direction is important: the replaceable GUI and workspace server attach
-to the long-running terminal App. Restarting a Swift view, browser tab, or
-broker does not move ownership of the App state into that renderer.
+### Existing Host integration points
+
+The Unpeel integration should be a narrow additive slice at existing choke
+points:
+
+1. `crates/unpeel-core/src/session_host.rs` constructs the provider
+   `CommandBuilder`; its shared launch integration already injects
+   `UNPEEL_SESSION_ID` / `UNPEEL_SESSION_DIR`. Create `<session>/ui.sock`, mint
+   the per-App-session key, and inject the two UI variables there only for an
+   App-capable Session.
+2. `crates/unpeel-core/src/controller_api.rs` remains the transport-neutral
+   semantic router. UI attach/resume/action/lifecycle/resync operations enter
+   after an adapter has supplied `ControllerPrincipal`; authorization and
+   token scopes are decided there, not in Swift, HTTP, or Relay code.
+3. Native `MobileRemoteServer.swift` and the `unpeel-serve` mobile driver
+   expose the same additive `/mobile` capability and translate
+   `unpeel.workspace.ui/1` ↔ local `unpeel.ui/1`. They reuse paired-device
+   credentials, workspace selection, request replay, and existing rate limits.
+4. Direct, SSH, and Link remain adapters around that one Host operation. Link
+   relays opaque encrypted frames and never stores App UI or state.
+
+The local socket is not advertised as a remote address. A remote Controller
+names the ordinary Session id; the authenticated Host resolves the private
+socket and opens it on the Controller's behalf.
+
+This direction is important: the replaceable GUI and existing Host adapter
+attach to the long-running terminal App. Restarting a Swift view, browser tab,
+or transport adapter does not move ownership of the App state into a renderer.
 
 ### Hiding the terminal without stopping the App
 
@@ -75,21 +145,45 @@ stable `clientId`, `rendererId`, `viewId`, and client-generated `eventId`
 values across reconnects:
 
 1. The renderer attaches with its expected App instance and last revision.
-2. The App answers with `attached`, then the current full snapshot.
+2. The App answers with `attached`, then the current full snapshot (the safe
+   reconnect baseline).
 3. Unacknowledged events can be resent with the same event IDs.
 4. The App deduplicates `(clientId, eventId)` and replays the final ack.
 5. If the App instance changed, clients discard pending events and rebuild
    from the new snapshot.
 
-This survives wrapper and workspace-server restarts as long as the terminal
-App process remains alive. If that process itself exits, in-memory state is
-gone; an App that must survive terminal-process restarts still needs normal
-disk or database persistence.
+This survives renderer and Host-adapter restarts while the terminal App keeps
+running. Always-on Apps also use the App Kit persistence convention so the App
+model survives a Host or machine reboot:
 
-For broker restart recovery, the session supervisor must retain the socket
-path and random token in server-only session metadata for the lifetime of the
-terminal process. Neither value belongs in workspace HTML, browser storage, or
-browser WebSocket messages.
+```text
+~/.unpeel/app-sessions/<session-id>/
+├─ manifest.json          existing Host launch record
+├─ session.sock           existing PTY control socket
+├─ ui.sock                ephemeral App-owned semantic endpoint
+└─ ui-state.json          App-owned durable model envelope
+```
+
+`UiBridge::state_store()` exposes a `UiStateStore` for `ui-state.json`. Its
+`save` operation writes a versioned `unpeel.app-kit.state` envelope to a
+private temporary file, fsyncs it, atomically renames it, and fsyncs the
+Session directory. The envelope records App id/version, the App-owned model
+schema version, current UI revision, save time, and arbitrary App state. On
+launch the App loads and migrates this envelope **before** publishing its first
+snapshot. It creates a new `appInstanceId` but continues from the persisted
+model revision, so renderers discard unsafe pending events and rebuild cleanly.
+
+The complementary Host convention is small but essential: an App Session
+marked always-on keeps its stable Session id and launch record, and the
+existing Host supervisor relaunches that command after reboot with a fresh
+signing key and the same Session directory. The Host does not interpret or
+rewrite `ui-state.json`; App Kit does not invent a second process supervisor.
+Removing the Session removes its state under the existing Session lifecycle.
+
+An App should save after durable model commits (normally debounced for rapid
+edits). Shared Room content continues to belong in Host RoomStore/RoomFS;
+`ui-state.json` is for the always-on App process's recoverable model and local
+metadata, not a competing multi-user database.
 
 ### Protocol compatibility
 
@@ -108,9 +202,10 @@ guess their behavior.
 
 ## Multi-user workspaces
 
-`UiBridge` accepts many simultaneous attachments. Every attachment contains:
+`UiBridge` accepts many simultaneous human, agent, and service attachments.
+Every attachment contains:
 
-- an opaque, broker-attested participant ID and grants;
+- one Host-signed participant token (identity, kind, grants, and route claims);
 - a stable client ID for one user/device;
 - a replaceable renderer ID and renderer capabilities;
 - a logical view ID; and
@@ -121,36 +216,46 @@ guess their behavior.
 state such as focus or selection without leaking it into another client's
 projection. Presence lists the connected participants and renderer states.
 
-The App enforces grants again at the Unix boundary: `view`, `interact`, `edit`,
+The App enforces signed grants again at the Unix boundary: `view`, `interact`, `edit`,
 `command`, `admin`, or `*`. This is defense in depth; workspace membership and
-App-session access must also be checked by the workspace server.
+App-session access are authorized first by the existing Host. Agent presence
+uses the same participant list and event path, so UI can show which agent is
+viewing, selecting, or editing instead of treating automation as invisible
+owner activity.
 
 ### Browser trust boundary
 
-Browser code uses `unpeel.workspace.ui/1`, not the trusted local attach frame.
-Its messages deliberately contain no `authToken`, participant identity, or
-grant list. The workspace server must:
+Browser and remote Controller code use `unpeel.workspace.ui/1`, not the local
+attach frame. This is an additive message family inside the existing `/mobile`
+contract, not a new listener, account system, workspace daemon, or Relay data
+model. Its messages deliberately contain no signing key, participant token,
+participant identity, or grant list. The native or headless Host must:
 
-1. authenticate the HTTPS/WebSocket session, validate its `Origin`, and
-   authorize `appSessionId`;
-2. derive the participant and grants from server-side workspace membership;
+1. authenticate through the existing paired-device/Controller transport,
+   validate browser `Origin` where applicable, and authorize `appSessionId`;
+2. derive the participant and grants from `ControllerPrincipal` (or the
+   neighboring agent Session principal);
 3. validate and namespace client/renderer IDs to that authenticated account;
-4. open one authenticated local `unpeel.ui/1` attachment per renderer;
+4. mint one route-bound participant token and open one local `unpeel.ui/1`
+   attachment per renderer;
 5. stamp that participant ID onto translated App events;
 6. apply frame, rate, and connection limits; and
 7. forward only `attached`, `snapshot`, `ack`, filtered `presence`, and `error`
    frames back to the browser.
 
-The broker must strip grants and private identity fields from browser presence;
-`WorkspaceUiSession` also removes grants defensively before its presence
-callback. The broker must never forward `UNPEEL_UI_TOKEN`, accept a
-browser-supplied participant claim, or treat a browser `clientId` as globally
-trusted.
+The Host adapter must strip grants and private identity fields from browser
+presence. An agent's public profile can retain its opaque id, `agent` kind,
+display name, and color, while its signed `sourceSessionId` remains local to
+the Host and App. `WorkspaceUiSession` also removes grants and
+`sourceSessionId` defensively before its presence callback. It must never
+forward `UNPEEL_UI_TOKEN` or `participantToken`, accept a browser-supplied
+participant claim, or treat a browser `clientId` as globally trusted.
 
 The browser transport is implemented by `WorkspaceUiSession` in `web/`. It
-reconnects with bounded backoff, resumes a known App instance, retains stable
-event IDs until final acknowledgement, requests resync after stale events, and
-clears optimistic/pending state when a new terminal App instance appears.
+connects to a Host-provided `/mobile` UI transport URL, reconnects with bounded
+backoff, resumes a known App instance, retains stable event IDs until final
+acknowledgement, applies contiguous deltas, requests resync after a gap/stale
+event, and clears optimistic/pending state when a new App instance appears.
 
 ## Component contract
 
@@ -201,7 +306,9 @@ callback for preview HTML.
 On the Rust side, build the projection from the same `MarkdownEditor` that
 Ratatui renders. Drain `UiBridge` during the App's bounded idle tick, pass
 `Action` events to `handle_ui_event`, acknowledge the outcome, increment the
-App revision for model changes, and publish the next `ui_node`. The reducer
+App revision for model changes, persist durable state, and call
+`publish_delta` for ordinary edits (`publish` remains the snapshot/fallback
+path). The reducer
 also receives `Attached`, `Detached`, and `Lifecycle` events when it needs to
 maintain participant-specific state.
 
@@ -225,7 +332,7 @@ The trusted native Host uses the same split: `MarkdownEditorView` emits a
 `UIAction`, and `UIUnixSessionClient.send` adds session identity and revision.
 Its message callback should move snapshots onto the main actor before updating
 SwiftUI state. A remote Swift client should use the authenticated workspace
-transport rather than receiving the local Unix token.
+transport rather than receiving any local participant token or signing key.
 
 ## Revision and collaboration semantics
 
@@ -234,6 +341,20 @@ App accepts current-revision events, deduplicates their stable event IDs, and
 publishes a new immutable revision after applying model changes. Stale events
 receive a `stale` acknowledgement plus a fresh snapshot; future events are
 rejected.
+
+Server-to-client deltas are part of the foundation, not a post-DataGrid
+optimization. `UiDelta` carries `baseRevision`, the next `revision`, and
+ordered component operations. Markdown currently supports range replacement,
+selection, presentation, dirty/read-only/title/placeholder/action updates, and
+`replaceRoot` as an escape hatch. Swift and web clients apply deltas to their
+last complete snapshot and expose the resulting complete state to renderers.
+
+A renderer advertises `serverDelta`. `UiBridge` sends operations only when its
+last queued projection for that renderer is the exact base revision and came
+from the correct shared/targeted projection. A missing revision, personalized
+base, unsupported capability, reconnect, or application failure triggers a
+full snapshot. This invariant is what lets later DataGrid operations update a
+cell range or splice rows without pushing an Excel-sized snapshot over WAN.
 
 This gives v1 deterministic reconnect and safe serialized editing. It does not
 silently pretend that two concurrent text edits commute. A truly simultaneous
@@ -244,11 +365,14 @@ component version.
 
 ## Protocol artifacts
 
-- `protocol/unpeel-ui-v1.schema.json` — trusted broker-to-App wire contract;
+- `protocol/unpeel-ui-v1.schema.json` — scoped local participant/App wire;
 - `protocol/unpeel-ui-v1.ndjson` — shared Rust, Swift, and web fixtures;
-- `protocol/unpeel-workspace-ui-v1.schema.json` — untrusted browser-to-server
-  messages; and
-- `protocol/unpeel-workspace-ui-v1.ndjson` — browser boundary fixtures.
+- `protocol/unpeel-ui-participant-token-v1.schema.json` — decoded signed claim
+  contract used by native and headless Hosts;
+- `protocol/unpeel-workspace-ui-v1.schema.json` — untrusted renderer messages
+  inside `/mobile`;
+- `protocol/unpeel-workspace-ui-v1.ndjson` — Controller boundary fixtures; and
+- `protocol/unpeel-app-kit-state-v1.schema.json` — reboot persistence envelope.
 
 ## Next components
 
@@ -257,11 +381,13 @@ The next useful vocabulary is intentionally conventional:
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
 | `Page` | layout + block | top-level content and safe-area/chrome contract |
+| `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | native tab selection and accessibility |
 | `List` | `ratatui::widgets::List` | native list with selection and reorder |
 | `ListItem` | Ratatui `ListItem` | keyed row, label, detail, icon, actions |
 | `Input` | existing `InputField` | native single-line input and validation |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
 | `Explorer` | existing `Explorer` | hierarchical file navigation and drops |
+| `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared
 fixtures. That keeps App Kit opinionated and prevents its public API from

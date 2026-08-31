@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://unpeel.com/protocol/unpeel-ui-v1.schema.json",
   "title": "Unpeel App Kit UI protocol v1",
-  "description": "Durable, broker-authenticated component projections between terminal Apps and native or remote renderers. Implementations ignore unknown fields inside recognized message and value kinds for forward compatibility, but reject unknown discriminated kinds.",
+  "description": "Durable component projections between terminal Apps and Host-brokered native, web, or agent participants. Attachments use Host-minted route-bound participant tokens. Implementations ignore unknown fields inside recognized message and value kinds for forward compatibility, but reject unknown discriminated kinds.",
   "oneOf": [
     { "$ref": "#/$defs/attach" },
     { "$ref": "#/$defs/attached" },
     { "$ref": "#/$defs/snapshot" },
+    { "$ref": "#/$defs/delta" },
     { "$ref": "#/$defs/event" },
     { "$ref": "#/$defs/ack" },
     { "$ref": "#/$defs/lifecycle" },
@@ -56,6 +57,11 @@
       "required": ["id"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
+        "kind": {
+          "enum": ["human", "agent", "service"],
+          "default": "human"
+        },
+        "sourceSessionId": { "$ref": "#/$defs/identifier" },
         "displayName": { "type": "string", "minLength": 1 },
         "color": { "type": "string" },
         "grants": {
@@ -96,8 +102,7 @@
         "protocol",
         "minProtocolVersion",
         "maxProtocolVersion",
-        "authToken",
-        "participant",
+        "participantToken",
         "clientId",
         "renderer",
         "viewId"
@@ -107,8 +112,7 @@
         "protocol": { "$ref": "#/$defs/protocolName" },
         "minProtocolVersion": { "$ref": "#/$defs/offeredProtocolVersion" },
         "maxProtocolVersion": { "$ref": "#/$defs/offeredProtocolVersion" },
-        "authToken": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "participant": { "$ref": "#/$defs/participant" },
+        "participantToken": { "type": "string", "minLength": 1, "maxLength": 16384 },
         "clientId": { "$ref": "#/$defs/identifier" },
         "renderer": { "$ref": "#/$defs/renderer" },
         "viewId": { "$ref": "#/$defs/identifier" },
@@ -240,6 +244,130 @@
         "viewId": { "$ref": "#/$defs/identifier" },
         "revision": { "$ref": "#/$defs/revision" },
         "root": { "$ref": "#/$defs/markdownEditor" }
+      }
+    },
+    "deltaOperation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "root"],
+          "properties": {
+            "op": { "const": "replaceRoot" },
+            "root": { "$ref": "#/$defs/markdownEditor" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "edit"],
+          "properties": {
+            "op": { "const": "markdownReplaceRange" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "edit": { "$ref": "#/$defs/textEdit" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "selection"],
+          "properties": {
+            "op": { "const": "markdownSetSelection" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "selection": { "$ref": "#/$defs/textSelection" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "presentation"],
+          "properties": {
+            "op": { "const": "markdownSetPresentation" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "presentation": { "enum": ["source", "preview", "split"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "dirty"],
+          "properties": {
+            "op": { "const": "markdownSetDirty" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "dirty": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "readOnly"],
+          "properties": {
+            "op": { "const": "markdownSetReadOnly" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "readOnly": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "title"],
+          "properties": {
+            "op": { "const": "markdownSetTitle" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "title": { "type": ["string", "null"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "placeholder"],
+          "properties": {
+            "op": { "const": "markdownSetPlaceholder" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "placeholder": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "actions"],
+          "properties": {
+            "op": { "const": "markdownSetActions" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "actions": { "$ref": "#/$defs/markdownActions" }
+          }
+        }
+      ]
+    },
+    "delta": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "protocol",
+        "protocolVersion",
+        "appInstanceId",
+        "clientId",
+        "viewId",
+        "baseRevision",
+        "revision",
+        "operations"
+      ],
+      "properties": {
+        "type": { "const": "delta" },
+        "protocol": { "$ref": "#/$defs/protocolName" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "appInstanceId": { "$ref": "#/$defs/identifier" },
+        "clientId": { "$ref": "#/$defs/identifier" },
+        "viewId": { "$ref": "#/$defs/identifier" },
+        "baseRevision": { "$ref": "#/$defs/revision" },
+        "revision": { "$ref": "#/$defs/revision" },
+        "operations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/deltaOperation" }
+        }
       }
     },
     "eventValue": {

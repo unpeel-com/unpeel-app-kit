@@ -29,12 +29,15 @@ pub const UI_PROTOCOL_MAX_VERSION: u32 = 1;
 pub const UI_PROTOCOL_VERSION: u32 = UI_PROTOCOL_MAX_VERSION;
 /// Stable Unix socket path chosen by the workspace/session owner.
 ///
-/// The terminal App binds this path. Trusted native or workspace-server
-/// processes connect to it, so its lifetime follows the terminal App rather
+/// The terminal App binds this path. The existing native or headless Host
+/// connects to it, so its lifetime follows the terminal App rather
 /// than a replaceable renderer.
 pub const UI_SOCKET_ENV: &str = "UNPEEL_UI_SOCKET";
-/// Shared secret known only to the terminal App and trusted workspace broker.
+/// Per-App-session participant-token signing key retained by the Host and App.
+/// Renderers receive only route-bound credentials derived from this key.
 pub const UI_TOKEN_ENV: &str = "UNPEEL_UI_TOKEN";
+/// Renderer capability required before the App sends revision deltas.
+pub const UI_DELTA_CAPABILITY: &str = "serverDelta";
 /// Largest individual JSON payload accepted by the protocol.
 pub const MAX_UI_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Largest integer represented exactly by Swift and JavaScript renderers.
@@ -154,7 +157,18 @@ impl AppMetadata {
     }
 }
 
-/// Authenticated workspace participant attached by the trusted broker.
+/// Host-attested participant category. Agents use the same presence, grants,
+/// events, and revision path as people rather than a privileged side channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiParticipantKind {
+    #[default]
+    Human,
+    Agent,
+    Service,
+}
+
+/// Authenticated workspace participant attached by the trusted Host.
 ///
 /// `id` is opaque and Host-scoped. The optional label is presentation-only;
 /// Apps must not interpret either field as an email address or account claim.
@@ -162,6 +176,11 @@ impl AppMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct UiParticipant {
     pub id: ParticipantId,
+    #[serde(default)]
+    pub kind: UiParticipantKind,
+    /// Calling Session when the participant is an agent or App worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,10 +194,24 @@ impl UiParticipant {
     pub fn new(id: impl Into<ParticipantId>) -> Self {
         Self {
             id: id.into(),
+            kind: UiParticipantKind::Human,
+            source_session_id: None,
             display_name: None,
             color: None,
             grants: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub const fn kind(mut self, kind: UiParticipantKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    #[must_use]
+    pub fn source_session_id(mut self, source_session_id: impl Into<String>) -> Self {
+        self.source_session_id = Some(source_session_id.into());
+        self
     }
 
     #[must_use]
@@ -241,6 +274,13 @@ impl UiRendererMetadata {
         self.capabilities = capabilities.into_iter().map(Into::into).collect();
         self
     }
+
+    #[must_use]
+    pub fn supports(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|candidate| candidate == capability)
+    }
 }
 
 /// Renderer and terminal visibility reported by the Host.
@@ -283,15 +323,18 @@ impl Default for UiRendererState {
     }
 }
 
-/// Initial authenticated attachment sent by a trusted local broker.
+/// Initial authenticated attachment sent by the Host or a scoped local agent.
+///
+/// Participant identity and grants are not caller-selected fields. They are
+/// recovered from `participantToken`, whose signature binds this exact client,
+/// renderer, view, and App Session.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiAttach {
     pub protocol: String,
     pub min_protocol_version: u32,
     pub max_protocol_version: u32,
-    pub auth_token: String,
-    pub participant: UiParticipant,
+    pub participant_token: String,
     pub client_id: ClientId,
     pub renderer: UiRendererMetadata,
     pub view_id: ViewId,
@@ -306,8 +349,7 @@ pub struct UiAttach {
 impl UiAttach {
     #[must_use]
     pub fn new(
-        auth_token: impl Into<String>,
-        participant: UiParticipant,
+        participant_token: impl Into<String>,
         client_id: impl Into<ClientId>,
         renderer: UiRendererMetadata,
         view_id: impl Into<ViewId>,
@@ -316,8 +358,7 @@ impl UiAttach {
             protocol: UI_PROTOCOL_NAME.to_owned(),
             min_protocol_version: UI_PROTOCOL_MIN_VERSION,
             max_protocol_version: UI_PROTOCOL_MAX_VERSION,
-            auth_token: auth_token.into(),
-            participant,
+            participant_token: participant_token.into(),
             client_id: client_id.into(),
             renderer,
             view_id: view_id.into(),
@@ -356,8 +397,7 @@ impl fmt::Debug for UiAttach {
             .field("protocol", &self.protocol)
             .field("min_protocol_version", &self.min_protocol_version)
             .field("max_protocol_version", &self.max_protocol_version)
-            .field("auth_token", &"[REDACTED]")
-            .field("participant", &self.participant)
+            .field("participant_token", &"[REDACTED]")
             .field("client_id", &self.client_id)
             .field("renderer", &self.renderer)
             .field("view_id", &self.view_id)
@@ -705,6 +745,228 @@ impl UiSnapshot {
             root,
         }
     }
+
+    /// Applies a contiguous server delta and returns the next complete state.
+    pub fn applying(&self, delta: &UiDelta) -> Result<Self, UiProtocolError> {
+        validate_delta(delta)?;
+        if self.protocol != delta.protocol
+            || self.protocol_version != delta.protocol_version
+            || self.app_instance_id != delta.app_instance_id
+            || self.client_id != delta.client_id
+            || self.view_id != delta.view_id
+        {
+            return Err(UiProtocolError::InvalidMessage(
+                "delta route does not match the current snapshot".to_owned(),
+            ));
+        }
+        if self.revision != delta.base_revision {
+            return Err(UiProtocolError::InvalidMessage(format!(
+                "delta base revision {} does not match snapshot revision {}",
+                delta.base_revision, self.revision
+            )));
+        }
+        let mut root = self.root.clone();
+        root.apply_delta_operations(&delta.operations)
+            .map_err(UiProtocolError::InvalidView)?;
+        let mut snapshot = Self::new(
+            delta.app_instance_id.clone(),
+            delta.client_id.clone(),
+            delta.view_id.clone(),
+            delta.revision,
+            root,
+        );
+        snapshot.protocol_version = delta.protocol_version;
+        Ok(snapshot)
+    }
+}
+
+/// One ordered mutation inside a revision delta.
+///
+/// Component-specific operations keep large documents and future grids
+/// efficient. `replaceRoot` remains a complete fallback for uncommon changes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum UiDeltaOperation {
+    ReplaceRoot {
+        root: UiNode,
+    },
+    MarkdownReplaceRange {
+        node_id: NodeId,
+        edit: TextEdit,
+    },
+    MarkdownSetSelection {
+        node_id: NodeId,
+        selection: TextSelection,
+    },
+    MarkdownSetPresentation {
+        node_id: NodeId,
+        presentation: MarkdownPresentation,
+    },
+    MarkdownSetDirty {
+        node_id: NodeId,
+        dirty: bool,
+    },
+    MarkdownSetReadOnly {
+        node_id: NodeId,
+        read_only: bool,
+    },
+    MarkdownSetTitle {
+        node_id: NodeId,
+        title: Option<String>,
+    },
+    MarkdownSetPlaceholder {
+        node_id: NodeId,
+        placeholder: String,
+    },
+    MarkdownSetActions {
+        node_id: NodeId,
+        actions: MarkdownEditorActions,
+    },
+}
+
+impl UiDeltaOperation {
+    #[must_use]
+    pub fn markdown_replace_range(node_id: impl Into<NodeId>, edit: TextEdit) -> Self {
+        Self::MarkdownReplaceRange {
+            node_id: node_id.into(),
+            edit,
+        }
+    }
+
+    #[must_use]
+    pub fn markdown_set_selection(node_id: impl Into<NodeId>, selection: TextSelection) -> Self {
+        Self::MarkdownSetSelection {
+            node_id: node_id.into(),
+            selection,
+        }
+    }
+
+    fn validate(&self, path: &str) -> Result<(), UiProtocolError> {
+        match self {
+            Self::ReplaceRoot { root } => root.validate().map_err(UiProtocolError::InvalidView),
+            Self::MarkdownReplaceRange { node_id, edit } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if edit.range.start > edit.range.end {
+                    return Err(UiProtocolError::InvalidMessage(format!(
+                        "{path}.edit range is reversed"
+                    )));
+                }
+                Ok(())
+            }
+            Self::MarkdownSetSelection { node_id, .. }
+            | Self::MarkdownSetPresentation { node_id, .. }
+            | Self::MarkdownSetDirty { node_id, .. }
+            | Self::MarkdownSetReadOnly { node_id, .. }
+            | Self::MarkdownSetTitle { node_id, .. }
+            | Self::MarkdownSetPlaceholder { node_id, .. }
+            | Self::MarkdownSetActions { node_id, .. } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)
+            }
+        }
+    }
+}
+
+impl UiNode {
+    /// Applies ordered operations and validates the resulting complete node.
+    pub fn apply_delta_operations(
+        &mut self,
+        operations: &[UiDeltaOperation],
+    ) -> Result<(), UiValidationError> {
+        for (index, operation) in operations.iter().enumerate() {
+            match operation {
+                UiDeltaOperation::ReplaceRoot { root } => *self = root.clone(),
+                UiDeltaOperation::MarkdownReplaceRange { node_id, edit } => {
+                    let editor = self.markdown_editor_mut(node_id, index)?;
+                    apply_text_edit(&mut editor.text, edit).map_err(|message| {
+                        UiValidationError::new(format!("delta.operations[{index}].edit"), message)
+                    })?;
+                }
+                UiDeltaOperation::MarkdownSetSelection { node_id, selection } => {
+                    self.markdown_editor_mut(node_id, index)?.selection = *selection;
+                }
+                UiDeltaOperation::MarkdownSetPresentation {
+                    node_id,
+                    presentation,
+                } => {
+                    self.markdown_editor_mut(node_id, index)?.presentation = *presentation;
+                }
+                UiDeltaOperation::MarkdownSetDirty { node_id, dirty } => {
+                    self.markdown_editor_mut(node_id, index)?.dirty = *dirty;
+                }
+                UiDeltaOperation::MarkdownSetReadOnly { node_id, read_only } => {
+                    self.markdown_editor_mut(node_id, index)?.read_only = *read_only;
+                }
+                UiDeltaOperation::MarkdownSetTitle { node_id, title } => {
+                    self.markdown_editor_mut(node_id, index)?.title = title.clone();
+                }
+                UiDeltaOperation::MarkdownSetPlaceholder {
+                    node_id,
+                    placeholder,
+                } => {
+                    self.markdown_editor_mut(node_id, index)?.placeholder = placeholder.clone();
+                }
+                UiDeltaOperation::MarkdownSetActions { node_id, actions } => {
+                    self.markdown_editor_mut(node_id, index)?.actions = actions.clone();
+                }
+            }
+        }
+        self.validate()
+    }
+
+    fn markdown_editor_mut(
+        &mut self,
+        expected_id: &NodeId,
+        operation_index: usize,
+    ) -> Result<&mut MarkdownEditorSpec, UiValidationError> {
+        if &self.id != expected_id {
+            return Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                format!("node {expected_id:?} is not present"),
+            ));
+        }
+        match &mut self.element {
+            UiComponent::MarkdownEditor(editor) => Ok(editor),
+        }
+    }
+}
+
+/// Contiguous server-to-renderer change between two immutable revisions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiDelta {
+    pub protocol: String,
+    pub protocol_version: u32,
+    pub app_instance_id: AppInstanceId,
+    pub client_id: ClientId,
+    pub view_id: ViewId,
+    pub base_revision: u64,
+    pub revision: u64,
+    pub operations: Vec<UiDeltaOperation>,
+}
+
+impl UiDelta {
+    #[must_use]
+    pub fn new(
+        app_instance_id: impl Into<AppInstanceId>,
+        client_id: impl Into<ClientId>,
+        view_id: impl Into<ViewId>,
+        base_revision: u64,
+        revision: u64,
+        operations: Vec<UiDeltaOperation>,
+    ) -> Self {
+        Self {
+            protocol: UI_PROTOCOL_NAME.to_owned(),
+            protocol_version: UI_PROTOCOL_VERSION,
+            app_instance_id: app_instance_id.into(),
+            client_id: client_id.into(),
+            view_id: view_id.into(),
+            base_revision,
+            revision,
+            operations,
+        }
+    }
 }
 
 /// Semantic interaction category, independent of keys and pointer geometry.
@@ -965,6 +1227,7 @@ pub enum UiMessage {
     Attach(UiAttach),
     Attached(UiAttached),
     Snapshot(UiSnapshot),
+    Delta(UiDelta),
     Event(UiEvent),
     Ack(UiAck),
     Lifecycle(UiLifecycle),
@@ -981,6 +1244,9 @@ impl UiMessage {
                 validate_header(&message.protocol, message.protocol_version)?;
             }
             Self::Snapshot(message) => {
+                validate_header(&message.protocol, message.protocol_version)?;
+            }
+            Self::Delta(message) => {
                 validate_header(&message.protocol, message.protocol_version)?;
             }
             Self::Event(message) => {
@@ -1046,6 +1312,7 @@ impl UiMessage {
                     .validate()
                     .map_err(UiProtocolError::InvalidView)
             }
+            Self::Delta(message) => validate_delta(message),
             Self::Event(message) => validate_event(message),
             Self::Ack(message) => {
                 validate_session_route(
@@ -1120,6 +1387,7 @@ macro_rules! impl_message_from {
 impl_message_from!(UiAttach, Attach);
 impl_message_from!(UiAttached, Attached);
 impl_message_from!(UiSnapshot, Snapshot);
+impl_message_from!(UiDelta, Delta);
 impl_message_from!(UiEvent, Event);
 impl_message_from!(UiAck, Ack);
 impl_message_from!(UiLifecycle, Lifecycle);
@@ -1389,7 +1657,10 @@ fn validate_revision(revision: u64) -> Result<(), UiProtocolError> {
     }
 }
 
-fn validate_identifier(value: &str, path: &str) -> Result<(), UiValidationError> {
+pub(crate) fn validate_identifier_for_protocol(
+    value: &str,
+    path: &str,
+) -> Result<(), UiValidationError> {
     if value.is_empty() || value.len() > 256 {
         return Err(UiValidationError::new(
             path,
@@ -1407,6 +1678,10 @@ fn validate_identifier(value: &str, path: &str) -> Result<(), UiValidationError>
     Ok(())
 }
 
+fn validate_identifier(value: &str, path: &str) -> Result<(), UiValidationError> {
+    validate_identifier_for_protocol(value, path)
+}
+
 fn validate_app(app: &AppMetadata) -> Result<(), UiProtocolError> {
     for (field, value) in [
         ("app.id", app.id.as_str()),
@@ -1422,9 +1697,16 @@ fn validate_app(app: &AppMetadata) -> Result<(), UiProtocolError> {
     Ok(())
 }
 
-fn validate_participant(participant: &UiParticipant, path: &str) -> Result<(), UiProtocolError> {
+pub(crate) fn validate_participant_for_protocol(
+    participant: &UiParticipant,
+    path: &str,
+) -> Result<(), UiProtocolError> {
     validate_identifier(participant.id.as_str(), &format!("{path}.id"))
         .map_err(UiProtocolError::InvalidView)?;
+    if let Some(source_session_id) = &participant.source_session_id {
+        validate_identifier(source_session_id, &format!("{path}.sourceSessionId"))
+            .map_err(UiProtocolError::InvalidView)?;
+    }
     if participant
         .display_name
         .as_ref()
@@ -1441,6 +1723,10 @@ fn validate_participant(participant: &UiParticipant, path: &str) -> Result<(), U
         }
     }
     Ok(())
+}
+
+fn validate_participant(participant: &UiParticipant, path: &str) -> Result<(), UiProtocolError> {
+    validate_participant_for_protocol(participant, path)
 }
 
 fn validate_renderer(renderer: &UiRendererMetadata, path: &str) -> Result<(), UiProtocolError> {
@@ -1461,12 +1747,11 @@ fn validate_attach(message: &UiAttach) -> Result<(), UiProtocolError> {
         message.max_protocol_version,
         "attach",
     )?;
-    if message.auth_token.is_empty() || message.auth_token.len() > 4096 {
+    if message.participant_token.is_empty() || message.participant_token.len() > 16 * 1024 {
         return Err(UiProtocolError::InvalidMessage(
-            "attach authToken must contain 1..=4096 bytes".to_owned(),
+            "attach participantToken must contain 1..=16384 bytes".to_owned(),
         ));
     }
-    validate_participant(&message.participant, "attach.participant")?;
     validate_identifier(message.client_id.as_str(), "attach.clientId")
         .map_err(UiProtocolError::InvalidView)?;
     validate_renderer(&message.renderer, "attach.renderer")?;
@@ -1478,6 +1763,31 @@ fn validate_attach(message: &UiAttach) -> Result<(), UiProtocolError> {
     }
     if let Some(revision) = message.last_seen_revision {
         validate_revision(revision)?;
+    }
+    Ok(())
+}
+
+fn validate_delta(message: &UiDelta) -> Result<(), UiProtocolError> {
+    validate_identifier(message.app_instance_id.as_str(), "delta.appInstanceId")
+        .map_err(UiProtocolError::InvalidView)?;
+    validate_identifier(message.client_id.as_str(), "delta.clientId")
+        .map_err(UiProtocolError::InvalidView)?;
+    validate_identifier(message.view_id.as_str(), "delta.viewId")
+        .map_err(UiProtocolError::InvalidView)?;
+    validate_revision(message.base_revision)?;
+    validate_revision(message.revision)?;
+    if message.revision <= message.base_revision {
+        return Err(UiProtocolError::InvalidMessage(
+            "delta revision must be greater than baseRevision".to_owned(),
+        ));
+    }
+    if message.operations.is_empty() || message.operations.len() > 4096 {
+        return Err(UiProtocolError::InvalidMessage(
+            "delta operations must contain 1..=4096 entries".to_owned(),
+        ));
+    }
+    for (index, operation) in message.operations.iter().enumerate() {
+        operation.validate(&format!("delta.operations[{index}]"))?;
     }
     Ok(())
 }
@@ -1573,6 +1883,52 @@ fn validate_position(text: &str, position: TextPosition) -> Result<(), String> {
     ))
 }
 
+fn text_position_byte_offset(text: &str, position: TextPosition) -> Result<usize, String> {
+    let mut line_start = 0usize;
+    for _ in 0..position.line {
+        let Some(relative_newline) = text[line_start..].find('\n') else {
+            return Err(format!("line {} is outside the document", position.line));
+        };
+        line_start += relative_newline + 1;
+    }
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |offset| line_start + offset);
+    let line = &text[line_start..line_end];
+    let target = usize::try_from(position.utf16_column)
+        .map_err(|_| "UTF-16 column does not fit this platform".to_owned())?;
+    if target == 0 {
+        return Ok(line_start);
+    }
+    let mut utf16_column = 0usize;
+    for (byte_offset, character) in line.char_indices() {
+        utf16_column += character.len_utf16();
+        if utf16_column == target {
+            return Ok(line_start + byte_offset + character.len_utf8());
+        }
+        if utf16_column > target {
+            return Err(format!(
+                "UTF-16 column {} splits a surrogate pair",
+                position.utf16_column
+            ));
+        }
+    }
+    Err(format!(
+        "UTF-16 column {} is outside line {}",
+        position.utf16_column, position.line
+    ))
+}
+
+fn apply_text_edit(text: &mut String, edit: &TextEdit) -> Result<(), String> {
+    if edit.range.start > edit.range.end {
+        return Err("text edit range is reversed".to_owned());
+    }
+    let start = text_position_byte_offset(text, edit.range.start)?;
+    let end = text_position_byte_offset(text, edit.range.end)?;
+    text.replace_range(start..end, &edit.text);
+    Ok(())
+}
+
 fn validate_event_value(value: &UiEventValue) -> Result<(), UiProtocolError> {
     match value {
         UiEventValue::Index(value) if *value > MAX_SAFE_UI_INTEGER => {
@@ -1630,16 +1986,15 @@ mod tests {
     }
 
     #[test]
-    fn attach_redacts_the_broker_token_and_round_trips() {
+    fn attach_redacts_the_participant_token_and_round_trips() {
         let attach = UiAttach::new(
-            "super-secret",
-            UiParticipant::new("person-1").grants([UiGrant::VIEW, UiGrant::EDIT]),
+            "scoped-participant-secret",
             "client-1",
             UiRendererMetadata::new("renderer-1", "web"),
             "main",
         )
         .state(UiRendererState::component());
-        assert!(!format!("{attach:?}").contains("super-secret"));
+        assert!(!format!("{attach:?}").contains("scoped-participant-secret"));
         let message = UiMessage::Attach(attach);
         let frame = encode_ui_frame(&message).unwrap();
         let encoded = std::str::from_utf8(&frame).unwrap();
@@ -1656,8 +2011,7 @@ mod tests {
         assert_eq!(negotiate_ui_protocol_version(3, 2), None);
 
         let attach = UiAttach::new(
-            "super-secret",
-            UiParticipant::new("person-1").grants([UiGrant::VIEW]),
+            "scoped-participant-secret",
             "client-1",
             UiRendererMetadata::new("renderer-1", "web"),
             "main",

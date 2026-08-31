@@ -36,7 +36,7 @@ fn ui_bridge_detect_scrubs_credentials_before_spawning_children() {
         .arg("--nocapture")
         .env(PROBE_ENV, "1")
         .env(UI_SOCKET_ENV, directory.path().join("scrub.sock"))
-        .env(UI_TOKEN_ENV, "child-only-secret")
+        .env(UI_TOKEN_ENV, "0123456789abcdef0123456789abcdef")
         .status()
         .expect("credential scrub probe should run");
     assert!(status.success());

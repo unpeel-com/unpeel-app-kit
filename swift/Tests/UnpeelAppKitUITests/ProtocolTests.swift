@@ -14,13 +14,12 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 10)
+    #expect(messages.count == 11)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
     }
-    #expect(attach.participant.id == "person-alice")
-    #expect(attach.grantsContain("edit"))
+    #expect(attach.participantToken.hasPrefix("upui1."))
     #expect(attach.minProtocolVersion == 1)
     #expect(attach.maxProtocolVersion == 1)
 
@@ -49,6 +48,19 @@ func sharedProtocolFixturesDecode() throws {
     }
     #expect(value.range.end.utf16Column == 2)
     #expect(value.text == "Hello")
+
+    guard case let .delta(delta) = messages[10] else {
+        Issue.record("last fixture must contain a server delta")
+        return
+    }
+    let updated = try snapshot.applying(delta)
+    guard case let .markdownEditor(updatedEditor) = updated.root.component else {
+        Issue.record("delta result must remain a Markdown editor")
+        return
+    }
+    #expect(updated.revision == 8)
+    #expect(updatedEditor.text == "# Hello\nHello world")
+    #expect(updatedEditor.selection.head == UITextPosition(line: 1, utf16Column: 5))
 }
 
 @Test
@@ -98,8 +110,7 @@ func unsupportedProtocolVersionIsRejected() {
 @Test
 func attachUsesVersionRangeNegotiation() throws {
     let attach = UIAttach(
-        authToken: "secret",
-        participant: UIParticipant(id: "person-1", grants: ["view"]),
+        participantToken: "upui1.payload.signature",
         clientID: "client-1",
         renderer: UIRendererMetadata(id: "renderer-1", kind: "swiftUI"),
         viewID: "main",
@@ -114,6 +125,32 @@ func attachUsesVersionRangeNegotiation() throws {
     #expect(try JSONDecoder().decode(UIMessage.self, from: data) == .attach(attach))
     #expect(UnpeelUIProtocol.negotiate(minimum: 1, maximum: 3) == 1)
     #expect(UnpeelUIProtocol.negotiate(minimum: 2, maximum: 3) == nil)
+}
+
+@Test
+func nativeHostMintsRouteBoundAgentCredentials() throws {
+    let issuer = try UIParticipantTokenIssuer(
+        signingKey: "0123456789abcdef0123456789abcdef",
+        appSessionID: "app-session"
+    )
+    let token = try issuer.issue(
+        participant: UIParticipant(
+            id: "agent:neighbor",
+            kind: .agent,
+            sourceSessionID: "neighbor-session",
+            displayName: "Review agent",
+            grants: ["view", "edit"]
+        ),
+        clientID: "client-agent",
+        rendererID: "renderer-agent",
+        viewID: "main",
+        tokenID: "token-1",
+        validFor: 60,
+        now: Date(timeIntervalSince1970: 1_000)
+    )
+    #expect(token.hasPrefix("upui1."))
+    #expect(token.split(separator: ".").count == 3)
+    #expect(!token.contains("admin"))
 }
 
 @Test
@@ -145,10 +182,4 @@ func recognizedMessagesIgnoreUnknownFields() throws {
         return
     }
     #expect(snapshot.root.id == "editor")
-}
-
-private extension UIAttach {
-    func grantsContain(_ grant: String) -> Bool {
-        participant.grants.contains(grant)
-    }
 }

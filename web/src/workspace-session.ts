@@ -2,12 +2,15 @@ import {
   type UiAck,
   type UiAction,
   type UiAttached,
+  type UiDelta,
   type UiErrorMessage,
   type UiMessage,
   type UiPresence,
   type UiRendererMetadata,
   type UiRendererState,
   type UiSnapshot,
+  UI_DELTA_CAPABILITY,
+  applyUiDelta,
   decodeUiMessage,
   negotiateUiProtocolVersion,
   newEventId,
@@ -35,7 +38,7 @@ export interface WorkspaceUiResume {
   state: UiRendererState;
 }
 
-/** Browser action before the workspace server applies authenticated identity. */
+/** Renderer action before the existing Host applies authenticated identity. */
 export interface WorkspaceUiAction extends UiAction {
   type: "action";
   protocol: typeof WORKSPACE_UI_PROTOCOL_NAME;
@@ -81,6 +84,7 @@ export type WorkspaceUiClientMessage =
 export type WorkspaceUiServerMessage =
   | UiAttached
   | UiSnapshot
+  | UiDelta
   | UiAck
   | UiPresence
   | UiErrorMessage;
@@ -109,6 +113,7 @@ export interface WorkspaceUiSessionOptions {
   initialState?: UiRendererState;
   onAttached?: (attached: UiAttached) => void;
   onSnapshot: (snapshot: UiSnapshot) => void;
+  onDelta?: (delta: UiDelta) => void;
   onAck?: (ack: UiAck) => void;
   onPresence?: (presence: UiPresence) => void;
   onError?: (error: Error | UiErrorMessage) => void;
@@ -119,10 +124,9 @@ export interface WorkspaceUiSessionOptions {
 /**
  * Reconnecting browser transport for one terminal-backed App view.
  *
- * The workspace server must authenticate the WebSocket, derive participant
- * identity and grants from that server-side session, and translate these
- * messages to the trusted local `unpeel.ui/1` protocol. Browser-supplied
- * participant identity must never be accepted by the broker.
+ * The existing Unpeel Host authenticates this extension of `/mobile`, derives
+ * identity and grants from its ControllerPrincipal, and translates to the
+ * local `unpeel.ui/1` socket. It is not a standalone workspace server.
  */
 export class WorkspaceUiSession {
   private readonly options: WorkspaceUiSessionOptions;
@@ -282,6 +286,10 @@ export class WorkspaceUiSession {
   }
 
   private sendResume(): void {
+    const capabilities = Array.from(new Set([
+      ...(this.options.capabilities ?? []),
+      UI_DELTA_CAPABILITY,
+    ]));
     const resume: WorkspaceUiResume = {
       type: "resume",
       protocol: WORKSPACE_UI_PROTOCOL_NAME,
@@ -291,9 +299,7 @@ export class WorkspaceUiSession {
       renderer: {
         id: this.options.rendererId,
         kind: "web",
-        ...(this.options.capabilities === undefined
-          ? {}
-          : { capabilities: this.options.capabilities }),
+        capabilities,
       },
       viewId: this.options.viewId,
       ...(this.appInstanceId === undefined
@@ -340,7 +346,7 @@ export class WorkspaceUiSession {
       && message.type !== "attached"
       && message.type !== "error"
       && message.protocolVersion !== this.negotiatedProtocolVersion) {
-      this.options.onError?.(new Error("workspace server changed the negotiated UI version"));
+      this.options.onError?.(new Error("Unpeel Host changed the negotiated UI version"));
       this.socket?.close(1008, "UI protocol version mismatch");
       return;
     }
@@ -352,6 +358,23 @@ export class WorkspaceUiSession {
         if (this.matchesView(message)) {
           this.latestSnapshot = message;
           this.options.onSnapshot(message);
+        }
+        break;
+      case "delta":
+        if (this.matchesView(message)) {
+          if (this.latestSnapshot === undefined) {
+            this.requestSnapshot();
+            break;
+          }
+          try {
+            const next = applyUiDelta(this.latestSnapshot, message);
+            this.latestSnapshot = next;
+            this.options.onDelta?.(message);
+            this.options.onSnapshot(next);
+          } catch (error) {
+            this.options.onError?.(asError(error));
+            this.requestSnapshot();
+          }
         }
         break;
       case "ack":
@@ -376,7 +399,7 @@ export class WorkspaceUiSession {
       case "lifecycle":
       case "requestSnapshot":
         this.options.onError?.(
-          new Error(`workspace server sent forbidden ${message.type} frame`),
+          new Error(`Unpeel Host sent forbidden ${message.type} frame`),
         );
         this.socket?.close(1008, "invalid workspace UI frame");
         break;
@@ -419,7 +442,7 @@ export class WorkspaceUiSession {
     }
   }
 
-  private matchesView(message: UiSnapshot): boolean {
+  private matchesView(message: UiSnapshot | UiDelta): boolean {
     return message.appInstanceId === this.appInstanceId
       && message.clientId === this.options.clientId
       && message.viewId === this.options.viewId;
@@ -468,7 +491,11 @@ function publicPresence(presence: UiPresence): UiPresence {
   return {
     ...presence,
     members: presence.members.map((member) => {
-      const { grants: _grants, ...participant } = member.participant;
+      const {
+        grants: _grants,
+        sourceSessionId: _sourceSessionId,
+        ...participant
+      } = member.participant;
       return { ...member, participant };
     }),
   };

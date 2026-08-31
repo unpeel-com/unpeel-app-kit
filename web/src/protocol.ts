@@ -2,6 +2,7 @@ export const UI_PROTOCOL_NAME = "unpeel.ui" as const;
 export const UI_PROTOCOL_MIN_VERSION = 1 as const;
 export const UI_PROTOCOL_MAX_VERSION = 1 as const;
 export const UI_PROTOCOL_VERSION = UI_PROTOCOL_MAX_VERSION;
+export const UI_DELTA_CAPABILITY = "serverDelta" as const;
 
 export interface AppMetadata {
   id: string;
@@ -12,6 +13,8 @@ export interface AppMetadata {
 
 export interface UiParticipant {
   id: string;
+  kind?: "human" | "agent" | "service";
+  sourceSessionId?: string;
   displayName?: string;
   color?: string;
   grants?: string[];
@@ -28,14 +31,13 @@ export interface UiRendererState {
   terminalVisible: boolean;
 }
 
-/** Trusted local-broker message. Never expose its authToken to browser code. */
+/** Scoped local attachment. Never expose its participantToken to browser code. */
 export interface UiAttach {
   type: "attach";
   protocol: typeof UI_PROTOCOL_NAME;
   minProtocolVersion: number;
   maxProtocolVersion: number;
-  authToken: string;
-  participant: UiParticipant;
+  participantToken: string;
   clientId: string;
   renderer: UiRendererMetadata;
   viewId: string;
@@ -115,6 +117,29 @@ export interface UiSnapshot {
   viewId: string;
   revision: number;
   root: UiNode;
+}
+
+export type UiDeltaOperation =
+  | { op: "replaceRoot"; root: UiNode }
+  | { op: "markdownReplaceRange"; nodeId: string; edit: TextEdit }
+  | { op: "markdownSetSelection"; nodeId: string; selection: TextSelection }
+  | { op: "markdownSetPresentation"; nodeId: string; presentation: MarkdownPresentation }
+  | { op: "markdownSetDirty"; nodeId: string; dirty: boolean }
+  | { op: "markdownSetReadOnly"; nodeId: string; readOnly: boolean }
+  | { op: "markdownSetTitle"; nodeId: string; title: string | null }
+  | { op: "markdownSetPlaceholder"; nodeId: string; placeholder: string }
+  | { op: "markdownSetActions"; nodeId: string; actions: MarkdownEditorActions };
+
+export interface UiDelta {
+  type: "delta";
+  protocol: typeof UI_PROTOCOL_NAME;
+  protocolVersion: number;
+  appInstanceId: string;
+  clientId: string;
+  viewId: string;
+  baseRevision: number;
+  revision: number;
+  operations: UiDeltaOperation[];
 }
 
 export type UiEventKind =
@@ -222,6 +247,7 @@ export type UiMessage =
   | UiAttach
   | UiAttached
   | UiSnapshot
+  | UiDelta
   | UiEvent
   | UiAck
   | UiLifecycle
@@ -259,11 +285,10 @@ export function decodeUiMessage(input: string | unknown): UiMessage {
         message.maxProtocolVersion,
         "attach",
       );
-      requireString(message.authToken, "attach.authToken");
-      if (message.authToken.length > 4_096) {
-        throw new Error("attach.authToken must contain at most 4096 characters");
+      requireString(message.participantToken, "attach.participantToken");
+      if (message.participantToken.length > 16_384) {
+        throw new Error("attach.participantToken must contain at most 16384 characters");
       }
-      validateParticipant(message.participant, "attach.participant");
       requireIdentifier(message.clientId, "attach.clientId");
       validateRenderer(message.renderer, "attach.renderer");
       requireIdentifier(message.viewId, "attach.viewId");
@@ -310,42 +335,25 @@ export function decodeUiMessage(input: string | unknown): UiMessage {
       requireIdentifier(message.clientId, "snapshot.clientId");
       requireIdentifier(message.viewId, "snapshot.viewId");
       requireSafeInteger(message.revision, "snapshot.revision");
-      const root = record(message.root, "snapshot.root");
-      requireIdentifier(root.id, "snapshot.root.id");
-      if (root.type !== "markdownEditor") {
-        throw new Error(`Unsupported UI component ${String(root.type)}`);
+      validateNode(message.root, "snapshot.root");
+      break;
+    }
+    case "delta": {
+      requireIdentifier(message.appInstanceId, "delta.appInstanceId");
+      requireIdentifier(message.clientId, "delta.clientId");
+      requireIdentifier(message.viewId, "delta.viewId");
+      requireSafeInteger(message.baseRevision, "delta.baseRevision");
+      requireSafeInteger(message.revision, "delta.revision");
+      if (message.revision <= message.baseRevision) {
+        throw new Error("delta.revision must be greater than baseRevision");
       }
-      requireString(root.text, "markdownEditor.text", true);
-      validateSelection(root.selection, "markdownEditor.selection");
-      validateSelectionInText(root.text, root.selection, "markdownEditor.selection");
-      if (root.presentation !== undefined
-        && !["source", "preview", "split"].includes(String(root.presentation))) {
-        throw new Error(`Unsupported Markdown presentation ${String(root.presentation)}`);
+      if (!Array.isArray(message.operations)
+        || message.operations.length === 0
+        || message.operations.length > 4_096) {
+        throw new Error("delta.operations must contain 1..=4096 entries");
       }
-      for (const field of ["readOnly", "dirty"] as const) {
-        if (root[field] !== undefined && typeof root[field] !== "boolean") {
-          throw new Error(`markdownEditor.${field} must be a boolean`);
-        }
-      }
-      for (const field of ["placeholder", "title"] as const) {
-        if (root[field] !== undefined) {
-          requireString(root[field], `markdownEditor.${field}`, true);
-        }
-      }
-      if (root.actions !== undefined) {
-        const actions = record(root.actions, "markdownEditor.actions");
-        for (const field of [
-          "replaceRange",
-          "setSelection",
-          "save",
-          "undo",
-          "redo",
-          "setPresentation",
-        ]) {
-          if (actions[field] !== undefined) {
-            requireIdentifier(actions[field], `markdownEditor.actions.${field}`);
-          }
-        }
+      for (const [index, operation] of message.operations.entries()) {
+        validateDeltaOperation(operation, `delta.operations[${index}]`);
       }
       break;
     }
@@ -397,6 +405,93 @@ export function decodeUiMessage(input: string | unknown): UiMessage {
       throw new Error(`Unsupported UI message ${String(message.type)}`);
   }
   return value as UiMessage;
+}
+
+/** Applies a contiguous server delta and returns the next complete snapshot. */
+export function applyUiDelta(snapshot: UiSnapshot, delta: UiDelta): UiSnapshot {
+  if (snapshot.protocol !== delta.protocol
+    || snapshot.protocolVersion !== delta.protocolVersion
+    || snapshot.appInstanceId !== delta.appInstanceId
+    || snapshot.clientId !== delta.clientId
+    || snapshot.viewId !== delta.viewId) {
+    throw new Error("Delta route does not match the current snapshot");
+  }
+  if (snapshot.revision !== delta.baseRevision || delta.revision <= delta.baseRevision) {
+    throw new Error("Delta is not contiguous with the current snapshot");
+  }
+  if (delta.operations.length === 0 || delta.operations.length > 4_096) {
+    throw new Error("Delta must contain 1..=4096 operations");
+  }
+
+  let root = snapshot.root;
+  for (const operation of delta.operations) {
+    root = applyDeltaOperation(root, operation);
+  }
+  validateNode(root, "delta.result.root");
+  return {
+    type: "snapshot",
+    protocol: delta.protocol,
+    protocolVersion: delta.protocolVersion,
+    appInstanceId: delta.appInstanceId,
+    clientId: delta.clientId,
+    viewId: delta.viewId,
+    revision: delta.revision,
+    root,
+  };
+}
+
+function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode {
+  if (operation.op === "replaceRoot") return operation.root;
+  if (root.id !== operation.nodeId || root.type !== "markdownEditor") {
+    throw new Error("Delta targets an unavailable Markdown node");
+  }
+  switch (operation.op) {
+    case "markdownReplaceRange": {
+      const start = utf16PositionOffset(root.text, operation.edit.range.start);
+      const end = utf16PositionOffset(root.text, operation.edit.range.end);
+      if (start > end) throw new Error("Markdown text edit range is reversed");
+      return {
+        ...root,
+        text: root.text.slice(0, start) + operation.edit.text + root.text.slice(end),
+      };
+    }
+    case "markdownSetSelection":
+      return { ...root, selection: operation.selection };
+    case "markdownSetPresentation":
+      return { ...root, presentation: operation.presentation };
+    case "markdownSetDirty":
+      return { ...root, dirty: operation.dirty };
+    case "markdownSetReadOnly":
+      return { ...root, readOnly: operation.readOnly };
+    case "markdownSetTitle": {
+      const { title: _oldTitle, ...withoutTitle } = root;
+      return operation.title === null
+        ? withoutTitle
+        : { ...withoutTitle, title: operation.title };
+    }
+    case "markdownSetPlaceholder":
+      return { ...root, placeholder: operation.placeholder };
+    case "markdownSetActions":
+      return { ...root, actions: operation.actions };
+    default: {
+      const unreachable: never = operation;
+      throw new Error(`Unsupported delta operation ${String(unreachable)}`);
+    }
+  }
+}
+
+function utf16PositionOffset(text: string, position: TextPosition): number {
+  const lines = text.split("\n");
+  const line = lines[position.line];
+  if (line === undefined || position.utf16Column < 0 || position.utf16Column > line.length) {
+    throw new Error("Markdown text position is outside the document");
+  }
+  validatePositionInText(text, position, "delta.textPosition");
+  let offset = position.utf16Column;
+  for (let index = 0; index < position.line; index += 1) {
+    offset += lines[index]!.length + 1;
+  }
+  return offset;
 }
 
 export function uiAction(
@@ -460,6 +555,13 @@ function validateRoute(
 function validateParticipant(value: unknown, path: string): void {
   const participant = record(value, path);
   requireIdentifier(participant.id, `${path}.id`);
+  if (participant.kind !== undefined
+    && !["human", "agent", "service"].includes(String(participant.kind))) {
+    throw new Error(`${path}.kind is unsupported`);
+  }
+  if (participant.sourceSessionId !== undefined) {
+    requireIdentifier(participant.sourceSessionId, `${path}.sourceSessionId`);
+  }
   if (participant.displayName !== undefined) {
     requireString(participant.displayName, `${path}.displayName`);
   }
@@ -473,6 +575,103 @@ function validateParticipant(value: unknown, path: string): void {
     for (const [index, grant] of participant.grants.entries()) {
       if (grant !== "*") requireIdentifier(grant, `${path}.grants[${index}]`);
     }
+  }
+}
+
+function validateNode(value: unknown, path: string): void {
+  const root = record(value, path);
+  requireIdentifier(root.id, `${path}.id`);
+  if (root.type !== "markdownEditor") {
+    throw new Error(`Unsupported UI component ${String(root.type)}`);
+  }
+  requireString(root.text, `${path}.text`, true);
+  validateSelection(root.selection, `${path}.selection`);
+  validateSelectionInText(root.text, root.selection, `${path}.selection`);
+  if (root.presentation !== undefined
+    && !["source", "preview", "split"].includes(String(root.presentation))) {
+    throw new Error(`Unsupported Markdown presentation ${String(root.presentation)}`);
+  }
+  for (const field of ["readOnly", "dirty"] as const) {
+    if (root[field] !== undefined && typeof root[field] !== "boolean") {
+      throw new Error(`${path}.${field} must be a boolean`);
+    }
+  }
+  for (const field of ["placeholder", "title"] as const) {
+    if (root[field] !== undefined) requireString(root[field], `${path}.${field}`, true);
+  }
+  if (root.actions !== undefined) validateMarkdownActions(root.actions, `${path}.actions`);
+}
+
+function validateMarkdownActions(value: unknown, path: string): void {
+  const actions = record(value, path);
+  for (const field of [
+    "replaceRange",
+    "setSelection",
+    "save",
+    "undo",
+    "redo",
+    "setPresentation",
+  ]) {
+    if (actions[field] !== undefined) requireIdentifier(actions[field], `${path}.${field}`);
+  }
+}
+
+function validateDeltaOperation(value: unknown, path: string): void {
+  const operation = record(value, path);
+  switch (operation.op) {
+    case "replaceRoot":
+      validateNode(operation.root, `${path}.root`);
+      return;
+    case "markdownReplaceRange": {
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      const edit = record(operation.edit, `${path}.edit`);
+      const range = record(edit.range, `${path}.edit.range`);
+      validatePosition(range.start, `${path}.edit.range.start`);
+      validatePosition(range.end, `${path}.edit.range.end`);
+      requireString(edit.text, `${path}.edit.text`, true);
+      const start = record(range.start, `${path}.edit.range.start`);
+      const end = record(range.end, `${path}.edit.range.end`);
+      if ((start.line as number) > (end.line as number)
+        || (start.line === end.line
+          && (start.utf16Column as number) > (end.utf16Column as number))) {
+        throw new Error(`${path}.edit.range must not be reversed`);
+      }
+      return;
+    }
+    case "markdownSetSelection":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateSelection(operation.selection, `${path}.selection`);
+      return;
+    case "markdownSetPresentation":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (!["source", "preview", "split"].includes(String(operation.presentation))) {
+        throw new Error(`${path}.presentation is unsupported`);
+      }
+      return;
+    case "markdownSetDirty":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (typeof operation.dirty !== "boolean") throw new Error(`${path}.dirty must be boolean`);
+      return;
+    case "markdownSetReadOnly":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (typeof operation.readOnly !== "boolean") {
+        throw new Error(`${path}.readOnly must be boolean`);
+      }
+      return;
+    case "markdownSetTitle":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (operation.title !== null) requireString(operation.title, `${path}.title`, true);
+      return;
+    case "markdownSetPlaceholder":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      requireString(operation.placeholder, `${path}.placeholder`, true);
+      return;
+    case "markdownSetActions":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateMarkdownActions(operation.actions, `${path}.actions`);
+      return;
+    default:
+      throw new Error(`Unsupported delta operation ${String(operation.op)}`);
   }
 }
 

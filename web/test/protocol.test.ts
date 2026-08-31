@@ -4,7 +4,9 @@ import {
   decodeUiMessage,
   diffText,
   negotiateUiProtocolVersion,
+  applyUiDelta,
   type UiAttached,
+  type UiDelta,
   type UiPresence,
   type UiSnapshot,
   type WorkspaceWebSocket,
@@ -18,12 +20,14 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(10);
+    expect(messages).toHaveLength(11);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
       expect(messages[0].maxProtocolVersion).toBe(1);
+      expect(messages[0].participantToken).toStartWith("upui1.");
       expect(messages[0]).not.toHaveProperty("protocolVersion");
+      expect(messages[0]).not.toHaveProperty("participant");
     }
     expect(messages[1]?.type).toBe("attached");
     const snapshot = messages[2] as UiSnapshot;
@@ -39,6 +43,11 @@ describe("shared protocol", () => {
         "person-bob",
       ]);
     }
+    const delta = messages[10] as UiDelta;
+    const updated = applyUiDelta(snapshot, delta);
+    expect(updated.revision).toBe(8);
+    expect(updated.root.text).toBe("# Hello\nHello world");
+    expect(updated.root.selection.head.utf16Column).toBe(5);
   });
 
   test("builds the same command envelope", () => {
@@ -91,8 +100,7 @@ describe("shared protocol", () => {
       protocol: "unpeel.ui",
       minProtocolVersion: 2,
       maxProtocolVersion: 3,
-      authToken: "secret",
-      participant: { id: "person-1", grants: ["view"] },
+      participantToken: "upui1.payload.signature",
       clientId: "client-1",
       renderer: { id: "renderer-1", kind: "web" },
       viewId: "main",
@@ -132,6 +140,7 @@ describe("WorkspaceUiSession", () => {
     for (const message of messages) {
       expect(message.protocol).toBe("unpeel.workspace.ui");
       expect(message).not.toHaveProperty("authToken");
+      expect(message).not.toHaveProperty("participantToken");
       expect(message).not.toHaveProperty("participant");
       expect(message).not.toHaveProperty("participantId");
       expect(message).not.toHaveProperty("grants");
@@ -162,8 +171,13 @@ describe("WorkspaceUiSession", () => {
     expect(resume.type).toBe("resume");
     expect(resume.protocol).toBe("unpeel.workspace.ui");
     expect(resume).not.toHaveProperty("authToken");
+    expect(resume).not.toHaveProperty("participantToken");
     expect(resume).not.toHaveProperty("participant");
     expect(resume).not.toHaveProperty("participantId");
+    expect((resume.renderer as { capabilities: string[] }).capabilities).toEqual([
+      "markdownEditor",
+      "serverDelta",
+    ]);
 
     socket.message(attachedFrame());
     socket.message(snapshotFrame());
@@ -174,7 +188,12 @@ describe("WorkspaceUiSession", () => {
       appInstanceId: "app-fixture",
       viewId: "main",
       members: [{
-        participant: { id: "person-alice", grants: ["view", "edit"] },
+        participant: {
+          id: "agent:neighbor",
+          kind: "agent",
+          sourceSessionId: "session-neighbor",
+          grants: ["view", "edit"],
+        },
         clientId: "client-alice-web",
         renderer: { id: "renderer-alice-web", kind: "web" },
         state: { rendererVisible: true, terminalVisible: false },
@@ -182,6 +201,21 @@ describe("WorkspaceUiSession", () => {
     });
     expect(snapshots).toHaveLength(1);
     expect(presence?.members[0]?.participant).not.toHaveProperty("grants");
+    expect(presence?.members[0]?.participant).not.toHaveProperty("sourceSessionId");
+    socket.message({
+      type: "delta",
+      protocol: "unpeel.ui",
+      protocolVersion: 1,
+      appInstanceId: "app-fixture",
+      clientId: "client-alice-web",
+      viewId: "main",
+      baseRevision: 7,
+      revision: 8,
+      operations: [{ op: "markdownSetDirty", nodeId: "editor", dirty: true }],
+    });
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots[1]?.revision).toBe(8);
+    expect(snapshots[1]?.root.dirty).toBe(true);
     expect(session.send(
       uiAction("editor", "save", "command"),
       "event-browser-save-1",
@@ -197,12 +231,13 @@ describe("WorkspaceUiSession", () => {
       rendererId: "renderer-alice-web",
       viewId: "main",
       eventId: "event-browser-save-1",
-      baseRevision: 7,
+      baseRevision: 8,
       nodeId: "editor",
       action: "save",
       kind: "command",
     });
     expect(action).not.toHaveProperty("authToken");
+    expect(action).not.toHaveProperty("participantToken");
     expect(action).not.toHaveProperty("participant");
     expect(action).not.toHaveProperty("participantId");
     expect(action).not.toHaveProperty("grants");

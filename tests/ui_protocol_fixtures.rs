@@ -12,12 +12,11 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 10);
+    assert_eq!(messages.len(), 11);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
-    assert_eq!(attach.participant.id.as_str(), "person-alice");
-    assert!(attach.participant.allows("edit"));
+    assert!(attach.participant_token.starts_with("upui1."));
     let UiMessage::Attached(attached) = &messages[1] else {
         panic!("second fixture must acknowledge attachment");
     };
@@ -55,4 +54,10 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     };
     assert_eq!(save.action.action.as_str(), "save");
     assert_eq!(save.action.value, UiEventValue::None);
+    let UiMessage::Delta(delta) = &messages[10] else {
+        panic!("eleventh fixture must be a server delta");
+    };
+    assert_eq!(delta.base_revision, 7);
+    assert_eq!(delta.revision, 8);
+    assert_eq!(delta.operations.len(), 3);
 }

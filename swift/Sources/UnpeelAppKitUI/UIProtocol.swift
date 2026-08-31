@@ -5,6 +5,7 @@ public enum UnpeelUIProtocol {
     public static let minimumVersion = 1
     public static let maximumVersion = 1
     public static let version = maximumVersion
+    public static let deltaCapability = "serverDelta"
     private static let maximumWireVersion = Int(UInt32.max)
 
     public static func supports(_ version: Int) -> Bool {
@@ -33,20 +34,32 @@ public struct AppMetadata: Codable, Equatable, Sendable {
     }
 }
 
-/// Opaque workspace identity and broker-attested access grants.
+public enum UIParticipantKind: String, Codable, Equatable, Sendable {
+    case human
+    case agent
+    case service
+}
+
+/// Opaque Host identity and signed access grants. Agents use this same type.
 public struct UIParticipant: Codable, Equatable, Sendable {
     public let id: String
+    public let kind: UIParticipantKind
+    public let sourceSessionID: String?
     public let displayName: String?
     public let color: String?
     public let grants: [String]
 
     public init(
         id: String,
+        kind: UIParticipantKind = .human,
+        sourceSessionID: String? = nil,
         displayName: String? = nil,
         color: String? = nil,
         grants: [String] = []
     ) {
         self.id = id
+        self.kind = kind
+        self.sourceSessionID = sourceSessionID
         self.displayName = displayName
         self.color = color
         self.grants = grants
@@ -54,6 +67,8 @@ public struct UIParticipant: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case id
+        case kind
+        case sourceSessionID = "sourceSessionId"
         case displayName
         case color
         case grants
@@ -62,6 +77,8 @@ public struct UIParticipant: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
+        kind = try container.decodeIfPresent(UIParticipantKind.self, forKey: .kind) ?? .human
+        sourceSessionID = try container.decodeIfPresent(String.self, forKey: .sourceSessionID)
         displayName = try container.decodeIfPresent(String.self, forKey: .displayName)
         color = try container.decodeIfPresent(String.self, forKey: .color)
         grants = try container.decodeIfPresent([String].self, forKey: .grants) ?? []
@@ -110,13 +127,12 @@ public struct UIRendererState: Codable, Equatable, Sendable {
     public static let hidden = Self(rendererVisible: false, terminalVisible: false)
 }
 
-/// Authenticated local-broker attachment. Never expose `authToken` to web code.
+/// Scoped local attachment. Never expose `participantToken` to web code.
 public struct UIAttach: Codable, Equatable, Sendable, CustomDebugStringConvertible {
     public let protocolName: String
     public let minProtocolVersion: Int
     public let maxProtocolVersion: Int
-    public let authToken: String
-    public let participant: UIParticipant
+    public let participantToken: String
     public let clientID: String
     public let renderer: UIRendererMetadata
     public let viewID: String
@@ -125,8 +141,7 @@ public struct UIAttach: Codable, Equatable, Sendable, CustomDebugStringConvertib
     public let state: UIRendererState
 
     public init(
-        authToken: String,
-        participant: UIParticipant,
+        participantToken: String,
         clientID: String,
         renderer: UIRendererMetadata,
         viewID: String,
@@ -139,8 +154,7 @@ public struct UIAttach: Codable, Equatable, Sendable, CustomDebugStringConvertib
         protocolName = UnpeelUIProtocol.name
         self.minProtocolVersion = minProtocolVersion
         self.maxProtocolVersion = maxProtocolVersion
-        self.authToken = authToken
-        self.participant = participant
+        self.participantToken = participantToken
         self.clientID = clientID
         self.renderer = renderer
         self.viewID = viewID
@@ -150,15 +164,14 @@ public struct UIAttach: Codable, Equatable, Sendable, CustomDebugStringConvertib
     }
 
     public var debugDescription: String {
-        "UIAttach(participant: \(participant.id), client: \(clientID), token: [REDACTED])"
+        "UIAttach(client: \(clientID), participantToken: [REDACTED])"
     }
 
     enum CodingKeys: String, CodingKey {
         case protocolName = "protocol"
         case minProtocolVersion
         case maxProtocolVersion
-        case authToken
-        case participant
+        case participantToken
         case clientID = "clientId"
         case renderer
         case viewID = "viewId"
@@ -182,8 +195,14 @@ public struct UIAttach: Codable, Equatable, Sendable, CustomDebugStringConvertib
                 debugDescription: "Invalid UI protocol version range"
             )
         }
-        authToken = try container.decode(String.self, forKey: .authToken)
-        participant = try container.decode(UIParticipant.self, forKey: .participant)
+        participantToken = try container.decode(String.self, forKey: .participantToken)
+        guard !participantToken.isEmpty, participantToken.utf8.count <= 16_384 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .participantToken,
+                in: container,
+                debugDescription: "participantToken must contain 1...16384 bytes"
+            )
+        }
         clientID = try container.decode(String.self, forKey: .clientID)
         renderer = try container.decode(UIRendererMetadata.self, forKey: .renderer)
         viewID = try container.decode(String.self, forKey: .viewID)
@@ -446,6 +465,7 @@ public struct UISnapshot: Codable, Equatable, Sendable {
     public let root: UINode
 
     public init(
+        protocolVersion: Int = UnpeelUIProtocol.version,
         appInstanceID: String,
         clientID: String,
         viewID: String,
@@ -453,7 +473,7 @@ public struct UISnapshot: Codable, Equatable, Sendable {
         root: UINode
     ) {
         protocolName = UnpeelUIProtocol.name
-        protocolVersion = UnpeelUIProtocol.version
+        self.protocolVersion = protocolVersion
         self.appInstanceID = appInstanceID
         self.clientID = clientID
         self.viewID = viewID
@@ -798,6 +818,7 @@ public enum UIMessage: Equatable, Sendable {
     case attach(UIAttach)
     case attached(UIAttached)
     case snapshot(UISnapshot)
+    case delta(UIDelta)
     case event(UIEvent)
     case ack(UIAck)
     case lifecycle(UILifecycle)
@@ -817,6 +838,7 @@ extension UIMessage: Codable {
         case attach
         case attached
         case snapshot
+        case delta
         case event
         case ack
         case lifecycle
@@ -853,6 +875,8 @@ extension UIMessage: Codable {
             self = .attached(try UIAttached(from: decoder))
         case .snapshot:
             self = .snapshot(try UISnapshot(from: decoder))
+        case .delta:
+            self = .delta(try UIDelta(from: decoder))
         case .event:
             self = .event(try UIEvent(from: decoder))
         case .ack:
@@ -879,6 +903,9 @@ extension UIMessage: Codable {
             try message.encode(to: encoder)
         case let .snapshot(message):
             try container.encode(MessageType.snapshot, forKey: .type)
+            try message.encode(to: encoder)
+        case let .delta(message):
+            try container.encode(MessageType.delta, forKey: .type)
             try message.encode(to: encoder)
         case let .event(message):
             try container.encode(MessageType.event, forKey: .type)
@@ -911,6 +938,8 @@ public extension UIMessage {
         case let .attached(message):
             message.protocolVersion
         case let .snapshot(message):
+            message.protocolVersion
+        case let .delta(message):
             message.protocolVersion
         case let .event(message):
             message.protocolVersion
