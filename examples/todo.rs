@@ -467,29 +467,56 @@ fn semantic_intent(event: &unpeel_app_kit::UiEvent) -> Result<Intent, String> {
 #[cfg(feature = "ui-bridge")]
 fn drain_bridge(app: &mut TodoApp, bridge: &mut UiBridge) -> Result<(), Box<dyn Error>> {
     while let Some(message) = bridge.poll()? {
-        if let UiBridgeEvent::Action { event, .. } = message {
-            let result = if event.base_revision == app.state.revision {
-                semantic_intent(&event).and_then(|intent| app.commit(intent))
-            } else {
-                Err(format!(
-                    "Todo changed from revision {} to {}; retry the action",
-                    event.base_revision, app.state.revision
-                ))
-            };
-            let outcome = match result {
-                Ok(change) => {
-                    let base = event.base_revision;
-                    bridge.publish_delta(
-                        VIEW_ID,
-                        base,
-                        app.state.revision,
-                        vec![change.ui_delta()],
-                    )?;
-                    UiEventOutcome::Applied
-                }
-                Err(message) => UiEventOutcome::Rejected(message),
-            };
-            bridge.acknowledge(&event, outcome, app.state.revision)?;
+        match message {
+            UiBridgeEvent::Attached {
+                participant,
+                client_id,
+                ..
+            } if std::env::var_os("UNPEEL_KITCHEN_SINK").is_some() => {
+                let mut page = app.page();
+                page.title = format!(
+                    "Todos · {}",
+                    participant
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(participant.id.as_str())
+                );
+                bridge.publish_to(
+                    client_id,
+                    VIEW_ID,
+                    app.state.revision,
+                    UiNode::page(ROOT_ID, page),
+                )?;
+            }
+            UiBridgeEvent::Action { event, .. } => {
+                let result = if event.base_revision == app.state.revision {
+                    semantic_intent(&event).and_then(|intent| app.commit(intent))
+                } else {
+                    Err(format!(
+                        "Todo changed from revision {} to {}; retry the action",
+                        event.base_revision, app.state.revision
+                    ))
+                };
+                let outcome = match result {
+                    Ok(change) => {
+                        let base = event.base_revision;
+                        bridge.publish_delta(
+                            VIEW_ID,
+                            base,
+                            app.state.revision,
+                            vec![change.ui_delta()],
+                        )?;
+                        UiEventOutcome::Applied
+                    }
+                    Err(message) => UiEventOutcome::Rejected(message),
+                };
+                bridge.acknowledge(&event, outcome, app.state.revision)?;
+            }
+            UiBridgeEvent::Attached { .. }
+            | UiBridgeEvent::Detached { .. }
+            | UiBridgeEvent::Lifecycle { .. } => {
+                // Presence and terminal visibility are maintained by UiBridge.
+            }
         }
     }
     Ok(())

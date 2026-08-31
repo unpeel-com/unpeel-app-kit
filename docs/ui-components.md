@@ -18,6 +18,22 @@ contains the optional hosted projection; without injected Host variables it is
 equally inert. Todo constructs Page, List, ListItem, Toggle, and Input values
 without passing a bridge into any component API.
 
+On macOS, the independent Kitchen Sink package exercises that same binary and
+the Markdown and Media examples through real PTYs and the native renderer,
+without Unpeel installed:
+
+```sh
+swift run --package-path swift/Examples/KitchenSink
+```
+
+It is a test-only mini-host, not another workspace server. It reproduces the
+two real Host touchpoints locally—spawn-time endpoint injection and scoped
+participant-token minting—then exposes App restart, renderer resume, lifecycle
+visibility, multi-participant grants/presence, targeted projections, acks, and
+snapshot-versus-delta delivery as interactive harness controls. The executable
+is a separate SwiftPM package that depends on `UnpeelAppKitUI`; the renderer
+library does not depend on the harness.
+
 ## Standalone component layer
 
 A pure-TUI App can compile out the hosted presentation layer entirely:

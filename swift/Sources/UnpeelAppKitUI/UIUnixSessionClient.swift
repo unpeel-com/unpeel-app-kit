@@ -1,6 +1,16 @@
 import Foundation
 import Network
 
+/// The wire representation used for the most recent accepted projection.
+///
+/// `UIUnixSessionClient` always exposes a complete `UISnapshot` to renderers,
+/// including after it applies a delta. This separate signal lets Host test
+/// rigs verify whether the App actually sent a snapshot or a compact delta.
+public enum UIProjectionDelivery: Equatable, Sendable {
+    case snapshot(revision: Int)
+    case delta(baseRevision: Int, revision: Int, operationCount: Int)
+}
+
 /// Reconnecting native client for an App-owned `unpeel.ui/1` Unix socket.
 ///
 /// This class belongs in the trusted native Host. Never instantiate it in web
@@ -60,6 +70,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     private let configuration: Configuration
     private let queue: DispatchQueue
     private let onMessage: @Sendable (UIMessage) -> Void
+    private let onProjectionDelivery: @Sendable (UIProjectionDelivery) -> Void
     private let onState: @Sendable (ConnectionState) -> Void
     private let onTerminalFallback: @Sendable (String) -> Void
     private var connection: NWConnection?
@@ -81,11 +92,13 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     public init(
         configuration: Configuration,
         onMessage: @escaping @Sendable (UIMessage) -> Void,
+        onProjectionDelivery: @escaping @Sendable (UIProjectionDelivery) -> Void = { _ in },
         onState: @escaping @Sendable (ConnectionState) -> Void = { _ in },
         onTerminalFallback: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.configuration = configuration
         self.onMessage = onMessage
+        self.onProjectionDelivery = onProjectionDelivery
         self.onState = onState
         self.onTerminalFallback = onTerminalFallback
         queue = DispatchQueue(label: "com.unpeel.app-kit.ui.\(configuration.clientID)")
@@ -328,6 +341,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                   snapshot.appInstanceID == appInstanceID
             else { return }
             guard accept(snapshot) else { return }
+            onProjectionDelivery(.snapshot(revision: snapshot.revision))
         case let .delta(delta):
             guard delta.protocolVersion == negotiatedProtocolVersion else { return }
             guard let snapshot = latestSnapshot else {
@@ -337,6 +351,11 @@ public final class UIUnixSessionClient: @unchecked Sendable {
             do {
                 let next = try snapshot.applying(delta)
                 if accept(next) {
+                    onProjectionDelivery(.delta(
+                        baseRevision: delta.baseRevision,
+                        revision: delta.revision,
+                        operationCount: delta.operations.count
+                    ))
                     onMessage(.snapshot(next))
                 }
             } catch {

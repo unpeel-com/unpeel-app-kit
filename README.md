@@ -31,6 +31,29 @@ renders native list rows and toggles through `PageView`; web does the same with
 `PageRenderer`. With no injected endpoint, bridge detection is inert and the
 App is simply the standalone TUI above.
 
+## Kitchen Sink mini-host (macOS)
+
+The repository also includes a self-contained macOS 14+ SwiftUI test rig that
+exercises the complete hosted loop without Unpeel installed:
+
+```sh
+swift run --package-path swift/Examples/KitchenSink
+```
+
+It builds and launches the Todo, Markdown, and Media examples in real
+SwiftTerm PTYs, creates private per-session Unix sockets and signing keys, and
+attaches the sibling `UnpeelAppKitUI` renderer with Host-minted scoped tokens.
+Every session can switch among Terminal, Native, and Split views. Harness
+controls cover child kill/restart and durable restore, renderer
+disconnect/resume, a second agent participant with configurable grants,
+presence and acknowledgements, participant-specific `publish_to` projections,
+and a raw snapshot-versus-delta indicator.
+
+The harness is an independent SwiftPM executable package; it is not a library
+dependency and its CI workflow is manual-only. See
+[`swift/Examples/KitchenSink/README.md`](swift/Examples/KitchenSink/README.md)
+for its mini-host boundaries and test flow.
+
 ## Standalone TUI usage
 
 The base components need no socket, protocol, account, environment variables,

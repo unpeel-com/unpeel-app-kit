@@ -29,3 +29,11 @@ unicode-width = "0.2"
 crossterm = "0.29"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 tempfile = "3"
+
+[[example]]
+name = "markdown"
+required-features = ["markdown-text-area", "ui-bridge"]
+
+[[example]]
+name = "media"
+required-features = ["media", "ui-bridge"]

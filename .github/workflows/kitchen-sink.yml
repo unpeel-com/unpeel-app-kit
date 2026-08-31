@@ -1,0 +1,22 @@
+name: Kitchen Sink (manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build child Apps
+        run: >-
+          cargo build
+          --features markdown-text-area,media
+          --example todo
+          --example markdown
+          --example media
+      - name: Test renderer library
+        run: swift test --package-path swift
+      - name: Build standalone mini-host
+        run: swift build --package-path swift/Examples/KitchenSink
