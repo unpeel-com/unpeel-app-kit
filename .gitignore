@@ -1,5 +1,6 @@
 /target/
 /web/node_modules/
+/swift/Examples/KitchenSink/.build*/
 /.unpeel-todo.json
 /.unpeel-todo.json.*.tmp
 /.unpeel-markdown.json

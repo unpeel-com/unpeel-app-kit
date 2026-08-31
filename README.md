@@ -13,8 +13,9 @@ The canonical demo is a normal Ratatui Todo App:
 cargo run --example todo
 ```
 
-Type a todo and press Enter. Tab moves between the Input and List; Enter or
-Space toggles the selected row, `d` deletes it, and Escape exits. The App saves
+Type a todo and press Enter. Click a row to toggle it; Tab moves between the
+Input and List, Enter or Space toggles the selected row, `d` deletes it, and
+Escape exits. The App saves
 its versioned model atomically to `.unpeel-todo.json` in the current directory
 (`UNPEEL_TODO_PATH` overrides the location), so an always-on process can be
 stopped and restored without making a renderer the state owner.
@@ -37,20 +38,39 @@ The repository also includes a self-contained macOS 14+ SwiftUI test rig that
 exercises the complete hosted loop without Unpeel installed:
 
 ```sh
-swift run --package-path swift/Examples/KitchenSink
+swift/Examples/KitchenSink/run-app.sh
 ```
 
-It builds and launches the Todo, Markdown, and Media examples in real
-SwiftTerm PTYs, creates private per-session Unix sockets and signing keys, and
-attaches the sibling `UnpeelAppKitUI` renderer with Host-minted scoped tokens.
-Although SwiftPM launches a bare executable rather than an `.app` bundle, the
-harness explicitly adopts macOS's regular foreground activation policy so its
-window—not the terminal that launched it—owns keyboard focus.
-Every session can switch among Terminal, Native, and Split views. Harness
+It builds and launches the Todo, Markdown, Media, and (when the sibling guest
+artifact exists) Surface Planets plus Canvas + Controls examples in real libghostty PTYs rendered
+through Metal, creates private per-session Unix
+sockets and signing keys, and attaches the sibling `UnpeelAppKitUI` renderer
+with Host-minted scoped tokens. A `WKWebView` loads the repository's actual
+TypeScript/DOM renderers against the same live snapshot and action stream.
+The launcher wraps the SwiftPM executable in a generated, ad-hoc signed `.app`
+under `.build`, giving Launch Services a stable bundle identity and keeping
+keyboard focus in the harness. Direct `swift run` remains supported and adopts
+macOS's regular foreground activation policy itself.
+Every session can switch among Terminal, Native, Web, and a three-way Split.
+An expandable, live component-tree inspector shows node ids, slots, actions,
+values, and the authoritative revision beside any presentation. Harness
 controls cover child kill/restart and durable restore, renderer
 disconnect/resume, a second agent participant with configurable grants,
 presence and acknowledgements, participant-specific `publish_to` projections,
 and a raw snapshot-versus-delta indicator.
+
+The two Surface sessions exercise the composed canvas path as well. Canvas +
+Controls puts the closed CanvasPage/Button toolbar over the same local GPU
+scene in Ratatui, SwiftUI, and DOM. When the sibling
+`UnpeelSurfaceKit` XCFramework and `web/pkg` artifacts exist, the mini-host
+injects a private `UNPEEL_SURFACE_SOCKET`, retains the app's USRF resources and
+latest scene, and fans those exact packets to a macOS CAMetalLayer presenter
+and the WebGPU presenter. Terminal mode composites the same local Metal scene
+behind transparent Ghostty cells. The hosted producer runs Surface in
+`retained-only` mode, so it never creates a duplicate wgpu/Kitty projection.
+Every view renders locally; the broker never rasterizes or transports frames.
+Missing Surface artifacts simply remove the capability and preserve the
+complete TUI fallback.
 
 The harness is an independent SwiftPM executable package; it is not a library
 dependency and its CI workflow is manual-only. See
@@ -105,6 +125,31 @@ alternate screen and before starting terminal event reads. `Media::load`
 renders local paths or bounded inline images; broker-resolved blobs use
 `Media::from_resolved_bytes` so length and SHA-256 are checked before decode.
 
+Dynamic GPU surfaces are a separate, default-off integration and therefore do
+not add wgpu to normal or pure-TUI builds:
+
+```toml
+[dependencies.unpeel-app-kit]
+path = "../unpeel-app-kit"
+default-features = false
+features = ["surface-embed"]
+```
+
+The planet example reuses the existing unpeel-surface guest and presenter:
+
+```sh
+cargo build --release --manifest-path ../unpeel-surface/Cargo.toml \
+  -p surface-planets-example --target wasm32-unknown-unknown
+cargo run --example surface_planets --no-default-features --features surface-embed
+cargo run --example surface_canvas --no-default-features --features surface-embed
+```
+
+Use arrows or Space to move between planets, Home for the overview, and Escape
+to quit in the bare Surface example. In the Canvas example, Tab or Left/Right
+focuses the top Buttons, Enter/Space activates one, and every control is also
+clickable. `UNPEEL_SURFACE_PLANETS_WASM` or `--guest PATH` can point at a guest
+outside the conventional sibling checkout.
+
 The `ui-bridge` feature is default-on for API compatibility. It only makes the
 optional hosted types available; it opens no socket and starts no background
 work unless the App explicitly calls `UiBridge::detect()`. A pure-TUI build can
@@ -121,6 +166,8 @@ The standalone component layer currently provides:
 | `List` / `ListItem` | Ratatui List rows with stable ids, detail/value metadata, one optional activate action, and named closed control slots |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
 | `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
+| `Button` | Closed semantic action control with default/primary/destructive native intent rather than arbitrary styling |
+| `CanvasPage` | Exactly one Surface slot plus a bounded fixed top Button toolbar, with Ratatui layout/hit boxes and no generic child tree |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
 | `KitTheme` / `ThemeMonitor` | Shared dark/light defaults plus a live hosted project/workspace accent for selectable rows, menus, text, and scrollbars |
 | `DoubleClickTracker` | Target-aware double-click detection shared by mouse-driven Apps |
@@ -138,6 +185,7 @@ The standalone component layer currently provides:
 | `MarkdownEditor` / `MarkdownTextArea` | Ratatui-backed Markdown editor behind the independent `markdown-text-area` feature |
 | `MarkdownEditorInteraction` | Optional closed `/` block menu, Markdown-aware Enter/Backspace, and drag/word/line selection for `MarkdownTextArea` |
 | `Media` | Static images behind the independent `media` feature, using Kitty/iTerm2/Sixel with a Unicode half-block fallback |
+| `Surface` / `SurfaceView` | Optional `surface-embed` delegation to unpeel-surface's WASM guest, local wgpu renderer, mmap ring, and Kitty presenter; absent from default/pure-TUI builds |
 
 The crate owns reusable component behavior, not an App's event loop, key map,
 commands, or surrounding chrome. Hosted helpers elsewhere in the table are
@@ -158,6 +206,8 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
 | Page semantic projection | Closed Page/List/ListItem/Toggle/Input trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
+| Surface semantic projection | Opaque session/stream reference, sizing, background, and input policy only; Swift/web wrappers inject existing USRF local-GPU presenters and never consume frames |
+| CanvasPage semantic projection | Closed Surface slot plus Button actions; scene/input stays on USRF while toolbar interaction stays on `unpeel.ui` |
 
 The hosted vocabulary is deliberately small and opinionated rather than a
 portable encoding of every possible Ratatui widget:

@@ -5,7 +5,8 @@
 //! publish semantic state to SwiftUI or web; disabling default features removes
 //! all socket, authentication, persistence-envelope, and UI protocol code.
 //! Markdown editing and terminal Media decoding/rendering are separate opt-in
-//! features, so ordinary Apps pay only for the components they use.
+//! features. Dynamic Surface embedding is separately default-off, so ordinary
+//! Apps never pull `unpeel-surface` or wgpu.
 
 #![deny(unsafe_code)]
 
@@ -34,6 +35,8 @@ mod path;
 mod process_security;
 mod scrollbar;
 mod selectable;
+#[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
+mod surface;
 mod theme;
 #[cfg(feature = "ui-bridge")]
 mod ui;
@@ -51,10 +54,11 @@ pub use agent::{
 };
 pub use click::{DEFAULT_DOUBLE_CLICK_INTERVAL, DoubleClickTracker};
 pub use components::{
-    ComponentValidationError, INPUT_COMPONENT_CAPABILITY, Input, LIST_COMPONENT_CAPABILITY,
-    LIST_ITEM_ACTIVATE_CAPABILITY, LIST_ITEM_COMPONENT_CAPABILITY, LIST_ITEM_METADATA_CAPABILITY,
-    List, ListItem, ListItemSlot, PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page,
-    PageBodySlot, PageHeaderSlot, PageTheme, PageWidget, TOGGLE_COMPONENT_CAPABILITY, Toggle,
+    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, ComponentValidationError,
+    INPUT_COMPONENT_CAPABILITY, Input, LIST_COMPONENT_CAPABILITY, LIST_ITEM_ACTIVATE_CAPABILITY,
+    LIST_ITEM_COMPONENT_CAPABILITY, LIST_ITEM_METADATA_CAPABILITY, List, ListItem, ListItemSlot,
+    PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page, PageBodySlot, PageHeaderSlot,
+    PageLayout, PageTheme, PageWidget, TOGGLE_COMPONENT_CAPABILITY, Toggle,
 };
 pub use context::{
     AppContext, AppMode, ProjectContext, UnpeelUser, WorkspaceContext, WorktreeContext,
@@ -94,6 +98,15 @@ pub use navigator::Navigator;
 pub use path::display_path_from_root;
 pub use scrollbar::VerticalScrollbar;
 pub use selectable::SelectableRow;
+#[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
+pub use surface::{
+    CANVAS_PAGE_COMPONENT_CAPABILITY, CanvasControl, CanvasPage, CanvasPageLayout, CanvasPageTheme,
+    CanvasPageWidget, CanvasSurface, SURFACE_COMPONENT_CAPABILITY, SurfaceBackground,
+    SurfaceCellSize, SurfaceInputPolicy, SurfacePointSize, SurfaceReference, SurfaceSpec,
+    SurfaceSpecError, SurfaceViewportSize,
+};
+#[cfg(feature = "surface-embed")]
+pub use surface::{Surface, SurfaceFrame, SurfaceView};
 pub use theme::{
     APP_ACCENT_ENV, ColorScheme, KitTheme, SELECTABLE_LEFT_PADDING, ThemeMonitor, hosted_accent,
     hosted_accent_for_scheme,
@@ -124,4 +137,8 @@ pub use ui_state::{
     UI_STATE_FILENAME, UI_STATE_FORMAT, UI_STATE_FORMAT_VERSION, UiSavedState, UiStateError,
     UiStateStore,
 };
+/// Upstream scene/runtime API used by the optional Surface embed. App Kit does
+/// not reinterpret USRF messages or own the GPU presenter.
+#[cfg(feature = "surface-embed")]
+pub use unpeel_surface as surface_runtime;
 pub use widgets::{DragSource, DraggablePath};

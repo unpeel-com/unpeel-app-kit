@@ -4,18 +4,27 @@ This macOS 14+ SwiftUI executable is a self-contained mini-host for App Kit.
 It does not install, import, or launch Unpeel. Run it from the repository root:
 
 ```sh
-swift run --package-path swift/Examples/KitchenSink
+swift/Examples/KitchenSink/run-app.sh
 ```
 
-The bare SwiftPM executable promotes itself from macOS's default
-`BackgroundOnly` classification to a regular foreground application before
-the window opens. This is required for its SwiftTerm and native component
-views to own keyboard focus instead of the terminal that launched the rig.
+The launcher builds the SwiftPM executable, wraps it in a generated ad-hoc
+signed `.app`, and opens a new foreground instance with a stable bundle
+identity. The generated app stays under `.build` and is replaceable. You can
+still use `swift run --package-path swift/Examples/KitchenSink`; the executable
+also promotes itself from macOS's default `BackgroundOnly` classification.
+Either path lets libghostty, native SwiftUI, and embedded web views own keyboard
+focus instead of the terminal that launched the rig.
 
-The first launch fetches SwiftTerm 1.19.0 and builds the repository's Todo,
-Markdown, and Media examples into `target/kitchen-sink`. Each example then
-runs as the direct child of a real SwiftTerm PTY in a private, short-lived
-`/tmp/upkit-…` session directory.
+The first launch fetches `libghostty-spm` 1.5.0 and builds the repository's
+Todo, Markdown, Media, Surface Planets, and Canvas + Controls examples into
+`target/kitchen-sink`. The Surface examples are added to the session list when their sibling guest artifact
+exists. Its native and web presenters are enabled when the sibling
+`UnpeelSurfaceKit` XCFramework and `web/pkg` artifacts also exist. Each example
+then runs as the direct child of a real Ghostty exec PTY in a private,
+short-lived `/tmp/upkit-…` session directory. GhosttyTerminal owns the grid,
+selection, clipboard, keyboard/IME input, scrollback, Metal presentation, and
+child-process lifetime. An occluded parking window keeps a hidden surface
+attached and draining its PTY without spending work on frame presentation.
 
 For each session the mini-host:
 
@@ -25,8 +34,12 @@ For each session the mini-host:
 - retains the signing key and mints short-lived, route-bound participant
   tokens with `UIParticipantTokenIssuer`;
 - attaches `UIUnixSessionClient` to the same process shown in the terminal;
-- switches among Terminal, Native, and Split lifecycle states so the Rust
-  App's `UiBridge::should_render_terminal()` path is exercised; and
+- switches among Terminal, Native, Web, and three-way Split lifecycle states
+  so the Rust App's `UiBridge::should_render_terminal()` path is exercised;
+- renders the same projection with SwiftUI and the repository's real DOM
+  components in a credential-free `WKWebView` boundary;
+- shows a live, expandable component tree with ids, named slots, actions,
+  values, delivery type, and revision beside every presentation; and
 - keeps the session directory when the child is killed, so Restart proves
   state restore while producing a new `appInstanceId`.
 
@@ -36,25 +49,69 @@ grants, invoke a semantic action as that agent, inspect presence and final
 acks, and distinguish raw snapshots from server deltas. The participant's
 personalized title/alt text also proves `publish_to` isolation.
 
-For the Markdown session, click either pane before typing. The terminal PTY
-supports editor-owned drag, word, and line selection; the native pane uses
-`NSTextView` selection. Type `/` on an empty line for the shared block menu and
-use Backspace at a Markdown marker to turn the block back into plain text.
-The mini-host mirrors Markdown gestures into SwiftTerm selection while still
-reporting them to Ratatui, so the same drag or double-click is both an editor
-selection and a native terminal selection. Command-C copies it normally; the
-synchronized semantic selection remains the fallback when screen redraws make
-SwiftTerm drop its range. Hold Shift while dragging to select raw scrollback
-without changing the editor selection.
-Native typing is optimistic and coalesced before it enters the semantic
-revision stream, which keeps rapid input responsive without generating stale
-same-revision events.
+For the Todo session, terminal row clicks and input selection use the public
+`Page.layout` / `InputField` hit-test geometry, while native and web controls
+emit the same typed actions. For Markdown, click a presentation before typing.
+The Ratatui editor owns drag, double-click word, triple-click line, and
+multi-line semantic selection; the native pane uses `NSTextView`, and the web
+pane uses the App Kit `<textarea>` renderer. Type `/` on an empty line for the
+shared block menu and use Backspace at a Markdown marker to turn the block
+back into plain text. Text, selection, presentation, and dirty-state changes
+all enter the same revision stream. Native and web typing is optimistic and
+coalesced before it enters that stream, keeping rapid input responsive without
+generating stale same-revision events.
 
-`TerminalEngineController` is the only SwiftTerm-specific boundary. Product
-Hosts can replace that small wrapper with GhosttyKit without changing session,
-token, renderer, or harness logic.
+Surface Planets and Canvas + Controls test the complete three-presenter
+composition without Unpeel. The latter overlays the same closed Button slot in
+Ratatui, SwiftUI, and DOM while the planet scene stays on Surface/USRF.
+Build the sibling guest, Apple library, and browser presenter before launching
+Kitchen Sink:
+
+```sh
+cargo build --release --manifest-path ../unpeel-surface/Cargo.toml \
+  -p surface-planets-example --target wasm32-unknown-unknown
+../unpeel-surface/scripts/build-xcframework.sh
+(cd ../unpeel-surface && wasm-pack build web --target web --release)
+```
+
+The mini-host creates `surface.sock` beside `ui.sock`, injects the fixed logical
+viewport and `SURFACE_TERMINAL_PROJECTION=retained-only` into the app process,
+retains immutable resources plus the latest scene, and fans the original USRF
+packets to two local CAMetalLayer presenters (terminal composition and native
+component) and the WebGPU presenter. Pointer and focused key input returns over
+USRF. Ghostty remains responsible for the PTY and overlays default-background
+terminal cells on the Host's local Surface layer. The producer does not create
+a second wgpu/Kitty projection. No presenter receives rasterized frames and the
+mini-host never reads back a GPU buffer. Restarting the producer resets native
+decoder generations while keeping the broker route alive.
+
+If those optional sibling artifacts are absent, Kitchen Sink does not
+advertise the `surface` capability and the complete Ratatui/terminal view is
+used. This is capability fallback, never frame emulation.
+
+Set `UNPEEL_KITCHEN_SINK_SESSION=surface` when invoking `run-app.sh` to select
+the Surface session immediately for smoke testing; the launcher explicitly
+forwards that one test-harness variable through Launch Services.
+Use `UNPEEL_KITCHEN_SINK_SESSION=canvas` to open the semantic-controls overlay
+session instead.
+
+`TerminalEngineController` is the only libghostty-specific boundary. It uses
+the same GhosttyTerminal architecture as the product Host while keeping this
+mini-host standalone. `WebComponentPane` is likewise a small WKWebView bridge:
+participant credentials never enter JavaScript; snapshots go in and typed
+`UIAction` values come out.
+
+The web bundle is checked in so SwiftPM does not require Bun at runtime. After
+editing `web/src`, regenerate and type-check it with:
+
+```sh
+cd web
+bun run build:kitchen-sink
+bun run check
+bun test
+```
 
 This package depends on the sibling `UnpeelAppKitUI` library, but is a separate
 SwiftPM package and is never a dependency of that library. Its workflow is
 manual-only, so ordinary Rust and renderer CI do not fetch or compile
-SwiftTerm.
+libghostty or WebKit.

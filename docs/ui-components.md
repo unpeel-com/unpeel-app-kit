@@ -19,7 +19,8 @@ equally inert. Todo constructs Page, List, ListItem, Toggle, and Input values
 without passing a bridge into any component API.
 
 On macOS, the independent Kitchen Sink package exercises that same binary and
-the Markdown and Media examples through real PTYs and the native renderer,
+the Markdown and Media examples through real libghostty PTYs, the native
+SwiftUI renderer, and the actual TypeScript DOM renderers inside `WKWebView`,
 without Unpeel installed:
 
 ```sh
@@ -30,7 +31,9 @@ It is a test-only mini-host, not another workspace server. It reproduces the
 two real Host touchpoints locally—spawn-time endpoint injection and scoped
 participant-token minting—then exposes App restart, renderer resume, lifecycle
 visibility, multi-participant grants/presence, targeted projections, acks, and
-snapshot-versus-delta delivery as interactive harness controls. The executable
+snapshot-versus-delta delivery as interactive harness controls. Its live
+component-tree inspector exposes ids, constrained slots, actions, values, and
+the current revision independently of the chosen presentation. The executable
 is a separate SwiftPM package that depends on `UnpeelAppKitUI`; the renderer
 library does not depend on the harness.
 
@@ -66,6 +69,7 @@ features = ["media"]
 | `default-features = false` | Core Ratatui components and standalone-safe helpers; no socket or UI protocol modules |
 | `markdown-text-area` | Adds the Ratatui `MarkdownEditor` / `MarkdownTextArea` and optional `MarkdownEditorInteraction` controller |
 | `media` | Adds static image decoding and Ratatui rendering through Kitty, iTerm2, Sixel, or Unicode half-blocks |
+| `surface-embed` | Adds the optional unpeel-surface runtime plus Surface/CanvasPage Ratatui presentation; normal builds pull no wgpu |
 | `ui-bridge` (default) | Adds the optional protocol, socket, scoped-token, and state-envelope APIs |
 | `markdown-text-area` + `ui-bridge` | Also adds the Markdown semantic projection/event adapter |
 | `media` + `ui-bridge` | Uses the same Media specification for the standalone TUI and hosted semantic projection |
@@ -83,7 +87,8 @@ parameters or prerequisites for terminal input and rendering.
 ## Optional hosted presentation layer
 
 When Unpeel hosts the App, it may opt into a component-first semantic model—
-`MarkdownEditor`, static `Media`, Page, List, ListItem, Toggle, Input, and other
+`MarkdownEditor`, static `Media`, Page, List, ListItem, Toggle, Input, Button,
+CanvasPage, and other
 deliberate primitives—not a serialization of terminal cells or a
 portable clone of every Ratatui widget. The Rust terminal process remains the
 App and owns the model, reducer, validation, persistence, and commands.
@@ -617,13 +622,13 @@ animation state. If an animated raster format reaches the terminal decoder,
 only its first decoded frame is rendered; animation support for native/web is
 a future component version, not part of this contract.
 
-## Surface embed plan (design only)
+## Surface v1 embed
 
-Surface is App Kit's planned canvas embed, not another component-rendering
-engine. The Media component and canonical Todo App are now landed; this
-section records the integration boundary only. It does not add a
-`UiComponent::Surface` variant, Cargo dependency, protocol fixture, or
-renderer adapter yet.
+Surface is App Kit's canvas embed, not another component-rendering engine.
+`UiComponent::Surface`, the shared fixtures, the Swift/web delegation wrappers,
+and the default-off `surface-embed` Cargo integration are landed. The
+`surface_planets` example loads unpeel-surface's existing planet WASM guest;
+App Kit does not copy its scene logic or rendering path.
 
 The design follows the working `unpeel-surface` runtime rather than copying
 it. Its `host/src/ratatui.rs` already owns `SurfaceLayer`, `SurfaceView`, the
@@ -635,7 +640,7 @@ and reverse event/resize packets. On Apple,
 `CAMetalLayer`; on web, `web/src/remote.rs` already combines `SceneDecoder`
 with the shared WebGPU renderer and emits normalized Surface input.
 
-The planned leaf component has a deliberately small closed specification:
+The leaf component has a deliberately small closed specification:
 
 - `reference { sessionId, streamId }` contains opaque, Host-resolved
   identifiers only. It never contains a Unix socket path, URL, credential,
@@ -656,11 +661,35 @@ The planned leaf component has a deliberately small closed specification:
   an invented canvas text protocol.
 
 `Surface` has no arbitrary children, component slots, semantic actions, or
-scene-shaped JSON. It may appear only as a root or in a future named slot whose
-container schema explicitly admits a Surface. The effective input permission
+scene-shaped JSON. It may appear only as a root or in `CanvasPage.surface`, the
+explicitly named slot whose schema admits exactly one Surface. The effective input permission
 is the intersection of `inputPolicy` and the attached participant's existing
 session grants; referencing a stream never grants permission to view or drive
 it.
+
+### CanvasPage + Button overlay
+
+`CanvasPage` is the first closed composition around Surface. It contains
+exactly one named `surface` slot and a bounded `controls` slot (32 entries)
+whose v1 vocabulary accepts only `Button`. A Button has a stable id, label,
+one action, and a closed `default`/`primary`/`destructive` role. There is no
+generic child array, z-index, flexbox, coordinate, or arbitrary style map.
+
+The overlay placement is part of the component contract: a toolbar across the
+top of the canvas. Ratatui paints opaque toolbar cells over the local Surface
+layer and exposes the same button rectangles for mouse hit-testing; SwiftUI
+uses `CanvasPageView` with native Buttons over its injected Metal presenter;
+web uses `CanvasPageRenderer` with an accessible `role=toolbar` over WebGPU.
+Unknown control kinds trigger the normal whole-pane terminal fallback instead
+of partially rendering a misleading canvas.
+
+The `surface_canvas` example is fully standalone with only the
+`surface-embed` feature, and optionally publishes the identical CanvasPage
+tree when `ui-bridge` is enabled. Button actions are authenticated semantic
+events on `unpeel.ui`; pointer/key input inside the remaining canvas rectangle
+is USRF. The example maps Overview, Previous, Next, and Select Buttons to the
+existing planet guest without putting a scene command or rendered frame in
+semantic JSON.
 
 ### Local-GPU invariant: scenes, never frames
 
@@ -696,9 +725,9 @@ Surface implementation, Host adapter, journal, relay, and reconnect path.
 
 ### Renderer integration
 
-- **Terminal:** a future, default-off `surface-embed` Cargo feature adds an
-  optional `unpeel-surface` dependency. App authors bind the opaque reference
-  to their App-owned `SurfaceLayer`; App Kit reserves the Ratatui cell rect,
+- **Terminal:** the default-off `surface-embed` Cargo feature adds the optional
+  `unpeel-surface` dependency. App authors bind the opaque reference to the
+  App-owned `Surface` adapter/`SurfaceLayer`; App Kit reserves the Ratatui cell rect,
   renders `SurfaceView` there, and delegates drawing, presentation, clearing,
   resizing, and coordinate conversion. Default and ordinary pure-TUI builds
   continue to pull neither `unpeel-surface` nor wgpu. The current
@@ -706,24 +735,40 @@ Surface implementation, Host adapter, journal, relay, and reconnect path.
   require a small origin/rect API in `unpeel-surface`; App Kit must consume
   that API rather than reaching into `TerminalPresenter` or recreating its
   Kitty protocol.
-- **Swift:** wrap Surface's transport-free `RemoteSurfacePresenterView` in the
-  component's allocated point-size box and feed it USRF chunks from the
-  existing authenticated Host route. The existing UIKit/CAMetalLayer
-  presenter is the reference implementation; a macOS `NSView` adapter should
-  remain in `unpeel-surface`, not be rebuilt in App Kit.
-- **Web:** factor or wrap the existing `web/src/remote.rs`
-  `SceneDecoder`/WebGPU presenter around an allocated canvas. The App Kit
-  wrapper supplies Host-routed chunks directly; it must not use the
+- **Swift:** `SurfaceComponentView` allocates the component's point-size box
+  and accepts an injected presenter view. The Host wraps Surface's
+  transport-free `RemoteSurfacePresenterView` and feeds it USRF chunks from
+  the existing authenticated Host route. `unpeel-surface` supplies both the
+  UIKit and macOS AppKit/CAMetalLayer implementations; App Kit only allocates
+  the semantic box and injects the presenter. A fixed logical viewport mode
+  lets several differently sized local views consume one retained stream while
+  mapping input back into the same scene coordinates.
+- **Web:** `SurfaceRenderer` allocates the box and requires a
+  `SurfacePresenterAdapter`; that adapter wraps the existing
+  `web/src/remote.rs` `SceneDecoder`/WebGPU presenter around its canvas. The
+  Host supplies routed chunks directly; it must not use the
   `surface-connect` development HTTP endpoint or implement another USRF
-  decoder.
+  decoder. Kitchen Sink's self-contained test adapter exposes a private,
+  tokenized loopback HTTP stream solely to drive that existing presenter
+  without Unpeel installed; production Hosts use their authenticated routes.
 
-The connected Swift and web presenters currently normalize pointer, touch,
-scroll, and zoom input, while their fixture shells keep terminal keyboard
-input separate. Before `pointerAndKeyboard` lands, `unpeel-surface` should
-expose focused key/action packet forwarding through those presenter adapters;
-App Kit must call that API rather than inventing a parallel key encoding. The
-presenters' current fixed background defaults likewise need an upstream
-configuration seam for the component's background policy.
+When a Host supplies the connected presenter used for terminal composition,
+it also launches the producer with Surface's explicit
+`SURFACE_TERMINAL_PROJECTION=retained-only` policy. The producer continues to
+run the guest and publish retained scenes, but does not initialize a local GPU,
+create mmap frames, or emit Kitty graphics into its PTY. A standalone launch
+does not receive that variable and keeps Surface's normal local Kitty path.
+
+The connected Swift presenters normalize pointer/touch, drag, scroll, zoom,
+and focused keyboard/action input. The web package exposes
+`sendRemoteKey(kind)`, so component adapters ask unpeel-surface to frame,
+sequence, and send focused key actions instead of constructing USRF packets in
+App Kit. A colocated Ghostty terminal keeps ordinary terminal keyboard input
+separate. UIKit and AppKit presenters expose a local-only
+`compositingBackgroundColor`, and WebGPU exposes `setRemoteBackground`; App Kit
+passes the semantic component's closed background policy into both local GPU
+compositors. The policy never enters USRF, but alpha resolves against the same
+color in terminal, Metal, and WebGPU presentation.
 
 Pointer and supported key events inside the allocated rectangle travel back
 as USRF input after the Surface adapter maps them into logical coordinates.
@@ -806,7 +851,6 @@ The next useful vocabulary is intentionally conventional:
 
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
-| `Surface` (design only) | optional `unpeel-surface::ratatui::SurfaceLayer` behind the planned default-off `surface-embed` feature | reference-only canvas embed: Host-resolved session/stream id, cells/points sizing, background, and input policy; retained scenes/resources go to local-GPU USRF presenters, never rendered frames or UI JSON |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
 | `Explorer` | existing `Explorer` | hierarchical file navigation and drops |

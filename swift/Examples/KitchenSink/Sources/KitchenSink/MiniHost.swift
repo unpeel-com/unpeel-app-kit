@@ -6,6 +6,8 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
     case todo
     case markdown
     case media
+    case surface
+    case canvas
 
     var id: String { rawValue }
 
@@ -14,6 +16,8 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
         case .todo: "Todo"
         case .markdown: "Markdown"
         case .media: "Media"
+        case .surface: "Surface Planets"
+        case .canvas: "Canvas + Controls"
         }
     }
 
@@ -22,13 +26,20 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
         case .todo: "checklist"
         case .markdown: "doc.richtext"
         case .media: "photo"
+        case .surface: "globe.americas.fill"
+        case .canvas: "rectangle.on.rectangle.angled"
         }
+    }
+
+    var usesSurface: Bool {
+        self == .surface || self == .canvas
     }
 }
 
 enum PaneMode: String, CaseIterable, Identifiable {
     case terminal
     case native
+    case web
     case split
 
     var id: String { rawValue }
@@ -36,7 +47,7 @@ enum PaneMode: String, CaseIterable, Identifiable {
     var rendererState: UIRendererState {
         switch self {
         case .terminal: .terminal
-        case .native: .component
+        case .native, .web: .component
         case .split: UIRendererState(rendererVisible: true, terminalVisible: true)
         }
     }
@@ -65,12 +76,15 @@ enum ChildProcessState: Equatable {
 struct BuiltExample: Sendable {
     let kind: DemoKind
     let executable: String
+    let environment: [String: String]
 }
 
 @MainActor
 final class MiniHost: ObservableObject {
     @Published private(set) var sessions: [HostedAppSession] = []
-    @Published var selectedSessionID: String?
+    @Published var selectedSessionID: String? {
+        didSet { updatePresentedSessions() }
+    }
     @Published private(set) var buildMessage = "Building Rust examples…"
     @Published private(set) var buildError: String?
 
@@ -93,7 +107,8 @@ final class MiniHost: ObservableObject {
                 for example in examples {
                     prepared.append(try HostedAppSession(
                         kind: example.kind,
-                        executable: example.executable
+                        executable: example.executable,
+                        extraEnvironment: example.environment
                     ))
                 }
             } catch {
@@ -101,11 +116,18 @@ final class MiniHost: ObservableObject {
                 throw error
             }
             sessions = prepared
-            selectedSessionID = sessions.first?.id
+            let requestedDemo = ProcessInfo.processInfo.environment[
+                "UNPEEL_KITCHEN_SINK_SESSION"
+            ]
+            selectedSessionID = sessions.first(where: {
+                $0.kind.rawValue == requestedDemo
+            })?.id ?? sessions.first?.id
             buildMessage = "Ready"
         } catch {
             buildError = error.localizedDescription
             buildMessage = "Build failed"
+            let diagnostic = "KitchenSink mini-host: \(error.localizedDescription)\n"
+            try? FileHandle.standardError.write(contentsOf: Data(diagnostic.utf8))
         }
     }
 
@@ -145,10 +167,12 @@ final class MiniHost: ObservableObject {
             "cargo", "build", "--quiet",
             "--manifest-path", "\(repository)/Cargo.toml",
             "--target-dir", targetDirectory.path,
-            "--features", "markdown-text-area,media",
+            "--features", "markdown-text-area,media,surface-embed",
             "--example", "todo",
             "--example", "markdown",
             "--example", "media",
+            "--example", "surface_planets",
+            "--example", "surface_canvas",
         ]
         var environment = ProcessInfo.processInfo.environment
         environment.removeValue(forKey: "UNPEEL_UI_SOCKET")
@@ -163,18 +187,48 @@ final class MiniHost: ObservableObject {
             let message = String(data: output, encoding: .utf8) ?? "cargo build failed"
             throw MiniHostError.buildFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return DemoKind.allCases.map { kind in
+        var examples: [(DemoKind, String, [String: String])] = [
+            (.todo, "todo", [:]),
+            (.markdown, "markdown", [:]),
+            (.media, "media", [:]),
+        ]
+        if let guest = planetGuestPath(repository: repository) {
+            let environment = ["UNPEEL_SURFACE_PLANETS_WASM": guest]
+            examples.append((.surface, "surface_planets", environment))
+            examples.append((.canvas, "surface_canvas", environment))
+        }
+        return examples.map { kind, executableName, extraEnvironment in
             BuiltExample(
                 kind: kind,
                 executable: targetDirectory
-                    .appendingPathComponent("debug/examples/\(kind.rawValue)")
-                    .path
+                    .appendingPathComponent("debug/examples/\(executableName)")
+                    .path,
+                environment: extraEnvironment
             )
         }
     }
 
+    nonisolated private static func planetGuestPath(repository: String) -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        let sibling = URL(fileURLWithPath: repository, isDirectory: true)
+            .deletingLastPathComponent()
+            .appendingPathComponent(
+                "unpeel-surface/target/wasm32-unknown-unknown/release/"
+                    + "surface_planets_example.wasm"
+            ).path
+        return [environment["UNPEEL_SURFACE_PLANETS_WASM"], sibling]
+            .compactMap { $0 }
+            .first { FileManager.default.fileExists(atPath: $0) }
+    }
+
     func shutdown() {
         sessions.forEach { $0.shutdown() }
+    }
+
+    private func updatePresentedSessions() {
+        for session in sessions {
+            session.setPresented(session.id == selectedSessionID)
+        }
     }
 }
 
@@ -200,9 +254,10 @@ final class HostedAppSession: ObservableObject, Identifiable {
     let socketPath: String
     let signingKey: String
     let terminalEngine: TerminalEngineController
+    let surfaceBroker: SurfaceMiniBroker?
 
     @Published var paneMode: PaneMode = .split {
-        didSet { primaryClient?.setRendererState(paneMode.rendererState) }
+        didSet { updateRendererState() }
     }
     @Published private(set) var processState: ChildProcessState = .starting
     @Published private(set) var connectionState: UIUnixSessionClient.ConnectionState = .stopped
@@ -223,6 +278,7 @@ final class HostedAppSession: ObservableObject, Identifiable {
     @Published private(set) var agentLastAck: UIAck?
 
     private let executable: String
+    private let extraEnvironment: [String: String]
     private let issuer: UIParticipantTokenIssuer
     private let primaryClientID: String
     private let primaryRendererID: String
@@ -230,12 +286,14 @@ final class HostedAppSession: ObservableObject, Identifiable {
     private var primaryClient: UIUnixSessionClient?
     private var agentClient: UIUnixSessionClient?
     private var primaryClientStarted = false
+    private var isPresented = false
     private var restartAfterTermination = false
     private var agentSequence = 0
 
-    init(kind: DemoKind, executable: String) throws {
+    init(kind: DemoKind, executable: String, extraEnvironment: [String: String] = [:]) throws {
         self.kind = kind
         self.executable = executable
+        self.extraEnvironment = extraEnvironment
         let suffix = UUID().uuidString.lowercased().prefix(8)
         id = "\(kind.rawValue)-\(suffix)"
         sessionDirectory = "/tmp/upkit-\(suffix)-\(kind.rawValue)"
@@ -247,6 +305,9 @@ final class HostedAppSession: ObservableObject, Identifiable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        surfaceBroker = kind.usesSurface
+            ? try? SurfaceMiniBroker(sessionDirectory: sessionDirectory)
+            : nil
         issuer = try UIParticipantTokenIssuer(signingKey: signingKey, appSessionID: id)
         primaryClientID = "kitchen-human-\(suffix)"
         primaryRendererID = "kitchen-native-\(suffix)"
@@ -290,23 +351,10 @@ final class HostedAppSession: ObservableObject, Identifiable {
         case let .page(page): page.title
         case let .markdownEditor(editor): editor.title ?? "Markdown"
         case let .media(media): media.alt
+        case let .surface(surface): "Surface: \(surface.reference.streamID)"
+        case let .canvasPage(page): page.title
         case let .unsupported(kind): "Unsupported: \(kind)"
         }
-    }
-
-    /// Text selected by the terminal application rather than by the terminal
-    /// emulator. This lets the engine wrapper preserve standard macOS Copy
-    /// while Ratatui owns mouse selection through terminal mouse reporting.
-    var terminalSelectionText: String? {
-        guard let snapshot,
-              case let .markdownEditor(editor) = snapshot.root.component,
-              let anchor = Self.utf16Offset(for: editor.selection.anchor, in: editor.text),
-              let head = Self.utf16Offset(for: editor.selection.head, in: editor.text),
-              anchor != head else {
-            return nil
-        }
-        let range = NSRange(location: min(anchor, head), length: abs(head - anchor))
-        return NSString(string: editor.text).substring(with: range)
     }
 
     func killProcess() {
@@ -321,6 +369,7 @@ final class HostedAppSession: ObservableObject, Identifiable {
         agentClient?.stop()
         primaryClient?.stop()
         terminalEngine.terminate()
+        surfaceBroker?.stop()
     }
 
     func restartProcess() {
@@ -342,7 +391,13 @@ final class HostedAppSession: ObservableObject, Identifiable {
     func reconnectRenderer() {
         rendererEnabled = true
         primaryClientStarted = true
-        primaryClient?.start(rendererState: paneMode.rendererState)
+        primaryClient?.start(rendererState: effectiveRendererState)
+    }
+
+    func setPresented(_ presented: Bool) {
+        guard isPresented != presented else { return }
+        isPresented = presented
+        updateRendererState()
     }
 
     func attachAgent() {
@@ -373,7 +428,8 @@ final class HostedAppSession: ObservableObject, Identifiable {
             },
             clientID: clientID,
             renderer: UIRendererMetadata(id: rendererID, kind: "agent"),
-            viewID: "main"
+            viewID: "main",
+            supportedComponentCapabilities: componentCapabilities
         )
         let client = UIUnixSessionClient(
             configuration: configuration,
@@ -405,6 +461,16 @@ final class HostedAppSession: ObservableObject, Identifiable {
         guard let snapshot = agentSnapshot else { return }
         let action: UIAction?
         switch snapshot.root.component {
+        case let .canvasPage(page):
+            guard let button = page.controls.compactMap({ control -> UIButtonSpec? in
+                guard case let .button(button) = control else { return nil }
+                return button
+            }).first else { return }
+            action = UIAction(
+                nodeID: button.id,
+                action: button.action,
+                kind: .activate
+            )
         case let .page(page):
             guard case let .list(list) = page.body,
                   let item = list.items.first,
@@ -447,6 +513,8 @@ final class HostedAppSession: ObservableObject, Identifiable {
                 action: activate,
                 kind: .activate
             )
+        case .surface:
+            action = nil
         case .unsupported:
             action = nil
         }
@@ -476,7 +544,8 @@ final class HostedAppSession: ObservableObject, Identifiable {
             },
             clientID: clientID,
             renderer: UIRendererMetadata(id: rendererID, kind: "swiftUI"),
-            viewID: "main"
+            viewID: "main",
+            supportedComponentCapabilities: componentCapabilities
         )
         primaryClient = UIUnixSessionClient(
             configuration: configuration,
@@ -499,9 +568,11 @@ final class HostedAppSession: ObservableObject, Identifiable {
 
     private func startProcess() {
         try? FileManager.default.removeItem(atPath: socketPath)
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "UNPEEL_UI_SOCKET")
-        environment.removeValue(forKey: "UNPEEL_UI_TOKEN")
+        // TerminalSurfaceOptions.envVars are additions to libghostty's normal
+        // inherited environment. Keep this list session-scoped: copying the
+        // host's entire environment can duplicate variables Ghostty already
+        // supplied and needlessly forwards host-only credentials.
+        var environment: [String: String] = [:]
         environment["UNPEEL_UI_SOCKET"] = socketPath
         environment["UNPEEL_UI_TOKEN"] = signingKey
         environment["UNPEEL_SESSION_ID"] = id
@@ -509,6 +580,23 @@ final class HostedAppSession: ObservableObject, Identifiable {
         environment["UNPEEL_KITCHEN_SINK"] = "1"
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
+        if let surfaceBroker {
+            environment["UNPEEL_SURFACE_SOCKET"] = surfaceBroker.socketPath
+            environment["UNPEEL_SURFACE_REMOTE_WIDTH"] = String(
+                SurfaceMiniBroker.logicalWidth
+            )
+            environment["UNPEEL_SURFACE_REMOTE_HEIGHT"] = String(
+                SurfaceMiniBroker.logicalHeight
+            )
+            // The producer publishes retained USRF scenes only. The local
+            // terminal, native card, and web card each render those scenes on
+            // their own GPU; the producer must not also create a wgpu/Kitty
+            // projection inside its PTY.
+            environment["SURFACE_TERMINAL_PROJECTION"] = "retained-only"
+        }
+        for (key, value) in extraEnvironment {
+            environment[key] = value
+        }
         processState = .starting
         terminalEngine.start(TerminalLaunch(
             executable: executable,
@@ -526,7 +614,7 @@ final class HostedAppSession: ObservableObject, Identifiable {
                 guard let self, self.rendererEnabled, !self.primaryClientStarted else { return }
                 if FileManager.default.fileExists(atPath: self.socketPath) {
                     self.primaryClientStarted = true
-                    self.primaryClient?.start(rendererState: self.paneMode.rendererState)
+                    self.primaryClient?.start(rendererState: self.effectiveRendererState)
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(50))
@@ -585,31 +673,36 @@ final class HostedAppSession: ObservableObject, Identifiable {
         }
     }
 
-    private static func utf16Offset(for position: UITextPosition, in text: String) -> Int? {
-        guard position.line >= 0, position.utf16Column >= 0 else { return nil }
-        let units = text.utf16
-        var lineStart = units.startIndex
-        for _ in 0..<position.line {
-            guard let newline = units[lineStart...].firstIndex(of: 10) else { return nil }
-            lineStart = units.index(after: newline)
-        }
-        let lineEnd = units[lineStart...].firstIndex(of: 10) ?? units.endIndex
-        guard let target = units.index(
-            lineStart,
-            offsetBy: position.utf16Column,
-            limitedBy: lineEnd
-        ), target <= lineEnd, String.Index(target, within: text) != nil else {
-            return nil
-        }
-        return units.distance(from: units.startIndex, to: target)
-    }
-
     private static func connectionLabel(_ state: UIUnixSessionClient.ConnectionState) -> String {
         switch state {
         case .stopped: "Stopped"
         case .connecting: "Connecting"
         case let .attached(_, resumed): resumed ? "Attached · resumed" : "Attached · snapshot"
         case .waitingToReconnect: "Waiting to reconnect"
+        }
+    }
+
+    private var effectiveRendererState: UIRendererState {
+        isPresented ? paneMode.rendererState : .hidden
+    }
+
+    private func updateRendererState() {
+        primaryClient?.setRendererState(effectiveRendererState)
+    }
+
+    /// Surface is advertised only when this Host has both the private USRF
+    /// broker and local-GPU presenter assets. Otherwise the protocol's normal
+    /// whole-pane terminal fallback remains authoritative.
+    private var componentCapabilities: [String] {
+        if surfaceBroker != nil {
+            return UnpeelUIProtocol.supportedComponentCapabilities
+                + [
+                    UnpeelUIProtocol.surfaceCapability,
+                    UnpeelUIProtocol.canvasPageCapability,
+                ]
+        }
+        return UnpeelUIProtocol.supportedComponentCapabilities.filter {
+            $0 != UnpeelUIProtocol.surfaceCapability
         }
     }
 }

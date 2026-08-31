@@ -12,7 +12,11 @@ export const UI_LIST_ITEM_METADATA_CAPABILITY = "listItemMetadata" as const;
 export const UI_LIST_ITEM_ACTIVATE_CAPABILITY = "listItemActivate" as const;
 export const UI_TOGGLE_CAPABILITY = "toggle" as const;
 export const UI_INPUT_CAPABILITY = "input" as const;
+export const UI_BUTTON_CAPABILITY = "button" as const;
 export const UI_PAGE_BACK_CAPABILITY = "pageBack" as const;
+export const UI_SURFACE_CAPABILITY = "surface" as const;
+export const UI_CANVAS_PAGE_CAPABILITY = "canvasPage" as const;
+/** Built-in renderers that need no Host-injected presenter adapter. */
 export const UI_COMPONENT_CAPABILITIES = [
   UI_MARKDOWN_EDITOR_CAPABILITY,
   UI_MEDIA_CAPABILITY,
@@ -23,6 +27,7 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_LIST_ITEM_ACTIVATE_CAPABILITY,
   UI_TOGGLE_CAPABILITY,
   UI_INPUT_CAPABILITY,
+  UI_BUTTON_CAPABILITY,
   UI_PAGE_BACK_CAPABILITY,
 ] as const;
 export const MAX_INLINE_MEDIA_BYTES = 256 * 1024;
@@ -178,6 +183,74 @@ export interface MediaNode {
   activate?: string;
 }
 
+/** Opaque Host route; never a socket path, URL, credential, or USRF header. */
+export interface SurfaceReference {
+  sessionId: string;
+  streamId: string;
+}
+
+export interface SurfaceCellSize {
+  w?: number;
+  h?: number;
+}
+
+export interface SurfacePointSize {
+  w?: number;
+  h?: number;
+}
+
+export interface SurfaceViewportSize {
+  w: number;
+  h: number;
+}
+
+export type SurfaceBackground =
+  | { kind: "transparent" }
+  | { kind: "solid"; color: string };
+
+export type SurfaceInputPolicy = "none" | "pointer" | "pointerAndKeyboard";
+
+/** Reference-only canvas leaf. Scene/resource bytes stay on USRF. */
+export interface SurfaceNode {
+  id: string;
+  type: "surface";
+  reference: SurfaceReference;
+  cells?: SurfaceCellSize;
+  points?: SurfacePointSize;
+  background?: SurfaceBackground;
+  inputPolicy?: SurfaceInputPolicy;
+}
+
+export type ButtonRole = "default" | "primary" | "destructive";
+
+export interface ButtonSpec {
+  type: "button";
+  id: string;
+  label: string;
+  action: string;
+  role?: ButtonRole;
+}
+
+/** Named, closed Surface slot inside CanvasPage. */
+export interface CanvasSurfaceSpec {
+  id: string;
+  reference: SurfaceReference;
+  cells?: SurfaceCellSize;
+  points?: SurfacePointSize;
+  background?: SurfaceBackground;
+  inputPolicy?: SurfaceInputPolicy;
+}
+
+export type CanvasControl = ButtonSpec | UnsupportedComponentSlot;
+
+export interface CanvasPageNode {
+  id: string;
+  type: "canvasPage";
+  title: string;
+  surface: CanvasSurfaceSpec;
+  controls: CanvasControl[];
+}
+
 export interface ToggleSpec {
   type: "toggle";
   id: string;
@@ -239,7 +312,12 @@ export interface UnsupportedUiNode {
   [field: string]: unknown;
 }
 
-export type UiNode = MarkdownEditorNode | MediaNode | PageNode | UnsupportedUiNode;
+export type UiNode = CanvasPageNode | MarkdownEditorNode | MediaNode | PageNode | SurfaceNode
+  | UnsupportedUiNode;
+
+export function isCanvasPageNode(node: UiNode): node is CanvasPageNode {
+  return node.type === "canvasPage";
+}
 
 export function isMarkdownEditorNode(node: UiNode): node is MarkdownEditorNode {
   return node.type === "markdownEditor";
@@ -251,6 +329,18 @@ export function isMediaNode(node: UiNode): node is MediaNode {
 
 export function isPageNode(node: UiNode): node is PageNode {
   return node.type === "page";
+}
+
+export function isSurfaceNode(node: UiNode): node is SurfaceNode {
+  return node.type === "surface";
+}
+
+export function isButtonControl(control: CanvasControl): control is ButtonSpec {
+  return control.type === "button";
+}
+
+export function canvasSurfaceNode(surface: CanvasSurfaceSpec): SurfaceNode {
+  return { ...surface, type: "surface" };
 }
 
 export function isToggleSlot(slot: ListItemSlot): slot is ToggleSpec {
@@ -283,8 +373,15 @@ export function uiNodeCapability(node: UiNode): string | undefined {
 
 /** All capabilities needed for a known closed tree, or undefined for fallback. */
 export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined {
+  if (isCanvasPageNode(node)) {
+    if (!node.controls.every(isButtonControl)) return undefined;
+    const capabilities: string[] = [UI_CANVAS_PAGE_CAPABILITY, UI_SURFACE_CAPABILITY];
+    if (node.controls.length > 0) capabilities.push(UI_BUTTON_CAPABILITY);
+    return capabilities;
+  }
   if (isMarkdownEditorNode(node)) return [UI_MARKDOWN_EDITOR_CAPABILITY];
   if (isMediaNode(node)) return [UI_MEDIA_CAPABILITY];
+  if (isSurfaceNode(node)) return [UI_SURFACE_CAPABILITY];
   if (!isRenderablePageNode(node)) return undefined;
   const capabilities: string[] = [
     UI_PAGE_CAPABILITY,
@@ -338,6 +435,7 @@ export type UiDeltaOperation =
     source: MediaSource;
     intrinsic: MediaPixelSize;
   }
+  | { op: "surfaceSetReference"; nodeId: string; reference: SurfaceReference }
   | { op: "toggleSetValue"; nodeId: string; value: boolean }
   | { op: "inputSetValue"; nodeId: string; value: string }
   | { op: "listInsertItem"; listId: string; index: number; item: ListItemSpec }
@@ -666,6 +764,18 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       intrinsic: operation.intrinsic,
     };
   }
+  if (operation.op === "surfaceSetReference") {
+    if (isSurfaceNode(root) && root.id === operation.nodeId) {
+      return { ...root, reference: operation.reference };
+    }
+    if (isCanvasPageNode(root) && root.surface.id === operation.nodeId) {
+      return {
+        ...root,
+        surface: { ...root.surface, reference: operation.reference },
+      };
+    }
+    throw new Error("Delta targets an unavailable Surface node");
+  }
   if (operation.op === "toggleSetValue") {
     const page = requireRenderablePage(root);
     let matched = false;
@@ -862,12 +972,20 @@ function validateNode(value: unknown, path: string): void {
   const root = record(value, path);
   requireIdentifier(root.id, `${path}.id`);
   requireIdentifier(root.type, `${path}.type`);
+  if (root.type === "canvasPage") {
+    validateCanvasPageNode(root, path);
+    return;
+  }
   if (root.type === "media") {
     validateMediaNode(root, path);
     return;
   }
   if (root.type === "page") {
     validatePageNode(root, path);
+    return;
+  }
+  if (root.type === "surface") {
+    validateSurfaceNode(root, path);
     return;
   }
   if (root.type !== "markdownEditor") {
@@ -889,6 +1007,38 @@ function validateNode(value: unknown, path: string): void {
     if (root[field] !== undefined) requireString(root[field], `${path}.${field}`, true);
   }
   if (root.actions !== undefined) validateMarkdownActions(root.actions, `${path}.actions`);
+}
+
+function validateCanvasPageNode(root: Record<string, unknown>, path: string): void {
+  requireString(root.title, `${path}.title`, true);
+  if (new TextEncoder().encode(root.title as string).length > 4_096) {
+    throw new Error(`${path}.title must contain at most 4096 bytes`);
+  }
+  const ids = new Set<string>();
+  const register = (value: unknown, valuePath: string): void => {
+    requireIdentifier(value, valuePath);
+    if (ids.has(value as string)) throw new Error(`${valuePath} duplicates a component id`);
+    ids.add(value as string);
+  };
+  const surface = record(root.surface, `${path}.surface`);
+  register(surface.id, `${path}.surface.id`);
+  validateSurfaceNode(surface, `${path}.surface`);
+  if (!Array.isArray(root.controls) || root.controls.length > 32) {
+    throw new Error(`${path}.controls must contain at most 32 entries`);
+  }
+  for (const [index, value] of root.controls.entries()) {
+    const controlPath = `${path}.controls[${index}]`;
+    const control = record(value, controlPath);
+    requireIdentifier(control.type, `${controlPath}.type`);
+    if (control.type !== "button") continue;
+    register(control.id, `${controlPath}.id`);
+    requireString(control.label, `${controlPath}.label`, true);
+    requireIdentifier(control.action, `${controlPath}.action`);
+    if (control.role !== undefined
+      && !["default", "primary", "destructive"].includes(String(control.role))) {
+      throw new Error(`${controlPath}.role is unsupported`);
+    }
+  }
 }
 
 function validatePageNode(root: Record<string, unknown>, path: string): void {
@@ -979,6 +1129,37 @@ function validateMediaNode(root: Record<string, unknown>, path: string): void {
     throw new Error(`${path}.alt must contain at most 16384 bytes`);
   }
   if (root.activate !== undefined) requireIdentifier(root.activate, `${path}.activate`);
+}
+
+function validateSurfaceNode(root: Record<string, unknown>, path: string): void {
+  validateSurfaceReference(root.reference, `${path}.reference`);
+  if (root.cells !== undefined) {
+    validateMediaOptionalSize(root.cells, `${path}.cells`, 65_535);
+  }
+  if (root.points !== undefined) {
+    validateMediaOptionalSize(root.points, `${path}.points`, 4_294_967_295);
+  }
+  if (root.background !== undefined) {
+    const background = record(root.background, `${path}.background`);
+    if (background.kind === "solid") {
+      requireString(background.color, `${path}.background.color`);
+      if (!/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/.test(background.color as string)) {
+        throw new Error(`${path}.background.color must be #RRGGBB or #RRGGBBAA sRGBA`);
+      }
+    } else if (background.kind !== "transparent") {
+      throw new Error(`${path}.background.kind is unsupported`);
+    }
+  }
+  if (root.inputPolicy !== undefined
+    && !["none", "pointer", "pointerAndKeyboard"].includes(String(root.inputPolicy))) {
+    throw new Error(`${path}.inputPolicy is unsupported`);
+  }
+}
+
+function validateSurfaceReference(value: unknown, path: string): void {
+  const reference = record(value, path);
+  requireIdentifier(reference.sessionId, `${path}.sessionId`);
+  requireIdentifier(reference.streamId, `${path}.streamId`);
 }
 
 function validateMediaSource(value: unknown, path: string): void {
@@ -1128,6 +1309,10 @@ function validateDeltaOperation(value: unknown, path: string): void {
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       validateMediaSource(operation.source, `${path}.source`);
       validateMediaPixelSize(operation.intrinsic, `${path}.intrinsic`);
+      return;
+    case "surfaceSetReference":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateSurfaceReference(operation.reference, `${path}.reference`);
       return;
     case "toggleSetValue":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);

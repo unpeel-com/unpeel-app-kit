@@ -3,7 +3,8 @@
 use std::io::{BufReader, Cursor};
 
 use unpeel_app_kit::{
-    ListItemSlot, MediaSource, UiComponent, UiEventValue, UiMessage, read_ui_message,
+    ButtonRole, CanvasControl, ListItemSlot, MediaSource, SurfaceInputPolicy, UiComponent,
+    UiEventKind, UiEventValue, UiMessage, read_ui_message,
 };
 
 const STREAM: &str = include_str!("../protocol/unpeel-ui-v1.ndjson");
@@ -16,7 +17,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 16);
+    assert_eq!(messages.len(), 21);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -133,5 +134,59 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(
         page.list().items[1].activate.as_deref(),
         Some("refresh-usage")
+    );
+
+    let UiMessage::Snapshot(surface_snapshot) = &messages[16] else {
+        panic!("seventeenth fixture must contain the planet Surface");
+    };
+    let UiComponent::Surface(surface) = &surface_snapshot.root.element else {
+        panic!("planet fixture must contain Surface");
+    };
+    assert_eq!(surface.reference.session_id, "terminal-9");
+    assert_eq!(surface.reference.stream_id, "planets");
+    assert_eq!(surface.input_policy, SurfaceInputPolicy::PointerAndKeyboard);
+
+    let UiMessage::Delta(surface_delta) = &messages[17] else {
+        panic!("eighteenth fixture must switch the Surface reference");
+    };
+    let updated = surface_snapshot.applying(surface_delta).unwrap();
+    let UiComponent::Surface(surface) = updated.root.element else {
+        panic!("Surface reference delta must preserve the component kind");
+    };
+    assert_eq!(surface.reference.stream_id, "planets-detail");
+
+    let UiMessage::Snapshot(canvas_snapshot) = &messages[18] else {
+        panic!("nineteenth fixture must contain CanvasPage");
+    };
+    let UiComponent::CanvasPage(canvas) = &canvas_snapshot.root.element else {
+        panic!("canvas fixture must contain CanvasPage");
+    };
+    assert_eq!(canvas.title, "Planet Canvas");
+    assert_eq!(canvas.surface.id, "planet-canvas");
+    assert_eq!(canvas.surface.surface.reference.stream_id, "canvas-planets");
+    assert_eq!(
+        canvas.required_capabilities(),
+        vec!["canvasPage", "surface", "button"]
+    );
+    let CanvasControl::Button(select) = &canvas.controls[2];
+    assert_eq!(select.role, ButtonRole::Primary);
+
+    let UiMessage::Event(canvas_event) = &messages[19] else {
+        panic!("twentieth fixture must activate a Canvas Button");
+    };
+    assert_eq!(canvas_event.action.node_id.as_str(), "canvas-next");
+    assert_eq!(canvas_event.action.kind, UiEventKind::Activate);
+    assert_eq!(canvas_event.action.value, UiEventValue::None);
+
+    let UiMessage::Delta(canvas_delta) = &messages[20] else {
+        panic!("twenty-first fixture must switch the nested Surface reference");
+    };
+    let updated = canvas_snapshot.applying(canvas_delta).unwrap();
+    let UiComponent::CanvasPage(canvas) = updated.root.element else {
+        panic!("nested Surface delta must preserve CanvasPage");
+    };
+    assert_eq!(
+        canvas.surface.surface.reference.stream_id,
+        "canvas-planets-detail"
     );
 }

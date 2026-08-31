@@ -12,6 +12,7 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case markdownSetPlaceholder(nodeID: String, placeholder: String)
     case markdownSetActions(nodeID: String, actions: MarkdownEditorActions)
     case mediaSetSource(nodeID: String, source: MediaSource, intrinsic: MediaPixelSize)
+    case surfaceSetReference(nodeID: String, reference: SurfaceReference)
     case toggleSetValue(nodeID: String, value: Bool)
     case inputSetValue(nodeID: String, value: String)
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
@@ -33,6 +34,7 @@ extension UIDeltaOperation: Codable {
         case actions
         case source
         case intrinsic
+        case reference
         case value
         case listID = "listId"
         case index
@@ -51,6 +53,7 @@ extension UIDeltaOperation: Codable {
         case markdownSetPlaceholder
         case markdownSetActions
         case mediaSetSource
+        case surfaceSetReference
         case toggleSetValue
         case inputSetValue
         case listInsertItem
@@ -110,6 +113,11 @@ extension UIDeltaOperation: Codable {
                 nodeID: try container.decode(String.self, forKey: .nodeID),
                 source: try container.decode(MediaSource.self, forKey: .source),
                 intrinsic: try container.decode(MediaPixelSize.self, forKey: .intrinsic)
+            )
+        case .surfaceSetReference:
+            self = .surfaceSetReference(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                reference: try container.decode(SurfaceReference.self, forKey: .reference)
             )
         case .toggleSetValue:
             self = .toggleSetValue(
@@ -181,6 +189,10 @@ extension UIDeltaOperation: Codable {
             try container.encode(nodeID, forKey: .nodeID)
             try container.encode(source, forKey: .source)
             try container.encode(intrinsic, forKey: .intrinsic)
+        case let .surfaceSetReference(nodeID, reference):
+            try container.encode(Operation.surfaceSetReference, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(reference, forKey: .reference)
         case let .toggleSetValue(nodeID, value):
             try container.encode(Operation.toggleSetValue, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
@@ -350,6 +362,22 @@ private extension UINode {
                 intrinsic: intrinsic
             )
             return UINode(id: id, component: .media(media))
+        case let .surfaceSetReference(nodeID, reference):
+            switch component {
+            case let .surface(surface) where id == nodeID:
+                return UINode(id: id, component: .surface(surface.copying(
+                    reference: reference
+                )))
+            case let .canvasPage(page) where page.surface.id == nodeID:
+                let nested = page.surface.surface.copying(reference: reference)
+                return UINode(id: id, component: .canvasPage(CanvasPageSpec(
+                    title: page.title,
+                    surface: UICanvasSurfaceSpec(id: page.surface.id, surface: nested),
+                    controls: page.controls
+                )))
+            default:
+                throw UIDeltaApplicationError("Delta targets an unavailable Surface node")
+            }
         case let .toggleSetValue(nodeID, value):
             var page = try page()
             guard case var .list(list) = page.body else {
@@ -495,6 +523,18 @@ private extension MediaSpec {
             fit: fit,
             alt: alt,
             activate: activate
+        )
+    }
+}
+
+private extension SurfaceSpec {
+    func copying(reference: SurfaceReference) -> Self {
+        Self(
+            reference: reference,
+            cells: cells,
+            points: points,
+            background: background,
+            inputPolicy: inputPolicy
         )
     }
 }

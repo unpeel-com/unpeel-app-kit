@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "scripts": {
+    "build:kitchen-sink": "bun build src/kitchen-sink.ts --target browser --format=iife --minify --outfile ../swift/Examples/KitchenSink/Sources/KitchenSink/Resources/Web/app.js",
     "check": "tsc -p tsconfig.json",
     "test": "bun test"
   },

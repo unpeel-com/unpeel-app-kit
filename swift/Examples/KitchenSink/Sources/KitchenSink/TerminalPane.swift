@@ -1,6 +1,6 @@
 import AppKit
+import GhosttyTerminal
 import SwiftUI
-@preconcurrency import SwiftTerm
 
 struct TerminalLaunch: Sendable {
     let executable: String
@@ -8,195 +8,235 @@ struct TerminalLaunch: Sendable {
     let environment: [String: String]
 }
 
-/// SwiftTerm does not claim first responder from its selection-only mouse path.
-/// The mini-host makes that explicit so a click always arms the PTY for typing.
-final class KitchenSinkTerminalView: LocalProcessTerminalView {
-    var wantsInitialFocus = false
-    var applicationSelectedText: String?
-    var mirrorsApplicationMouseSelection = false
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard wantsInitialFocus, window != nil else { return }
-        wantsInitialFocus = false
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.window?.makeFirstResponder(self)
-        }
-    }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+/// libghostty owns the PTY, VT state, selection, clipboard integration, and
+/// Metal rendering. The mini-host only supplies the command and environment.
+final class KitchenSinkTerminalView: TerminalView {
+    override func acceptsFirstMouse(for _: NSEvent?) -> Bool {
         true
     }
 
     override func mouseDown(with event: NSEvent) {
-        // Arm the terminal before SwiftTerm decides whether this press belongs
-        // to the child application's mouse protocol or local text selection.
         window?.makeFirstResponder(self)
-        guard shouldMirrorApplicationSelection(event) else {
-            super.mouseDown(with: event)
-            return
-        }
-        performNativeSelectionPass { super.mouseDown(with: event) }
         super.mouseDown(with: event)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard shouldMirrorApplicationSelection(event) else {
-            super.mouseDragged(with: event)
-            return
-        }
-        performNativeSelectionPass { super.mouseDragged(with: event) }
-        super.mouseDragged(with: event)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        guard shouldMirrorApplicationSelection(event) else {
-            super.mouseUp(with: event)
-            return
-        }
-        // Let SwiftTerm finish its selection before its second pass reports
-        // the release to the Ratatui application.
-        performNativeSelectionPass { super.mouseUp(with: event) }
-        super.mouseUp(with: event)
-    }
-
-    override func copy(_ sender: Any) {
-        // Shift-drag belongs to SwiftTerm and should keep its normal copy path.
-        // Ordinary pointer gestures belong to the TUI while mouse reporting is
-        // active, so its synchronized semantic selection is the only source of
-        // selected text in that case.
-        if !selection.getSelectedText().isEmpty || applicationSelectedText == nil {
-            super.copy(sender)
-            return
-        }
-
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(applicationSelectedText ?? "", forType: .string)
-    }
-
-    private func shouldMirrorApplicationSelection(_ event: NSEvent) -> Bool {
-        guard mirrorsApplicationMouseSelection, allowMouseReporting else { return false }
-        if event.modifierFlags.contains(.shift), !terminal.mouseShiftCapture {
-            return false
-        }
-        if case .off = terminal.mouseMode { return false }
-        return true
-    }
-
-    private func performNativeSelectionPass(_ body: () -> Void) {
-        let reportingWasEnabled = allowMouseReporting
-        allowMouseReporting = false
-        body()
-        allowMouseReporting = reportingWasEnabled
     }
 }
 
-/// The single engine boundary in the kitchen sink. The product Host can swap
-/// this implementation for GhosttyKit without changing any session logic.
+/// Stable wrapper retained across process restarts and presentation switches.
+final class KitchenSinkTerminalHostView: NSView {
+    private(set) weak var terminalView: KitchenSinkTerminalView?
+    var wantsInitialFocus = false
+
+    func install(_ terminalView: KitchenSinkTerminalView?) {
+        self.terminalView?.removeFromSuperview()
+        self.terminalView = terminalView
+        guard let terminalView else { return }
+        terminalView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(terminalView)
+        NSLayoutConstraint.activate([
+            terminalView.topAnchor.constraint(equalTo: topAnchor),
+            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            terminalView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            terminalView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        requestFocusIfNeeded()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        requestFocusIfNeeded()
+    }
+
+    func requestFocus() {
+        wantsInitialFocus = true
+        requestFocusIfNeeded()
+    }
+
+    private func requestFocusIfNeeded() {
+        guard wantsInitialFocus, let terminalView, window != nil else { return }
+        wantsInitialFocus = false
+        DispatchQueue.main.async { [weak terminalView] in
+            terminalView?.acquireProgrammaticFocus()
+        }
+    }
+}
+
 @MainActor
 final class TerminalEngineController: NSObject {
-    let view: KitchenSinkTerminalView
+    let view = KitchenSinkTerminalHostView(frame: .zero)
     var onTermination: ((Int32?) -> Void)?
     private(set) var isRunning = false
 
+    private let parkingWindow: NSWindow
+    private let parkingView = NSView(frame: CGRect(x: 0, y: 0, width: 900, height: 600))
+    private var terminalView: KitchenSinkTerminalView?
+    private var terminalController: TerminalController?
+    private var isDisplayed = false
+
     override init() {
-        view = KitchenSinkTerminalView(
-            frame: CGRect(x: 0, y: 0, width: 900, height: 600),
-            font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
-            options: TerminalOptions(termName: "xterm-256color", scrollback: 20_000)
+        parkingWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
         )
         super.init()
-        view.allowMouseReporting = true
-        view.processDelegate = self
-        view.nativeBackgroundColor = NSColor(
-            calibratedRed: 0.055,
-            green: 0.063,
-            blue: 0.078,
-            alpha: 1
-        )
-        view.nativeForegroundColor = NSColor(
-            calibratedRed: 0.86,
-            green: 0.88,
-            blue: 0.91,
-            alpha: 1
-        )
-        view.caretColor = .systemTeal
+        parkingWindow.contentView = parkingView
+        park()
     }
 
     func start(_ launch: TerminalLaunch) {
         guard !isRunning else { return }
         isRunning = true
-        let environment = launch.environment
-            .map { "\($0.key)=\($0.value)" }
-            .sorted()
-        view.startProcess(
-            executable: launch.executable,
-            args: [],
-            environment: environment,
-            execName: URL(fileURLWithPath: launch.executable).lastPathComponent,
-            currentDirectory: launch.currentDirectory
+
+        let theme = TerminalTheme(light: Self.colors, dark: Self.colors)
+        let controller = TerminalController(theme: theme) { builder in
+            builder.withCustom("keybind", "clear")
+            builder.withCustom("keybind", "performable:super+c=copy_to_clipboard")
+            builder.withCustom("keybind", "super+v=paste_from_clipboard")
+            builder.withCustom("shell-integration", "none")
+            builder.withCustom("window-padding-balance", "false")
+            builder.withCustom("window-padding-color", "extend")
+            builder.withWindowPaddingX(0)
+            builder.withWindowPaddingY(0)
+            builder.withCursorStyle(.block)
+            builder.withCursorStyleBlink(true)
+            // Default-background cells reveal an optional local Surface
+            // CAMetalLayer behind Ghostty. Non-Surface sessions still see the
+            // TerminalCard's ordinary opaque background.
+            builder.withBackgroundOpacity(0)
+            // Ghostty config files always require a dot decimal separator;
+            // the typed formatter in libghostty-spm currently follows the
+            // user's locale (and emits `12,5` under Norwegian locales).
+            builder.withCustom("font-size", "12.5")
+        }
+        let terminal = KitchenSinkTerminalView(frame: view.bounds)
+        terminal.configuration = TerminalSurfaceOptions(
+            backend: .exec,
+            fontSize: 12.5,
+            workingDirectory: launch.currentDirectory,
+            envVars: launch.environment,
+            command: launch.executable,
+            waitAfterCommand: false,
+            context: .window
         )
+        terminal.delegate = self
+        terminal.controller = controller
+        terminalController = controller
+        terminalView = terminal
+        view.install(terminal)
+        terminal.setSurfaceVisible(isDisplayed)
     }
 
     func terminate() {
         guard isRunning else { return }
-        view.terminate()
+        isRunning = false
+        tearDownSurface()
+        DispatchQueue.main.async { [weak self] in
+            self?.onTermination?(nil)
+        }
+    }
+
+    func takeForDisplay() -> KitchenSinkTerminalHostView {
+        isDisplayed = true
+        view.removeFromSuperview()
+        terminalView?.setSurfaceVisible(true)
+        return view
+    }
+
+    func park() {
+        isDisplayed = false
+        terminalView?.setSurfaceVisible(false)
+        guard view.superview !== parkingView else { return }
+        view.removeFromSuperview()
+        view.translatesAutoresizingMaskIntoConstraints = true
+        view.frame = parkingView.bounds
+        view.autoresizingMask = [.width, .height]
+        parkingView.addSubview(view)
+    }
+
+    func requestFocus() {
+        guard isDisplayed else { return }
+        view.requestFocus()
+    }
+
+    private func tearDownSurface() {
+        terminalView?.delegate = nil
+        terminalView?.setSurfaceVisible(false)
+        terminalView?.controller = nil
+        view.install(nil)
+        terminalView = nil
+        terminalController = nil
+    }
+
+    private static let colors = TerminalConfiguration { builder in
+        builder.withBackground("0E1014")
+        builder.withForeground("DBE0E8")
+        builder.withCursorColor("35C2B4")
+        builder.withCursorText("0E1014")
+        builder.withSelectionBackground("2F4E78")
+        builder.withSelectionForeground("FFFFFF")
+        builder.withPalette(0, color: "15191F")
+        builder.withPalette(1, color: "E06C75")
+        builder.withPalette(2, color: "98C379")
+        builder.withPalette(3, color: "E5C07B")
+        builder.withPalette(4, color: "61AFEF")
+        builder.withPalette(5, color: "C678DD")
+        builder.withPalette(6, color: "56B6C2")
+        builder.withPalette(7, color: "D7DAE0")
+        builder.withPalette(8, color: "5C6370")
+        builder.withPalette(9, color: "E06C75")
+        builder.withPalette(10, color: "98C379")
+        builder.withPalette(11, color: "E5C07B")
+        builder.withPalette(12, color: "61AFEF")
+        builder.withPalette(13, color: "C678DD")
+        builder.withPalette(14, color: "56B6C2")
+        builder.withPalette(15, color: "FFFFFF")
     }
 }
 
-extension TerminalEngineController: @preconcurrency LocalProcessTerminalViewDelegate {
-    func sizeChanged(
-        source _: LocalProcessTerminalView,
-        newCols _: Int,
-        newRows _: Int
-    ) {}
-
-    func setTerminalTitle(source _: LocalProcessTerminalView, title _: String) {}
-
-    func hostCurrentDirectoryUpdate(source _: TerminalView, directory _: String?) {}
-
-    func processTerminated(source _: TerminalView, exitCode: Int32?) {
+extension TerminalEngineController: TerminalSurfaceCloseDelegate {
+    func terminalDidClose(processAlive _: Bool) {
+        guard isRunning else { return }
         isRunning = false
-        onTermination?(exitCode)
+        tearDownSurface()
+        onTermination?(nil)
     }
 }
 
 struct TerminalPane: NSViewRepresentable {
     let engine: TerminalEngineController
     let autoFocus: Bool
-    let applicationSelectedText: String?
-    let mirrorsApplicationMouseSelection: Bool
 
     final class Coordinator {
+        let engine: TerminalEngineController
         var autoFocus: Bool
 
-        init(autoFocus: Bool) {
+        init(engine: TerminalEngineController, autoFocus: Bool) {
+            self.engine = engine
             self.autoFocus = autoFocus
         }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(autoFocus: autoFocus)
+        Coordinator(engine: engine, autoFocus: autoFocus)
     }
 
-    func makeNSView(context _: Context) -> KitchenSinkTerminalView {
-        engine.view.wantsInitialFocus = autoFocus
-        engine.view.applicationSelectedText = applicationSelectedText
-        engine.view.mirrorsApplicationMouseSelection = mirrorsApplicationMouseSelection
-        return engine.view
+    func makeNSView(context _: Context) -> KitchenSinkTerminalHostView {
+        let view = engine.takeForDisplay()
+        if autoFocus { engine.requestFocus() }
+        return view
     }
 
-    func updateNSView(_ view: KitchenSinkTerminalView, context: Context) {
-        view.applicationSelectedText = applicationSelectedText
-        view.mirrorsApplicationMouseSelection = mirrorsApplicationMouseSelection
+    func updateNSView(_: KitchenSinkTerminalHostView, context: Context) {
         let becameAutoFocused = autoFocus && !context.coordinator.autoFocus
         context.coordinator.autoFocus = autoFocus
-        guard becameAutoFocused, view.window?.firstResponder !== view else { return }
-        DispatchQueue.main.async { [weak view] in
-            guard let view, view.window?.isKeyWindow == true else { return }
-            view.window?.makeFirstResponder(view)
-        }
+        if becameAutoFocused { engine.requestFocus() }
+    }
+
+    static func dismantleNSView(
+        _: KitchenSinkTerminalHostView,
+        coordinator: Coordinator
+    ) {
+        coordinator.engine.park()
     }
 }

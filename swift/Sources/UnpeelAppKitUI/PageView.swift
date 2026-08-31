@@ -19,7 +19,7 @@ public struct PageView: View {
         switch snapshot.root.component {
         case let .page(page):
             PageContent(nodeID: snapshot.root.id, page: page, onAction: onAction)
-        case .markdownEditor, .media, .unsupported:
+        case .canvasPage, .markdownEditor, .media, .surface, .unsupported:
             EmptyView()
         }
     }

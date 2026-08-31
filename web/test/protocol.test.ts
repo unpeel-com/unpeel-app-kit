@@ -6,12 +6,15 @@ import {
   markdownBlockReplacement,
   visibleMarkdownInsertItems,
   isMarkdownEditorNode,
+  isCanvasPageNode,
   isMediaNode,
   isPageNode,
   isRenderablePageNode,
+  isSurfaceNode,
   negotiateUiProtocolVersion,
   applyUiDelta,
   resolveMediaPointSize,
+  resolveSurfacePointSize,
   uiNodeCapability,
   uiNodeCapabilities,
   verifyMediaBlobBytes,
@@ -30,7 +33,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(16);
+    expect(messages).toHaveLength(21);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -106,6 +109,46 @@ describe("shared protocol", () => {
       "listItemMetadata",
       "listItemActivate",
     ]);
+
+    const canvasSnapshot = messages[18] as UiSnapshot;
+    if (!isCanvasPageNode(canvasSnapshot.root)) throw new Error("expected CanvasPage fixture");
+    expect(canvasSnapshot.root.title).toBe("Planet Canvas");
+    expect(canvasSnapshot.root.surface.reference.streamId).toBe("canvas-planets");
+    expect(uiNodeCapabilities(canvasSnapshot.root)).toEqual([
+      "canvasPage",
+      "surface",
+      "button",
+    ]);
+    expect(canvasSnapshot.root.controls[2]).toMatchObject({
+      type: "button",
+      id: "canvas-select",
+      role: "primary",
+    });
+    expect(messages[19]).toMatchObject({
+      type: "event",
+      nodeId: "canvas-next",
+      kind: "activate",
+    });
+    const canvasDelta = messages[20] as UiDelta;
+    const updatedCanvas = applyUiDelta(canvasSnapshot, canvasDelta);
+    if (!isCanvasPageNode(updatedCanvas.root)) throw new Error("expected updated CanvasPage");
+    expect(updatedCanvas.root.surface.reference.streamId).toBe("canvas-planets-detail");
+
+    const surfaceSnapshot = messages[16] as UiSnapshot;
+    if (!isSurfaceNode(surfaceSnapshot.root)) throw new Error("expected planet Surface fixture");
+    expect(surfaceSnapshot.root.reference).toEqual({
+      sessionId: "terminal-9",
+      streamId: "planets",
+    });
+    expect(uiNodeCapabilities(surfaceSnapshot.root)).toEqual(["surface"]);
+    expect(resolveSurfacePointSize(surfaceSnapshot.root, { w: 960, h: 600 })).toEqual({
+      w: 960,
+      h: 600,
+    });
+    const surfaceDelta = messages[17] as UiDelta;
+    const updatedSurface = applyUiDelta(surfaceSnapshot, surfaceDelta);
+    if (!isSurfaceNode(updatedSurface.root)) throw new Error("expected Surface delta result");
+    expect(updatedSurface.root.reference.streamId).toBe("planets-detail");
   });
 
   test("builds the same command envelope", () => {
@@ -472,6 +515,36 @@ describe("WorkspaceUiSession", () => {
     session.stop();
   });
 
+  test("requires an explicit local-GPU presenter before advertising Surface", () => {
+    const socket = new FakeSocket();
+    const snapshots: UiSnapshot[] = [];
+    const fallbacks: string[] = [];
+    const session = new WorkspaceUiSession({
+      url: "wss://workspace.example/apps/terminal-9/ui",
+      appSessionId: "terminal-9",
+      clientId: "client-alice-web",
+      rendererId: "renderer-alice-web",
+      viewId: "main",
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+      onTerminalFallback: (kind) => fallbacks.push(kind),
+      webSocketFactory: () => socket,
+    });
+
+    session.start();
+    socket.open();
+    socket.message(attachedFrame());
+    socket.message(surfaceSnapshotFrame());
+
+    expect(snapshots).toHaveLength(0);
+    expect(fallbacks).toEqual(["surface"]);
+    expect(socket.readyState).toBe(1);
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
+      type: "lifecycle",
+      state: { rendererVisible: false, terminalVisible: true },
+    });
+    session.stop();
+  });
+
   test("falls back for unknown roots and prevents path Media from reaching browser renderers", () => {
     const socket = new FakeSocket();
     const snapshots: UiSnapshot[] = [];
@@ -733,6 +806,26 @@ function mediaSnapshotFrame(): UiSnapshot {
       points: { h: 40 },
       alt: "Tiny fixture pixel",
       activate: "open-image",
+    },
+  };
+}
+
+function surfaceSnapshotFrame(): UiSnapshot {
+  return {
+    type: "snapshot",
+    protocol: "unpeel.ui",
+    protocolVersion: 1,
+    appInstanceId: "app-fixture",
+    clientId: "client-alice-web",
+    viewId: "main",
+    revision: 14,
+    root: {
+      id: "planet-surface",
+      type: "surface",
+      reference: { sessionId: "terminal-9", streamId: "planets" },
+      points: { w: 960 },
+      background: { kind: "solid", color: "#050912ff" },
+      inputPolicy: "pointerAndKeyboard",
     },
   };
 }

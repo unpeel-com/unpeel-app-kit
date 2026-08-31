@@ -50,7 +50,7 @@ public struct MarkdownEditorView: View {
                 Divider()
                 editorContent(editor)
             }
-        case .media, .page, .unsupported:
+        case .canvasPage, .media, .page, .surface, .unsupported:
             EmptyView()
         }
     }

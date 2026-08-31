@@ -35,6 +35,8 @@ pub const LIST_ITEM_ACTIVATE_CAPABILITY: &str = "listItemActivate";
 pub const TOGGLE_COMPONENT_CAPABILITY: &str = "toggle";
 /// Renderer capability for the v1 Input control.
 pub const INPUT_COMPONENT_CAPABILITY: &str = "input";
+/// Renderer capability for the v1 Button control.
+pub const BUTTON_COMPONENT_CAPABILITY: &str = "button";
 /// Renderer capability for Page-level back navigation.
 pub const PAGE_BACK_CAPABILITY: &str = "pageBack";
 
@@ -42,6 +44,56 @@ const MAX_ITEMS: usize = 100_000;
 const MAX_SHORT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_LABEL_BYTES: usize = 16 * 1024;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
+
+/// Visual intent for a semantic [`Button`]. The renderer chooses its native
+/// platform treatment; these are not arbitrary style tokens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ButtonRole {
+    #[default]
+    Default,
+    Primary,
+    Destructive,
+}
+
+/// One semantic action control accepted by named component slots.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Button {
+    pub id: String,
+    pub label: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "is_default_button_role")]
+    pub role: ButtonRole,
+}
+
+impl Button {
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>, action: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            action: action.into(),
+            role: ButtonRole::Default,
+        }
+    }
+
+    #[must_use]
+    pub const fn role(mut self, role: ButtonRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
+        validate_identifier(&self.id, &format!("{path}.id"))?;
+        validate_text(&self.label, MAX_SHORT_TEXT_BYTES, &format!("{path}.label"))?;
+        validate_identifier(&self.action, &format!("{path}.action"))
+    }
+}
+
+const fn is_default_button_role(role: &ButtonRole) -> bool {
+    matches!(role, ButtonRole::Default)
+}
 
 /// Boolean control embeddable in an explicitly declared row slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,6 +736,42 @@ impl Page {
         }
     }
 
+    /// Resolves the terminal rectangles used by the Page's named slots.
+    ///
+    /// Apps use this for target-aware mouse input without duplicating the
+    /// component's layout math. The returned List rectangle maps one terminal
+    /// row to one ListItem in v1.
+    #[must_use]
+    pub fn layout(&self, area: Rect) -> PageLayout {
+        let constraints = if self.input_spec().is_some() {
+            vec![
+                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ]
+        } else {
+            vec![Constraint::Length(2), Constraint::Min(0)]
+        };
+        let slots = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
+        if self.input_spec().is_some() {
+            PageLayout {
+                title: slots[0],
+                input: Some(slots[1]),
+                list: slots[3],
+            }
+        } else {
+            PageLayout {
+                title: slots[0],
+                input: None,
+                list: slots[1],
+            }
+        }
+    }
+
     pub(crate) fn set_input_value(
         &mut self,
         input_id: &str,
@@ -770,6 +858,14 @@ pub struct PageTheme {
     pub left_padding: u16,
 }
 
+/// Terminal hit-test geometry for a rendered [`Page`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageLayout {
+    pub title: Rect,
+    pub input: Option<Rect>,
+    pub list: Rect,
+}
+
 impl PageTheme {
     #[must_use]
     pub const fn for_theme(theme: KitTheme) -> Self {
@@ -823,20 +919,7 @@ impl Widget for PageWidget<'_> {
             return;
         }
         buffer.set_style(area, self.theme.style);
-        let constraints = if self.page.input_spec().is_some() {
-            vec![
-                Constraint::Length(2),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(0),
-            ]
-        } else {
-            vec![Constraint::Length(2), Constraint::Min(0)]
-        };
-        let slots = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(area);
+        let layout = self.page.layout(area);
         Paragraph::new(format!(
             "{}{}{}",
             " ".repeat(usize::from(self.theme.left_padding)),
@@ -848,19 +931,18 @@ impl Widget for PageWidget<'_> {
             self.page.title
         ))
         .style(self.theme.title)
-        .render(slots[0], buffer);
+        .render(layout.title, buffer);
 
-        let list_area = if let Some(input) = self.page.input_spec() {
+        if let Some(input) = self.page.input_spec() {
             self.input.set_placeholder(input.placeholder.clone());
             self.input.set_prompt(format!("{}: ", input.label));
-            self.input.widget().render(slots[1], buffer);
-            slots[3]
-        } else {
-            slots[1]
-        };
+            self.input
+                .widget()
+                .render(layout.input.expect("Page input layout"), buffer);
+        }
         StatefulWidget::render(
             self.page.list().widget(self.theme),
-            list_area,
+            layout.list,
             buffer,
             self.list_state,
         );
@@ -906,7 +988,7 @@ fn register_unique(
     Ok(())
 }
 
-fn validate_identifier(value: &str, path: &str) -> Result<(), ComponentValidationError> {
+pub(crate) fn validate_identifier(value: &str, path: &str) -> Result<(), ComponentValidationError> {
     if value.is_empty()
         || value.len() > 256
         || !value.bytes().all(|byte| {
@@ -921,7 +1003,11 @@ fn validate_identifier(value: &str, path: &str) -> Result<(), ComponentValidatio
     Ok(())
 }
 
-fn validate_text(value: &str, maximum: usize, path: &str) -> Result<(), ComponentValidationError> {
+pub(crate) fn validate_text(
+    value: &str,
+    maximum: usize,
+    path: &str,
+) -> Result<(), ComponentValidationError> {
     if value.len() > maximum
         || value
             .chars()
@@ -1022,6 +1108,15 @@ mod tests {
         assert_eq!(rendered[(0, selected_y)].symbol(), " ");
         assert_eq!(rendered[(1, selected_y)].symbol(), " ");
         assert_eq!(rendered[(2, selected_y)].symbol(), "R");
+    }
+
+    #[test]
+    fn page_layout_exposes_the_same_named_slots_used_for_rendering() {
+        let page = todo_page();
+        let layout = page.layout(Rect::new(3, 5, 50, 10));
+        assert_eq!(layout.title, Rect::new(3, 5, 50, 2));
+        assert_eq!(layout.input, Some(Rect::new(3, 7, 50, 1)));
+        assert_eq!(layout.list, Rect::new(3, 9, 50, 6));
     }
 
     #[test]

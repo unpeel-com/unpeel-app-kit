@@ -13,14 +13,17 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{ListState, Paragraph};
 use serde::{Deserialize, Serialize};
@@ -134,6 +137,7 @@ struct TodoApp {
     input: InputField,
     list_state: ListState,
     input_focused: bool,
+    list_area: Rect,
     status: String,
 }
 
@@ -157,6 +161,7 @@ impl TodoApp {
             input,
             list_state: ListState::default().with_selected(selected),
             input_focused: true,
+            list_area: Rect::default(),
             status: String::new(),
         })
     }
@@ -261,6 +266,54 @@ impl TodoApp {
     fn focus_input(&mut self, focused: bool) {
         self.input_focused = focused;
         self.input.set_focused(focused);
+    }
+}
+
+fn terminal_mouse_intent(app: &mut TodoApp, mouse: MouseEvent) -> Option<Intent> {
+    let position = Position::new(mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if app.input.area().contains(position) {
+                app.focus_input(true);
+                app.input
+                    .mouse_down(position, mouse.modifiers.contains(KeyModifiers::SHIFT));
+                return None;
+            }
+            if !app.list_area.contains(position) {
+                return None;
+            }
+            let index = app
+                .list_state
+                .offset()
+                .saturating_add(usize::from(position.y.saturating_sub(app.list_area.y)));
+            let todo = app.state.todos.get(index)?;
+            let intent = Intent::Toggle {
+                id: todo.id,
+                value: !todo.done,
+            };
+            app.focus_input(false);
+            app.list_state.select(Some(index));
+            Some(intent)
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            app.input.mouse_drag(position);
+            None
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            app.input.mouse_up();
+            None
+        }
+        MouseEventKind::ScrollUp if app.list_area.contains(position) => {
+            app.focus_input(false);
+            app.select_relative(-1);
+            None
+        }
+        MouseEventKind::ScrollDown if app.list_area.contains(position) => {
+            app.focus_input(false);
+            app.select_relative(1);
+            None
+        }
+        _ => None,
     }
 }
 
@@ -542,7 +595,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -565,6 +618,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         .direction(Direction::Vertical)
                         .constraints([Constraint::Min(0), Constraint::Length(1)])
                         .split(frame.area());
+                    app.list_area = page.layout(areas[0]).list;
                     frame.render_widget(
                         page.widget(&mut app.input, &mut app.list_state)
                             .theme(theme),
@@ -620,6 +674,27 @@ fn run() -> Result<(), Box<dyn Error>> {
                 Event::Paste(text) if app.input_focused => {
                     app.input.handle(InputFieldAction::InsertText(text));
                 }
+                Event::Mouse(mouse) => {
+                    let Some(intent) = terminal_mouse_intent(&mut app, mouse) else {
+                        continue;
+                    };
+                    #[cfg(feature = "ui-bridge")]
+                    let base = app.state.revision;
+                    match app.commit(intent) {
+                        Ok(change) => {
+                            #[cfg(not(feature = "ui-bridge"))]
+                            let _ = change;
+                            #[cfg(feature = "ui-bridge")]
+                            bridge.publish_delta(
+                                VIEW_ID,
+                                base,
+                                app.state.revision,
+                                vec![change.ui_delta()],
+                            )?;
+                        }
+                        Err(message) => app.status = message,
+                    }
+                }
                 Event::Resize(_, _) => terminal.autoresize()?,
                 _ => {}
             }
@@ -628,7 +703,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     })();
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -636,7 +715,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn main() {
     if let Err(error) = run() {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         eprintln!("todo: {error}");
         std::process::exit(1);
     }
@@ -667,6 +746,26 @@ mod tests {
         assert!(restored.state.todos[1].done);
         assert_eq!(restored.state.todos.last().unwrap().label, "Persist me");
         assert_eq!(restored.state.revision, 3);
+    }
+
+    #[test]
+    fn terminal_row_click_targets_the_visible_todo_toggle() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = TodoApp::load(directory.path().join("todo.json")).unwrap();
+        app.list_area = Rect::new(4, 8, 60, 10);
+        let intent = terminal_mouse_intent(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 30,
+                row: 9,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .unwrap();
+        assert!(matches!(intent, Intent::Toggle { id: 2, value: true }));
+        assert_eq!(app.list_state.selected(), Some(1));
+        assert!(!app.input_focused);
     }
 
     #[cfg(feature = "ui-bridge")]

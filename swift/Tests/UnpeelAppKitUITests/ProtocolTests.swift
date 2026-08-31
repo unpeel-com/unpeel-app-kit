@@ -44,7 +44,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 16)
+    #expect(messages.count == 21)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -157,6 +157,55 @@ func sharedProtocolFixturesDecode() throws {
     #expect(usagePage.requiredCapabilities == [
         "page", "list", "listItem", "pageBack", "listItemMetadata", "listItemActivate",
     ])
+
+    guard case let .snapshot(surfaceSnapshot) = messages[16],
+          case let .surface(surface) = surfaceSnapshot.root.component
+    else {
+        Issue.record("seventeenth fixture must contain the planet Surface")
+        return
+    }
+    #expect(surface.reference.sessionID == "terminal-9")
+    #expect(surface.reference.streamID == "planets")
+    #expect(surface.inputPolicy == .pointerAndKeyboard)
+    #expect(!UnpeelUIProtocol.supportedComponentCapabilities.contains(
+        UnpeelUIProtocol.surfaceCapability
+    ))
+    let resolvedSurfaceSize = surface.resolvedPointSize(viewport: .init(w: 960, h: 600))
+    #expect(resolvedSurfaceSize?.w == 960)
+    #expect(resolvedSurfaceSize?.h == 600)
+
+    guard case let .delta(surfaceDelta) = messages[17],
+          case let .surface(updatedSurface) = try surfaceSnapshot
+            .applying(surfaceDelta).root.component
+    else {
+        Issue.record("eighteenth fixture must switch the Surface reference")
+        return
+    }
+    #expect(updatedSurface.reference.streamID == "planets-detail")
+
+    guard case let .snapshot(canvasSnapshot) = messages[18],
+          case let .canvasPage(canvas) = canvasSnapshot.root.component,
+          case let .button(select) = canvas.controls[2],
+          case let .event(canvasEvent) = messages[19]
+    else {
+        Issue.record("final fixtures must contain CanvasPage and a Button action")
+        return
+    }
+    #expect(canvas.title == "Planet Canvas")
+    #expect(canvas.surface.id == "planet-canvas")
+    #expect(canvas.surface.surface.reference.streamID == "canvas-planets")
+    #expect(canvas.requiredCapabilities == ["canvasPage", "surface", "button"])
+    #expect(select.role == .primary)
+    #expect(canvasEvent.action.nodeID == "canvas-next")
+    #expect(canvasEvent.action.kind == .activate)
+    guard case let .delta(canvasDelta) = messages[20],
+          case let .canvasPage(updatedCanvas) = try canvasSnapshot
+            .applying(canvasDelta).root.component
+    else {
+        Issue.record("Canvas Surface delta must preserve CanvasPage")
+        return
+    }
+    #expect(updatedCanvas.surface.surface.reference.streamID == "canvas-planets-detail")
 }
 
 @Test

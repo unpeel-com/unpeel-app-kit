@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{ListItem, Page};
 use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
+use crate::surface::{CanvasPage, SurfaceReference, SurfaceSpec};
 
 /// Stable protocol name carried by every independently replayable frame.
 pub const UI_PROTOCOL_NAME: &str = "unpeel.ui";
@@ -691,9 +692,11 @@ impl MarkdownEditorSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum UiComponent {
+    CanvasPage(CanvasPage),
     MarkdownEditor(MarkdownEditorSpec),
     Media(MediaSpec),
     Page(Page),
+    Surface(SurfaceSpec),
 }
 
 impl UiComponent {
@@ -701,9 +704,11 @@ impl UiComponent {
     #[must_use]
     pub const fn kind(&self) -> &'static str {
         match self {
+            Self::CanvasPage(_) => "canvasPage",
             Self::MarkdownEditor(_) => "markdownEditor",
             Self::Media(_) => "media",
             Self::Page(_) => "page",
+            Self::Surface(_) => "surface",
         }
     }
 
@@ -711,9 +716,11 @@ impl UiComponent {
     #[must_use]
     pub const fn required_capability(&self) -> &'static str {
         match self {
+            Self::CanvasPage(_) => crate::CANVAS_PAGE_COMPONENT_CAPABILITY,
             Self::MarkdownEditor(_) => UI_MARKDOWN_EDITOR_CAPABILITY,
             Self::Media(_) => crate::MEDIA_COMPONENT_CAPABILITY,
             Self::Page(_) => crate::PAGE_COMPONENT_CAPABILITY,
+            Self::Surface(_) => crate::SURFACE_COMPONENT_CAPABILITY,
         }
     }
 
@@ -721,9 +728,11 @@ impl UiComponent {
     #[must_use]
     pub fn required_capabilities(&self) -> Vec<&'static str> {
         match self {
+            Self::CanvasPage(page) => page.required_capabilities(),
             Self::MarkdownEditor(_) => vec![UI_MARKDOWN_EDITOR_CAPABILITY],
             Self::Media(_) => vec![crate::MEDIA_COMPONENT_CAPABILITY],
             Self::Page(page) => page.required_capabilities(),
+            Self::Surface(_) => vec![crate::SURFACE_COMPONENT_CAPABILITY],
         }
     }
 }
@@ -737,6 +746,14 @@ pub struct UiNode {
 }
 
 impl UiNode {
+    #[must_use]
+    pub fn canvas_page(id: impl Into<NodeId>, page: CanvasPage) -> Self {
+        Self {
+            id: id.into(),
+            element: UiComponent::CanvasPage(page),
+        }
+    }
+
     #[must_use]
     pub fn markdown_editor(id: impl Into<NodeId>, editor: MarkdownEditorSpec) -> Self {
         Self {
@@ -761,15 +778,29 @@ impl UiNode {
         }
     }
 
+    #[must_use]
+    pub fn surface(id: impl Into<NodeId>, surface: SurfaceSpec) -> Self {
+        Self {
+            id: id.into(),
+            element: UiComponent::Surface(surface),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), UiValidationError> {
         validate_identifier(self.id.as_str(), "root.id")?;
         match &self.element {
+            UiComponent::CanvasPage(page) => page.validate().map_err(|error| {
+                UiValidationError::new(error.path.replacen("canvasPage", "root", 1), error.message)
+            }),
             UiComponent::MarkdownEditor(editor) => editor.validate("root"),
             UiComponent::Media(media) => media.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("media", "root", 1), error.message)
             }),
             UiComponent::Page(page) => page.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("page", "root", 1), error.message)
+            }),
+            UiComponent::Surface(surface) => surface.validate().map_err(|error| {
+                UiValidationError::new(error.path.replacen("surface", "root", 1), error.message)
             }),
         }
     }
@@ -1007,6 +1038,11 @@ pub enum UiDeltaOperation {
         source: MediaSource,
         intrinsic: MediaPixelSize,
     },
+    /// Routes this box to another authorized retained-scene stream.
+    SurfaceSetReference {
+        node_id: NodeId,
+        reference: SurfaceReference,
+    },
     /// Sets one Toggle and its containing ListItem's denormalized done state.
     ToggleSetValue {
         node_id: String,
@@ -1054,6 +1090,14 @@ impl UiDeltaOperation {
             node_id: node_id.into(),
             source,
             intrinsic,
+        }
+    }
+
+    #[must_use]
+    pub fn surface_set_reference(node_id: impl Into<NodeId>, reference: SurfaceReference) -> Self {
+        Self::SurfaceSetReference {
+            node_id: node_id.into(),
+            reference,
         }
     }
 
@@ -1115,6 +1159,18 @@ impl UiDeltaOperation {
                     .map_err(|error| {
                         UiProtocolError::InvalidView(UiValidationError::new(
                             format!("{path}.{}", error.path.replacen("media.", "", 1)),
+                            error.message,
+                        ))
+                    })
+            }
+            Self::SurfaceSetReference { node_id, reference } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                SurfaceSpec::new(reference.clone())
+                    .validate()
+                    .map_err(|error| {
+                        UiProtocolError::InvalidView(UiValidationError::new(
+                            format!("{path}.{}", error.path.replacen("surface.", "", 1)),
                             error.message,
                         ))
                     })
@@ -1210,6 +1266,9 @@ impl UiNode {
                     media.source = source.clone();
                     media.intrinsic = *intrinsic;
                 }
+                UiDeltaOperation::SurfaceSetReference { node_id, reference } => {
+                    self.surface_mut(node_id, index)?.reference = reference.clone();
+                }
                 UiDeltaOperation::ToggleSetValue { node_id, value } => {
                     self.page_mut(index)?
                         .set_toggle_value(node_id, *value)
@@ -1258,7 +1317,10 @@ impl UiNode {
         }
         match &mut self.element {
             UiComponent::MarkdownEditor(editor) => Ok(editor),
-            UiComponent::Media(_) | UiComponent::Page(_) => Err(UiValidationError::new(
+            UiComponent::CanvasPage(_)
+            | UiComponent::Media(_)
+            | UiComponent::Page(_)
+            | UiComponent::Surface(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires a Markdown editor",
             )),
@@ -1278,9 +1340,33 @@ impl UiNode {
         }
         match &mut self.element {
             UiComponent::Media(media) => Ok(media),
-            UiComponent::MarkdownEditor(_) | UiComponent::Page(_) => Err(UiValidationError::new(
+            UiComponent::CanvasPage(_)
+            | UiComponent::MarkdownEditor(_)
+            | UiComponent::Page(_)
+            | UiComponent::Surface(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires Media",
+            )),
+        }
+    }
+
+    fn surface_mut(
+        &mut self,
+        expected_id: &NodeId,
+        operation_index: usize,
+    ) -> Result<&mut SurfaceSpec, UiValidationError> {
+        match &mut self.element {
+            UiComponent::Surface(surface) if &self.id == expected_id => Ok(surface),
+            UiComponent::CanvasPage(page) if page.surface.id == expected_id.as_str() => {
+                Ok(&mut page.surface.surface)
+            }
+            UiComponent::CanvasPage(_)
+            | UiComponent::MarkdownEditor(_)
+            | UiComponent::Media(_)
+            | UiComponent::Page(_)
+            | UiComponent::Surface(_) => Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                format!("Surface node {expected_id:?} is not present"),
             )),
         }
     }
@@ -1288,7 +1374,10 @@ impl UiNode {
     fn page_mut(&mut self, operation_index: usize) -> Result<&mut Page, UiValidationError> {
         match &mut self.element {
             UiComponent::Page(page) => Ok(page),
-            UiComponent::MarkdownEditor(_) | UiComponent::Media(_) => Err(UiValidationError::new(
+            UiComponent::CanvasPage(_)
+            | UiComponent::MarkdownEditor(_)
+            | UiComponent::Media(_)
+            | UiComponent::Surface(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}]"),
                 "operation requires Page",
             )),

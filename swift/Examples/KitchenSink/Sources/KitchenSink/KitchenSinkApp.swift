@@ -21,7 +21,7 @@ struct KitchenSinkApp: App {
     var body: some Scene {
         WindowGroup("App Kit Kitchen Sink") {
             ContentView(host: host)
-                .frame(minWidth: 1_080, minHeight: 700)
+                .frame(minWidth: 1_200, minHeight: 700)
                 .onAppear {
                     NSApplication.shared.setActivationPolicy(.regular)
                     NSApplication.shared.activate(ignoringOtherApps: true)
@@ -32,6 +32,6 @@ struct KitchenSinkApp: App {
                     host.shutdown()
                 }
         }
-        .defaultSize(width: 1_360, height: 860)
+        .defaultSize(width: 1_560, height: 860)
     }
 }

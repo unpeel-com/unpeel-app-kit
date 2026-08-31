@@ -15,7 +15,13 @@ public enum UnpeelUIProtocol {
     public static let listItemActivateCapability = "listItemActivate"
     public static let toggleCapability = "toggle"
     public static let inputCapability = "input"
+    public static let buttonCapability = "button"
     public static let pageBackCapability = "pageBack"
+    public static let surfaceCapability = "surface"
+    public static let canvasPageCapability = "canvasPage"
+    /// Components renderable without an injected Host-owned presenter.
+    /// A Host adds `surfaceCapability` only after wiring its authorized USRF
+    /// route to unpeel-surface's local-GPU presenter.
     public static let supportedComponentCapabilities = [
         markdownEditorCapability,
         mediaCapability,
@@ -26,6 +32,7 @@ public enum UnpeelUIProtocol {
         listItemActivateCapability,
         toggleCapability,
         inputCapability,
+        buttonCapability,
         pageBackCapability,
     ]
     private static let maximumWireVersion = Int(UInt32.max)
@@ -744,8 +751,351 @@ public struct MediaSpec: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+/// Opaque route resolved by the existing authenticated Host. These are not
+/// socket paths, URLs, credentials, or USRF header fields.
+public struct SurfaceReference: Codable, Equatable, Hashable, Sendable {
+    public let sessionID: String
+    public let streamID: String
+
+    public init(sessionID: String, streamID: String) {
+        self.sessionID = sessionID
+        self.streamID = streamID
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "sessionId"
+        case streamID = "streamId"
+    }
+}
+
+public struct SurfaceCellSize: Codable, Equatable, Hashable, Sendable {
+    public let w: Int?
+    public let h: Int?
+
+    public init(w: Int? = nil, h: Int? = nil) {
+        self.w = w
+        self.h = h
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        w = try container.decodeIfPresent(Int.self, forKey: .w)
+        h = try container.decodeIfPresent(Int.self, forKey: .h)
+        guard w != nil || h != nil,
+              w.map({ (1...Int(UInt16.max)).contains($0) }) ?? true,
+              h.map({ (1...Int(UInt16.max)).contains($0) }) ?? true
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .w,
+                in: container,
+                debugDescription: "Surface cell size needs at least one positive UInt16 axis"
+            )
+        }
+    }
+
+    enum CodingKeys: String, CodingKey { case w, h }
+}
+
+public struct SurfacePointSize: Codable, Equatable, Hashable, Sendable {
+    public let w: Int?
+    public let h: Int?
+
+    public init(w: Int? = nil, h: Int? = nil) {
+        self.w = w
+        self.h = h
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        w = try container.decodeIfPresent(Int.self, forKey: .w)
+        h = try container.decodeIfPresent(Int.self, forKey: .h)
+        guard w != nil || h != nil,
+              w.map({ (1...Int(UInt32.max)).contains($0) }) ?? true,
+              h.map({ (1...Int(UInt32.max)).contains($0) }) ?? true
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .w,
+                in: container,
+                debugDescription: "Surface point size needs at least one positive UInt32 axis"
+            )
+        }
+    }
+
+    enum CodingKeys: String, CodingKey { case w, h }
+}
+
+/// Live viewport metadata supplied by the Surface presenter out of band. It
+/// is used only to derive a missing layout axis and is never snapshot state.
+public struct SurfaceViewportSize: Equatable, Hashable, Sendable {
+    public let w: Int
+    public let h: Int
+
+    public init(w: Int, h: Int) {
+        self.w = w
+        self.h = h
+    }
+}
+
+public enum SurfaceBackground: Equatable, Hashable, Sendable {
+    case transparent
+    case solid(color: String)
+}
+
+extension SurfaceBackground: Codable {
+    enum CodingKeys: String, CodingKey { case kind, color }
+    enum Kind: String, Codable { case transparent, solid }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .transparent:
+            self = .transparent
+        case .solid:
+            let color = try container.decode(String.self, forKey: .color)
+            guard color.range(
+                of: #"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"#,
+                options: .regularExpression
+            ) != nil else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .color,
+                    in: container,
+                    debugDescription: "Surface solid color must be #RRGGBB or #RRGGBBAA sRGBA"
+                )
+            }
+            self = .solid(color: color)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .transparent:
+            try container.encode(Kind.transparent, forKey: .kind)
+        case let .solid(color):
+            try container.encode(Kind.solid, forKey: .kind)
+            try container.encode(color, forKey: .color)
+        }
+    }
+}
+
+public enum SurfaceInputPolicy: String, Codable, Equatable, Hashable, Sendable {
+    case none
+    case pointer
+    case pointerAndKeyboard
+}
+
+/// Reference-only Surface leaf. Scene commands and immutable resources stay
+/// on USRF; composed frames never enter this value or `unpeel.ui`.
+public struct SurfaceSpec: Codable, Equatable, Hashable, Sendable {
+    public let reference: SurfaceReference
+    public let cells: SurfaceCellSize?
+    public let points: SurfacePointSize?
+    public let background: SurfaceBackground
+    public let inputPolicy: SurfaceInputPolicy
+
+    public init(
+        reference: SurfaceReference,
+        cells: SurfaceCellSize? = nil,
+        points: SurfacePointSize? = nil,
+        background: SurfaceBackground = .transparent,
+        inputPolicy: SurfaceInputPolicy = .none
+    ) {
+        self.reference = reference
+        self.cells = cells
+        self.points = points
+        self.background = background
+        self.inputPolicy = inputPolicy
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case reference, cells, points, background, inputPolicy
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reference = try container.decode(SurfaceReference.self, forKey: .reference)
+        cells = try container.decodeIfPresent(SurfaceCellSize.self, forKey: .cells)
+        points = try container.decodeIfPresent(SurfacePointSize.self, forKey: .points)
+        background = try container.decodeIfPresent(
+            SurfaceBackground.self,
+            forKey: .background
+        ) ?? .transparent
+        inputPolicy = try container.decodeIfPresent(
+            SurfaceInputPolicy.self,
+            forKey: .inputPolicy
+        ) ?? .none
+        try Self.validateIdentifier(reference.sessionID, key: .reference, in: container)
+        try Self.validateIdentifier(reference.streamID, key: .reference, in: container)
+    }
+
+    public func resolvedPointSize(viewport: SurfaceViewportSize) -> (w: Int, h: Int)? {
+        guard let points else { return nil }
+        switch (points.w, points.h) {
+        case let (w?, h?):
+            return (w, h)
+        case let (w?, nil):
+            return (w, ratioCeil(w, viewport.h, viewport.w))
+        case let (nil, h?):
+            return (ratioCeil(h, viewport.w, viewport.h), h)
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    private static func validateIdentifier<Key: CodingKey>(
+        _ value: String,
+        key: Key,
+        in container: KeyedDecodingContainer<Key>
+    ) throws {
+        let punctuation = Set("._:/-".utf8)
+        guard !value.isEmpty, value.utf8.count <= 256,
+              value.utf8.allSatisfy({
+                  (48...57).contains($0)
+                      || (65...90).contains($0)
+                      || (97...122).contains($0)
+                      || punctuation.contains($0)
+              })
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: container,
+                debugDescription: "Surface reference must use portable identifiers"
+            )
+        }
+    }
+}
+
+/// Closed visual intent for semantic buttons. Renderers map these roles to
+/// their native control treatments rather than accepting arbitrary styling.
+public enum UIButtonRole: String, Codable, Equatable, Hashable, Sendable {
+    case standard = "default"
+    case primary
+    case destructive
+}
+
+public struct UIButtonSpec: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let label: String
+    public let action: String
+    public let role: UIButtonRole
+
+    public init(
+        id: String,
+        label: String,
+        action: String,
+        role: UIButtonRole = .standard
+    ) {
+        self.id = id
+        self.label = label
+        self.action = action
+        self.role = role
+    }
+
+    enum CodingKeys: String, CodingKey { case id, label, action, role }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        action = try container.decode(String.self, forKey: .action)
+        role = try container.decodeIfPresent(UIButtonRole.self, forKey: .role) ?? .standard
+    }
+}
+
+/// One fixed Surface slot inside a CanvasPage. Unknown fields remain ignored
+/// for protocol evolution, while the slot itself cannot contain another kind.
+public struct UICanvasSurfaceSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let surface: SurfaceSpec
+
+    public init(id: String, surface: SurfaceSpec) {
+        self.id = id
+        self.surface = surface
+    }
+
+    enum CodingKeys: String, CodingKey { case id }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        surface = try SurfaceSpec(from: decoder)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try surface.encode(to: encoder)
+    }
+}
+
+public enum UICanvasControl: Equatable, Hashable, Sendable {
+    case button(UIButtonSpec)
+    case unsupported(kind: String)
+
+    public var kind: String {
+        switch self {
+        case .button: "button"
+        case let .unsupported(kind): kind
+        }
+    }
+}
+
+extension UICanvasControl: Codable {
+    enum CodingKeys: String, CodingKey { case type }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .type)
+        switch kind {
+        case "button": self = .button(try UIButtonSpec(from: decoder))
+        default: self = .unsupported(kind: kind)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .button(button):
+            try container.encode("button", forKey: .type)
+            try button.encode(to: encoder)
+        case let .unsupported(kind):
+            try container.encode(kind, forKey: .type)
+        }
+    }
+}
+
+/// One canvas-sized Surface with a bounded, fixed top overlay of semantic
+/// controls. The Surface stream remains out of band; controls stay on UI.
+public struct CanvasPageSpec: Codable, Equatable, Hashable, Sendable {
+    public let title: String
+    public let surface: UICanvasSurfaceSpec
+    public let controls: [UICanvasControl]
+
+    public init(
+        title: String,
+        surface: UICanvasSurfaceSpec,
+        controls: [UICanvasControl] = []
+    ) {
+        self.title = title
+        self.surface = surface
+        self.controls = controls
+    }
+
+    public var requiredCapabilities: [String]? {
+        guard controls.allSatisfy({ if case .button = $0 { true } else { false } }) else {
+            return nil
+        }
+        var capabilities = [
+            UnpeelUIProtocol.canvasPageCapability,
+            UnpeelUIProtocol.surfaceCapability,
+        ]
+        if !controls.isEmpty { capabilities.append(UnpeelUIProtocol.buttonCapability) }
+        return capabilities
+    }
+}
+
 private func ratioCeil(_ value: Int, _ numerator: Int, _ denominator: Int) -> Int {
-    let scaled = UInt64(value) * UInt64(numerator)
+    let scaled = UInt64(max(value, 0)) * UInt64(max(numerator, 1))
     let divisor = UInt64(max(denominator, 1))
     let resolved = scaled / divisor + (scaled % divisor == 0 ? 0 : 1)
     return Int(min(resolved, UInt64(UInt32.max)))
@@ -1032,19 +1382,25 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
 }
 
 public enum UIComponent: Equatable, Sendable {
+    case canvasPage(CanvasPageSpec)
     case markdownEditor(MarkdownEditorSpec)
     case media(MediaSpec)
     case page(PageSpec)
+    case surface(SurfaceSpec)
     case unsupported(kind: String)
 
     public var kind: String {
         switch self {
+        case .canvasPage:
+            "canvasPage"
         case .markdownEditor:
             "markdownEditor"
         case .media:
             "media"
         case .page:
             "page"
+        case .surface:
+            "surface"
         case let .unsupported(kind):
             kind
         }
@@ -1056,12 +1412,16 @@ public enum UIComponent: Equatable, Sendable {
 
     public var requiredCapabilities: [String]? {
         switch self {
+        case let .canvasPage(page):
+            page.requiredCapabilities
         case .markdownEditor:
             [UnpeelUIProtocol.markdownEditorCapability]
         case .media:
             [UnpeelUIProtocol.mediaCapability]
         case let .page(page):
             page.requiredCapabilities
+        case .surface:
+            [UnpeelUIProtocol.surfaceCapability]
         case .unsupported:
             nil
         }
@@ -1089,12 +1449,16 @@ extension UINode: Codable {
         id = try container.decode(String.self, forKey: .id)
         let kind = try container.decode(String.self, forKey: .type)
         switch kind {
+        case "canvasPage":
+            component = .canvasPage(try CanvasPageSpec(from: decoder))
         case "markdownEditor":
             component = .markdownEditor(try MarkdownEditorSpec(from: decoder))
         case "media":
             component = .media(try MediaSpec(from: decoder))
         case "page":
             component = .page(try PageSpec(from: decoder))
+        case "surface":
+            component = .surface(try SurfaceSpec(from: decoder))
         default:
             component = .unsupported(kind: kind)
         }
@@ -1104,6 +1468,9 @@ extension UINode: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         switch component {
+        case let .canvasPage(page):
+            try container.encode("canvasPage", forKey: .type)
+            try page.encode(to: encoder)
         case let .markdownEditor(editor):
             try container.encode("markdownEditor", forKey: .type)
             try editor.encode(to: encoder)
@@ -1113,6 +1480,9 @@ extension UINode: Codable {
         case let .page(page):
             try container.encode("page", forKey: .type)
             try page.encode(to: encoder)
+        case let .surface(surface):
+            try container.encode("surface", forKey: .type)
+            try surface.encode(to: encoder)
         case let .unsupported(kind):
             try container.encode(kind, forKey: .type)
         }

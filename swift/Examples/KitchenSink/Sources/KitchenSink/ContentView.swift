@@ -39,7 +39,7 @@ struct ContentView: View {
             }
             Section("Mini-host") {
                 Label("No Unpeel required", systemImage: "shippingbox")
-                Label("Real PTYs + Unix sockets", systemImage: "terminal")
+                Label("libghostty PTYs + Unix sockets", systemImage: "terminal")
                 Label("Scoped participant tokens", systemImage: "key")
             }
             .foregroundStyle(.secondary)
@@ -87,14 +87,21 @@ private struct SessionRow: View {
 
 private struct SessionDetail: View {
     @ObservedObject var session: HostedAppSession
+    @State private var showsComponentTree = true
 
     var body: some View {
         VStack(spacing: 0) {
             sessionToolbar
             Divider()
-            presentation
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(10)
+            HSplitView {
+                presentation
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(10)
+                if showsComponentTree {
+                    ComponentTreeCard(session: session)
+                        .frame(minWidth: 270, idealWidth: 330, maxWidth: 500)
+                }
+            }
             Divider()
             HarnessPanel(session: session)
         }
@@ -125,7 +132,18 @@ private struct SessionDetail: View {
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 250)
+            .frame(width: 320)
+            Button {
+                showsComponentTree.toggle()
+            } label: {
+                Label(
+                    "Component Tree",
+                    systemImage: showsComponentTree
+                        ? "sidebar.trailing"
+                        : "sidebar.trailing"
+                )
+            }
+            .help(showsComponentTree ? "Hide component tree" : "Show component tree")
         }
         .padding(.horizontal, 14)
         .frame(height: 50)
@@ -138,12 +156,16 @@ private struct SessionDetail: View {
             TerminalCard(session: session)
         case .native:
             ComponentCard(session: session)
+        case .web:
+            WebComponentCard(session: session)
         case .split:
             HSplitView {
                 TerminalCard(session: session)
-                    .frame(minWidth: 360)
+                    .frame(minWidth: 320)
                 ComponentCard(session: session)
-                    .frame(minWidth: 420)
+                    .frame(minWidth: 340)
+                WebComponentCard(session: session)
+                    .frame(minWidth: 340)
             }
         }
     }
@@ -155,19 +177,77 @@ private struct TerminalCard: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             Color(red: 0.055, green: 0.063, blue: 0.078)
+            if let broker = session.surfaceBroker {
+                KitchenSinkSurfacePresenter(
+                    broker: broker,
+                    interactive: false,
+                    background: surfaceBackground
+                )
+                    .aspectRatio(
+                        CGFloat(SurfaceMiniBroker.logicalWidth)
+                            / CGFloat(SurfaceMiniBroker.logicalHeight),
+                        contentMode: .fit
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.top, 28)
+                    .allowsHitTesting(false)
+            }
             TerminalPane(
                 engine: session.terminalEngine,
-                autoFocus: session.paneMode != .native,
-                applicationSelectedText: session.terminalSelectionText,
-                mirrorsApplicationMouseSelection: session.kind == .markdown
+                autoFocus: session.paneMode == .terminal
             )
                 .padding(.top, 28)
-            paneHeader("TERMINAL", detail: "SwiftTerm · real PTY")
+            paneHeader("TERMINAL", detail: "libghostty · Metal · real PTY")
         }
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .stroke(Color.white.opacity(0.1))
+        }
+    }
+
+    private var surfaceBackground: SurfaceBackground {
+        guard let snapshot = session.snapshot else { return .transparent }
+        switch snapshot.root.component {
+        case let .surface(surface):
+            return surface.background
+        case let .canvasPage(page):
+            return page.surface.surface.background
+        case .markdownEditor, .media, .page, .unsupported:
+            return .transparent
+        }
+    }
+}
+
+private struct WebComponentCard: View {
+    @ObservedObject var session: HostedAppSession
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color(nsColor: .controlBackgroundColor)
+            Group {
+                if let snapshot = session.snapshot {
+                    WebComponentPane(
+                        snapshot: snapshot,
+                        surfaceEndpoint: session.surfaceBroker?.webEndpoint
+                    ) { action in
+                        session.sendPrimary(action)
+                    }
+                } else {
+                    ContentUnavailableView(
+                        "Waiting for semantic UI",
+                        systemImage: "globe",
+                        description: Text(session.connectionLabel)
+                    )
+                }
+            }
+            .padding(.top, 28)
+            paneHeader("WEB", detail: "WKWebView · App Kit DOM components")
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.primary.opacity(0.1))
         }
     }
 }
@@ -180,7 +260,10 @@ private struct ComponentCard: View {
             Color(nsColor: .controlBackgroundColor)
             Group {
                 if let snapshot = session.snapshot {
-                    NativeComponent(snapshot: snapshot) { action in
+                    NativeComponent(
+                        snapshot: snapshot,
+                        surfaceBroker: session.surfaceBroker
+                    ) { action in
                         session.sendPrimary(action)
                     }
                 } else {
@@ -216,10 +299,35 @@ private struct ComponentCard: View {
 
 private struct NativeComponent: View {
     let snapshot: UISnapshot
+    let surfaceBroker: SurfaceMiniBroker?
     let onAction: (UIAction) -> Void
 
     var body: some View {
         switch snapshot.root.component {
+        case let .canvasPage(page):
+            if let surfaceBroker {
+                CanvasPageView(snapshot: snapshot, onAction: onAction) { surface in
+                    KitchenSinkSurfacePresenter(
+                        broker: surfaceBroker,
+                        interactive: surface.inputPolicy != .none,
+                        background: surface.background
+                    )
+                    .aspectRatio(
+                        CGFloat(SurfaceMiniBroker.logicalWidth)
+                            / CGFloat(SurfaceMiniBroker.logicalHeight),
+                        contentMode: .fit
+                    )
+                }
+            } else {
+                ContentUnavailableView(
+                    "Canvas presenter unavailable",
+                    systemImage: "rectangle.on.rectangle.angled",
+                    description: Text(
+                        "\(page.surface.surface.reference.streamID) needs UnpeelSurfaceKit; "
+                            + "using terminal fallback."
+                    )
+                )
+            }
         case .page:
             PageView(snapshot: snapshot, onAction: onAction)
         case .markdownEditor:
@@ -230,6 +338,30 @@ private struct NativeComponent: View {
                     .padding(30)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case let .surface(surface):
+            if let surfaceBroker {
+                SurfaceComponentView(snapshot: snapshot) { _ in
+                    KitchenSinkSurfacePresenter(
+                        broker: surfaceBroker,
+                        interactive: surface.inputPolicy != .none,
+                        background: surface.background
+                    )
+                    .aspectRatio(
+                        CGFloat(SurfaceMiniBroker.logicalWidth)
+                            / CGFloat(SurfaceMiniBroker.logicalHeight),
+                        contentMode: .fit
+                    )
+                }
+            } else {
+                ContentUnavailableView(
+                    "Surface presenter unavailable",
+                    systemImage: "globe.americas.fill",
+                    description: Text(
+                        "\(surface.reference.sessionID)/\(surface.reference.streamID) needs "
+                            + "UnpeelSurfaceKit and its WebGPU assets; using terminal fallback."
+                    )
+                )
+            }
         case let .unsupported(kind):
             ContentUnavailableView(
                 "Unsupported component",
