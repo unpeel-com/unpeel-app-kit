@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   decodeUiMessage,
   diffText,
+  markdownBlockReplacement,
+  visibleMarkdownInsertItems,
   isMarkdownEditorNode,
   isMediaNode,
   isPageNode,
@@ -541,6 +543,18 @@ describe("WorkspaceUiSession", () => {
 });
 
 describe("MarkdownEditor", () => {
+  test("uses the closed insert vocabulary across renderers", () => {
+    expect(visibleMarkdownInsertItems("todo").map((item) => item.kind)).toEqual(["todo"]);
+    expect(markdownBlockReplacement("heading2", "  ")).toEqual({
+      text: "  ## ",
+      caretOffset: 5,
+    });
+    expect(markdownBlockReplacement("codeBlock", "")).toEqual({
+      text: "```\n\n```",
+      caretOffset: 4,
+    });
+  });
+
   test("produces a Unicode-safe minimal range edit", () => {
     expect(diffText("a🙂b\nold", "a🙂b\nnew")).toEqual({
       range: {

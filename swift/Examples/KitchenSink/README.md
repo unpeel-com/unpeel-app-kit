@@ -7,6 +7,11 @@ It does not install, import, or launch Unpeel. Run it from the repository root:
 swift run --package-path swift/Examples/KitchenSink
 ```
 
+The bare SwiftPM executable promotes itself from macOS's default
+`BackgroundOnly` classification to a regular foreground application before
+the window opens. This is required for its SwiftTerm and native component
+views to own keyboard focus instead of the terminal that launched the rig.
+
 The first launch fetches SwiftTerm 1.19.0 and builds the repository's Todo,
 Markdown, and Media examples into `target/kitchen-sink`. Each example then
 runs as the direct child of a real SwiftTerm PTY in a private, short-lived
@@ -30,6 +35,14 @@ authoritative App process, attach a hidden agent participant with selectable
 grants, invoke a semantic action as that agent, inspect presence and final
 acks, and distinguish raw snapshots from server deltas. The participant's
 personalized title/alt text also proves `publish_to` isolation.
+
+For the Markdown session, click either pane before typing. The terminal PTY
+supports editor-owned drag, word, and line selection; the native pane uses
+`NSTextView` selection. Type `/` on an empty line for the shared block menu and
+use Backspace at a Markdown marker to turn the block back into plain text.
+Native typing is optimistic and coalesced before it enters the semantic
+revision stream, which keeps rapid input responsive without generating stale
+same-revision events.
 
 `TerminalEngineController` is the only SwiftTerm-specific boundary. Product
 Hosts can replace that small wrapper with GhosttyKit without changing session,

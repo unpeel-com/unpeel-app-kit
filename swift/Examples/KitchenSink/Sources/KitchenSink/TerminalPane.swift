@@ -8,16 +8,41 @@ struct TerminalLaunch: Sendable {
     let environment: [String: String]
 }
 
+/// SwiftTerm does not claim first responder from its selection-only mouse path.
+/// The mini-host makes that explicit so a click always arms the PTY for typing.
+final class KitchenSinkTerminalView: LocalProcessTerminalView {
+    var wantsInitialFocus = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard wantsInitialFocus, window != nil else { return }
+        wantsInitialFocus = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self)
+        }
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        window?.makeFirstResponder(self)
+    }
+}
+
 /// The single engine boundary in the kitchen sink. The product Host can swap
 /// this implementation for GhosttyKit without changing any session logic.
 @MainActor
 final class TerminalEngineController: NSObject {
-    let view: LocalProcessTerminalView
+    let view: KitchenSinkTerminalView
     var onTermination: ((Int32?) -> Void)?
     private(set) var isRunning = false
 
     override init() {
-        view = LocalProcessTerminalView(
+        view = KitchenSinkTerminalView(
             frame: CGRect(x: 0, y: 0, width: 900, height: 600),
             font: NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular),
             options: TerminalOptions(termName: "xterm-256color", scrollback: 20_000)
@@ -79,10 +104,32 @@ extension TerminalEngineController: @preconcurrency LocalProcessTerminalViewDele
 
 struct TerminalPane: NSViewRepresentable {
     let engine: TerminalEngineController
+    let autoFocus: Bool
 
-    func makeNSView(context _: Context) -> LocalProcessTerminalView {
-        engine.view
+    final class Coordinator {
+        var autoFocus: Bool
+
+        init(autoFocus: Bool) {
+            self.autoFocus = autoFocus
+        }
     }
 
-    func updateNSView(_: LocalProcessTerminalView, context _: Context) {}
+    func makeCoordinator() -> Coordinator {
+        Coordinator(autoFocus: autoFocus)
+    }
+
+    func makeNSView(context _: Context) -> KitchenSinkTerminalView {
+        engine.view.wantsInitialFocus = autoFocus
+        return engine.view
+    }
+
+    func updateNSView(_ view: KitchenSinkTerminalView, context: Context) {
+        let becameAutoFocused = autoFocus && !context.coordinator.autoFocus
+        context.coordinator.autoFocus = autoFocus
+        guard becameAutoFocused, view.window?.firstResponder !== view else { return }
+        DispatchQueue.main.async { [weak view] in
+            guard let view, view.window?.isKeyWindow == true else { return }
+            view.window?.makeFirstResponder(view)
+        }
+    }
 }

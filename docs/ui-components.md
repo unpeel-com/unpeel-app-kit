@@ -64,7 +64,7 @@ features = ["media"]
 | Cargo features | Compiled API |
 | --- | --- |
 | `default-features = false` | Core Ratatui components and standalone-safe helpers; no socket or UI protocol modules |
-| `markdown-text-area` | Adds the Ratatui `MarkdownEditor` / `MarkdownTextArea` |
+| `markdown-text-area` | Adds the Ratatui `MarkdownEditor` / `MarkdownTextArea` and optional `MarkdownEditorInteraction` controller |
 | `media` | Adds static image decoding and Ratatui rendering through Kitty, iTerm2, Sixel, or Unicode half-blocks |
 | `ui-bridge` (default) | Adds the optional protocol, socket, scoped-token, and state-envelope APIs |
 | `markdown-text-area` + `ui-bridge` | Also adds the Markdown semantic projection/event adapter |
@@ -501,7 +501,22 @@ to ensure edits never split a surrogate pair.
 The native renderer uses `NSTextView` inside `NSViewRepresentable`, with
 SwiftUI chrome and preview. The web renderer uses a native `<textarea>`, emits
 minimal Unicode-safe range edits, and accepts an optional Markdown rendering
-callback for preview HTML.
+callback for preview HTML. Both keep keystrokes optimistic locally and
+coalesce them into one edit at a time against the latest authoritative App
+revision; a renderer never floods several range edits carrying the same stale
+base revision. The native editor also preserves its local caret/selection
+across unrelated presence, ack, and projection redraws; it reapplies an App
+selection only on initial attach or a genuine external document replacement.
+
+`MarkdownEditorInteraction` is the standalone terminal interaction layer. It
+adds drag selection, double-click word selection, triple-click line selection,
+Markdown-aware Enter/Backspace, and a closed `/` insert menu. The vocabulary is
+Heading 1–6, Text, Bulleted list, Numbered list, To-do, Quote, Code, and
+Divider; it is intentionally Markdown-specific rather than arbitrary child
+nodes. AppKit and web implement the same vocabulary locally over their native
+text controls. The terminal App remains authoritative: choosing a native/web
+menu item becomes the same range edit as ordinary typing, then returns through
+the existing revision/ack path.
 
 ### Wiring the first vertical slice
 

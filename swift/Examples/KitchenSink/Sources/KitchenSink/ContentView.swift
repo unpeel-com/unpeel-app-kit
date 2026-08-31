@@ -155,7 +155,10 @@ private struct TerminalCard: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             Color(red: 0.055, green: 0.063, blue: 0.078)
-            TerminalPane(engine: session.terminalEngine)
+            TerminalPane(
+                engine: session.terminalEngine,
+                autoFocus: session.paneMode != .native
+            )
                 .padding(.top, 28)
             paneHeader("TERMINAL", detail: "SwiftTerm · real PTY")
         }

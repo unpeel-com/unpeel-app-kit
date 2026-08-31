@@ -43,6 +43,9 @@ swift run --package-path swift/Examples/KitchenSink
 It builds and launches the Todo, Markdown, and Media examples in real
 SwiftTerm PTYs, creates private per-session Unix sockets and signing keys, and
 attaches the sibling `UnpeelAppKitUI` renderer with Host-minted scoped tokens.
+Although SwiftPM launches a bare executable rather than an `.app` bundle, the
+harness explicitly adopts macOS's regular foreground activation policy so its
+window—not the terminal that launched it—owns keyboard focus.
 Every session can switch among Terminal, Native, and Split views. Harness
 controls cover child kill/restart and durable restore, renderer
 disconnect/resume, a second agent participant with configurable grants,
@@ -53,6 +56,14 @@ The harness is an independent SwiftPM executable package; it is not a library
 dependency and its CI workflow is manual-only. See
 [`swift/Examples/KitchenSink/README.md`](swift/Examples/KitchenSink/README.md)
 for its mini-host boundaries and test flow.
+
+Select the Markdown session to exercise the editor end to end. Both its PTY
+and native view accept typing and text selection. In the terminal, drag to
+select, double-click a word, or triple-click a line. Type `/` on an empty line
+to open the closed block menu; keep typing to filter, use Up/Down and
+Enter/Tab, and use Escape to remove the pending slash command. Backspace at a
+heading, list, task, or quote marker converts that block back to plain text.
+The same menu and Backspace rules are built into the AppKit and web renderers.
 
 ## Standalone TUI usage
 
@@ -118,6 +129,7 @@ The standalone component layer currently provides:
 | `display_path_from_root` | Render paths project-relative without weakening absolute semantic path operations |
 | `VerticalScrollbar` | Shared proportional, capless scrollbar |
 | `MarkdownEditor` / `MarkdownTextArea` | Ratatui-backed Markdown editor behind the independent `markdown-text-area` feature |
+| `MarkdownEditorInteraction` | Optional closed `/` block menu, Markdown-aware Enter/Backspace, and drag/word/line selection for `MarkdownTextArea` |
 | `Media` | Static images behind the independent `media` feature, using Kitty/iTerm2/Sixel with a Unicode half-block fallback |
 
 The crate owns reusable component behavior, not an App's event loop, key map,
@@ -708,9 +720,13 @@ frame.render_widget(
 `MarkdownTextArea` wraps `tui-textarea-2` with the visual behavior shared by
 Unpeel Markdown Apps: word-or-glyph wrapping, a continuation-aware line-number
 gutter, native terminal cursor placement, wrapped mouse hit-testing, drag
-auto-scroll, and the shared proportional scrollbar. Markdown commands and
-syntax highlighting remain App-owned and can use `text_area_mut()` (or normal
-`DerefMut` coercion) to reach the underlying editor.
+auto-scroll, and the shared proportional scrollbar. `MarkdownEditorInteraction`
+adds the opinionated editing layer used by the example: character/word/line
+selection, list continuation, marker-aware Backspace, and the closed `/`
+insert menu (`Heading 1`–`6`, Text, Bulleted/Numbered list, To-do, Quote, Code,
+and Divider). App-specific commands and syntax highlighting remain App-owned
+and can use `text_area_mut()` (or normal `DerefMut` coercion) to reach the
+underlying editor.
 
 Enable the `markdown-text-area` crate feature for this component; drag sources
 and `VerticalScrollbar` stay lightweight for Apps that do not edit text.

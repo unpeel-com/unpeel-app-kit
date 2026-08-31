@@ -21,6 +21,8 @@ mod host;
 mod input;
 mod keyboard;
 #[cfg(feature = "markdown-text-area")]
+mod markdown_interaction;
+#[cfg(feature = "markdown-text-area")]
 mod markdown_text_area;
 #[cfg(any(feature = "media", feature = "ui-bridge"))]
 mod media;
@@ -67,6 +69,11 @@ pub use explorer::{
 pub use host::AppReporter;
 pub use input::{InputField, InputFieldAction, InputFieldTheme, InputFieldWidget};
 pub use keyboard::KeyboardEnhancementGuard;
+#[cfg(feature = "markdown-text-area")]
+pub use markdown_interaction::{
+    MARKDOWN_INSERT_ITEMS, MarkdownBlockKind, MarkdownEditorInteraction, MarkdownInsertItem,
+    MarkdownInteractionOutcome, visible_markdown_insert_items,
+};
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_text_area::{
     MarkdownEditor, MarkdownEditorStyle, MarkdownTextArea, MarkdownTextAreaStyle,

@@ -8,21 +8,25 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Paragraph;
 use serde::{Deserialize, Serialize};
 use tui_textarea::{Input as TextInput, Key as TextKey};
 use unpeel_app_kit::{
-    AppMetadata, MarkdownEditor, MarkdownEditorConfig, MarkdownEditorEvent, MarkdownEditorStyle,
-    MarkdownPresentation, UiBridge, UiBridgeEvent, UiDeltaOperation, UiEventOutcome, UiNode,
+    AppMetadata, MarkdownEditor, MarkdownEditorConfig, MarkdownEditorEvent,
+    MarkdownEditorInteraction, MarkdownEditorStyle, MarkdownPresentation, UiBridge, UiBridgeEvent,
+    UiDeltaOperation, UiEventOutcome, UiNode,
 };
 
 const STATE_FORMAT: &str = "unpeel.app-kit.example.markdown";
@@ -65,6 +69,7 @@ struct MarkdownApp {
     state: MarkdownState,
     state_path: PathBuf,
     editor: MarkdownEditor<'static>,
+    interaction: MarkdownEditorInteraction,
     status: String,
 }
 
@@ -93,11 +98,12 @@ impl MarkdownApp {
         );
         editor
             .text_area_mut()
-            .set_placeholder_text("Write Markdown…");
+            .set_placeholder_text("Write Markdown… Type / on an empty line for blocks.");
         Ok(Self {
             state,
             state_path,
             editor,
+            interaction: MarkdownEditorInteraction::new(),
             status: String::new(),
         })
     }
@@ -313,7 +319,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -336,10 +347,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                         areas[0],
                     );
                     app.editor.render(frame, areas[1], true);
+                    app.interaction.render_overlay(&app.editor, frame);
+                    let controls =
+                        "/ insert · drag/double/triple-click select · Ctrl-S save · Esc quit";
                     let help = if app.status.is_empty() {
-                        "Ctrl-S save · Esc quit"
+                        controls.to_owned()
                     } else {
-                        &app.status
+                        format!("{} · {controls}", app.status)
                     };
                     frame.render_widget(
                         Paragraph::new(help).style(Style::new().fg(Color::DarkGray)),
@@ -355,10 +369,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    if key.code == KeyCode::Esc
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                    if key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
+                        break;
+                    }
+                    if key.code == KeyCode::Esc && !app.interaction.is_insert_menu_open() {
                         break;
                     }
                     if key.code == KeyCode::Char('s')
@@ -367,17 +383,49 @@ fn run() -> Result<(), Box<dyn Error>> {
                         app.save_without_revision()?;
                         continue;
                     }
-                    let before = markdown_document(app.editor.lines());
-                    app.editor.text_area_mut().input(text_input(key));
-                    if markdown_document(app.editor.lines()) != before {
+                    let outcome = app
+                        .interaction
+                        .handle_input(&mut app.editor, text_input(key));
+                    if outcome.text_changed() {
                         let (base, _) = app.commit_projection_change()?;
                         publish_root(&app, &mut bridge, base)?;
                     }
                 }
                 Event::Paste(text) => {
-                    let before = markdown_document(app.editor.lines());
-                    app.editor.text_area_mut().insert_str(text);
-                    if markdown_document(app.editor.lines()) != before {
+                    let outcome = app.interaction.handle_paste(&mut app.editor, &text);
+                    if outcome.text_changed() {
+                        let (base, _) = app.commit_projection_change()?;
+                        publish_root(&app, &mut bridge, base)?;
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    let position = Position::new(mouse.column, mouse.row);
+                    let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+                    let outcome = match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            app.interaction
+                                .pointer_down(&mut app.editor, position, shift)
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            app.interaction.pointer_drag(&mut app.editor, position)
+                        }
+                        MouseEventKind::Moved => {
+                            app.interaction.pointer_move(&mut app.editor, position)
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            app.interaction.pointer_up(&mut app.editor)
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.interaction
+                                .pointer_scroll(&mut app.editor, position, 2, shift)
+                        }
+                        MouseEventKind::ScrollUp => {
+                            app.interaction
+                                .pointer_scroll(&mut app.editor, position, -2, shift)
+                        }
+                        _ => Default::default(),
+                    };
+                    if outcome.text_changed() {
                         let (base, _) = app.commit_projection_change()?;
                         publish_root(&app, &mut bridge, base)?;
                     }
@@ -390,7 +438,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     })();
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -398,7 +451,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn main() {
     if let Err(error) = run() {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         eprintln!("markdown: {error}");
         std::process::exit(1);
     }

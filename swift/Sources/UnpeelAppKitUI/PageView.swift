@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Native SwiftUI interpretation of the closed Page component family.
@@ -83,9 +84,13 @@ private struct PageContent: View {
             }
         )
         return HStack {
-            TextField(input.placeholder, text: value)
+            StableInputField(
+                text: value,
+                placeholder: input.placeholder,
+                onSubmit: { submit(input) }
+            )
                 .accessibilityLabel(input.label)
-                .onSubmit { submit(input) }
+                .frame(minHeight: 24)
             if input.submit != nil {
                 Button("Add") { submit(input) }
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -150,6 +155,79 @@ private struct PageContent: View {
             .labelsHidden()
             .accessibilityLabel(toggle.label)
             .toggleStyle(.switch)
+        }
+    }
+}
+
+/// An AppKit field whose editor survives unrelated snapshot/presence redraws.
+/// SwiftUI's stock TextField can resign its field editor when a whole semantic
+/// projection value is replaced, even though the Input node itself is stable.
+@MainActor
+private struct StableInputField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.delegate = context.coordinator
+        field.placeholderString = placeholder
+        field.isEditable = true
+        field.isSelectable = true
+        field.isBordered = true
+        field.bezelStyle = .roundedBezel
+        field.focusRingType = .default
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        field.placeholderString = placeholder
+        // Never replace the active field editor underneath the user's caret.
+        if field.currentEditor() == nil, field.stringValue != text {
+            field.stringValue = text
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: StableInputField
+
+        init(parent: StableInputField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            if parent.text != field.stringValue {
+                parent.text = field.stringValue
+            }
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            if parent.text != field.stringValue {
+                parent.text = field.stringValue
+            }
+        }
+
+        func control(
+            _ control: NSControl,
+            textView _: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            guard NSStringFromSelector(commandSelector) == "insertNewline:",
+                  let field = control as? NSTextField
+            else { return false }
+            if parent.text != field.stringValue {
+                parent.text = field.stringValue
+            }
+            parent.onSubmit()
+            field.stringValue = parent.text
+            return true
         }
     }
 }
