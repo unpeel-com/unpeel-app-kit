@@ -9,12 +9,37 @@ The Rust terminal process is the App. It owns the model, reducer, validation,
 persistence, and commands. Ratatui, SwiftUI/AppKit, and DOM are renderers of
 the same semantic component state.
 
-This is deliberately compatible with Unpeel's 2026-08-24 “Apps stay
-Ratatui-first; no semantic SDK” decision. The semantic component channel lives
-entirely in **App Kit**, is opt-in, and enhances an App that is already a fully
-functional Ratatui TUI. It is not an SDK in `unpeel-core`, does not render
-Unpeel's shell, and is never required to launch, use, stream, or recover the
-terminal App. Unsupported components and old Hosts keep using the PTY.
+This channel is the decided presentation path in Unpeel's decision log,
+`docs/MASTER PLAN.md` §10 **D16 — The App Kit semantic component channel is a
+sanctioned opt-in presentation path** (2026-08-31). D16 amends D14 and narrows
+the 2026-08-24 removal: the general semantic widget SDK remains absent from
+Unpeel core, while this opinionated component channel lives entirely in
+`unpeel-app-kit`.
+
+Unpeel core has only two semantic-channel touchpoints: inject
+`UNPEEL_UI_SOCKET` / `UNPEEL_UI_TOKEN` when it spawns an App Session, and broker
+authorized participant attachments through the existing Host contract. The
+component vocabulary, protocol model, reducers, persistence convention,
+Ratatui implementations, and Swift/web wrappers remain in App Kit.
+
+The matching **Presentation paths (2026-08-31)** Product Philosophy note in
+Unpeel's `AGENTS.md` makes D14 and D16 the two sanctioned additive channels.
+D16's invariants are load-bearing conformance requirements:
+
+- **Terminal fallback is mandatory.** Every App is first a complete Ratatui
+  TUI; semantic presentation cannot be required to launch, use, stream, or
+  recover it.
+- **The bridge is inert without Host injection.** With no injected socket, the
+  same binary runs as a plain TUI and never creates a competing server.
+- **Component UI is not IDE chrome.** App Kit must not introduce diff viewers,
+  file trees, source-code editor panes, language tooling, or other code-centric
+  framing into Unpeel.
+- **D14 and D16 have distinct jobs.** D14 scenes serve GPU/canvas presentation;
+  D16 components serve data/document Apps where people and agents need
+  semantic operations.
+
+Unsupported components and older Hosts keep using the PTY. These boundaries
+are architectural invariants, not graceful-degradation suggestions.
 
 ## Runtime architecture
 
@@ -96,8 +121,9 @@ records.
 
 ### Existing Host integration points
 
-The Unpeel integration should be a narrow additive slice at existing choke
-points:
+The two D16 Unpeel-core touchpoints map to a narrow additive slice at existing
+choke points; native and remote transport adapters stay wrappers around that
+same Host contract:
 
 1. `crates/unpeel-core/src/session_host.rs` constructs the provider
    `CommandBuilder`; its shared launch integration already injects
