@@ -24,6 +24,21 @@ default-features = false
 features = ["markdown-text-area"]
 ```
 
+Static terminal images are independently opt-in as well:
+
+```toml
+[dependencies.unpeel-app-kit]
+path = "../unpeel-app-kit"
+default-features = false
+features = ["media"]
+```
+
+`MediaPicker::from_query_stdio()` selects Kitty first when supported, then
+iTerm2 or Sixel, and finally Unicode half-blocks. Call it after entering the
+alternate screen and before starting terminal event reads. `Media::load`
+renders local paths or bounded inline images; broker-resolved blobs use
+`Media::from_resolved_bytes` so length and SHA-256 are checked before decode.
+
 The `ui-bridge` feature is default-on for API compatibility. It only makes the
 optional hosted types available; it opens no socket and starts no background
 work unless the App explicitly calls `UiBridge::detect()`. A pure-TUI build can
@@ -51,6 +66,7 @@ The standalone component layer currently provides:
 | `display_path_from_root` | Render paths project-relative without weakening absolute semantic path operations |
 | `VerticalScrollbar` | Shared proportional, capless scrollbar |
 | `MarkdownEditor` / `MarkdownTextArea` | Ratatui-backed Markdown editor behind the independent `markdown-text-area` feature |
+| `Media` | Static images behind the independent `media` feature, using Kitty/iTerm2/Sixel with a Unicode half-block fallback |
 
 The crate owns reusable component behavior, not an App's event loop, key map,
 commands, or surrounding chrome. Hosted helpers elsewhere in the table are
@@ -69,6 +85,7 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | `UiBridge` / `unpeel.ui/1` | App-owned Unix endpoint for scoped human/agent participants, snapshots, deltas, actions, presence, and acknowledgements without touching the PTY |
 | `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
+| Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
 
 The hosted vocabulary is deliberately small and opinionated rather than a
 portable encoding of every possible Ratatui widget:
@@ -115,7 +132,9 @@ Kit. Its standalone invariant is strict: every App must remain fully
 functional through its TUI, and semantic rendering is only an optional
 presentation path over that fallback.
 
-`MarkdownEditor` is the first vertical slice. `Page`, `Tabs`, `List`,
+`MarkdownEditor` and static `Media` are the first two vertical slices. Media
+travels as a local path, a bounded 256 KiB inline image, or a content-addressed
+blob reference—never as an unbounded JSON payload. `Page`, `Tabs`, `List`,
 `ListItem`, `Toggle`, `Input`, and later richer components such as `DataGrid`
 can join the same closed, versioned vocabulary. Containment is slot-based:
 `List` accepts only `ListItem` values, and row slots accept only explicitly
@@ -127,10 +146,11 @@ schema](protocol/unpeel-ui-v1.schema.json), and the separate
 The renderer packages live with the component definitions so the contract
 cannot drift:
 
-- `swift/` — `UnpeelAppKitUI`, including a real `NSTextView` in SwiftUI and a
-  reconnecting trusted Unix client;
-- `web/` — `@unpeel/app-kit-ui`, including a DOM Markdown renderer and the
-  `WorkspaceUiSession` transport for the existing Host's `/mobile` extension; and
+- `swift/` — `UnpeelAppKitUI`, including native Markdown and asynchronous
+  `NSImage` Media views plus a reconnecting trusted Unix client;
+- `web/` — `@unpeel/app-kit-ui`, including DOM Markdown and accessible `<img>`
+  Media renderers plus `WorkspaceUiSession` for the existing Host's `/mobile`
+  extension; and
 - `protocol/` — validated, forward-compatible schemas and shared fixtures
   consumed by Rust, Swift, and web tests.
 
@@ -246,6 +266,12 @@ need it:
 
 ```toml
 unpeel-app-kit = { path = "../unpeel-app-kit", default-features = false, features = ["markdown-text-area"] }
+```
+
+Or enable static terminal images independently:
+
+```toml
+unpeel-app-kit = { path = "../unpeel-app-kit", default-features = false, features = ["media"] }
 ```
 
 An App opting into D16 hosted presentation can add `ui-bridge`, or use the
@@ -693,6 +719,7 @@ match drops.poll()? {
 ```sh
 cargo test --no-default-features
 cargo test --no-default-features --features markdown-text-area
+cargo test --no-default-features --features media
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 (cd swift && swift test)

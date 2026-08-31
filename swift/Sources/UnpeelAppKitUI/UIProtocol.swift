@@ -6,6 +6,12 @@ public enum UnpeelUIProtocol {
     public static let maximumVersion = 1
     public static let version = maximumVersion
     public static let deltaCapability = "serverDelta"
+    public static let markdownEditorCapability = "markdownEditor"
+    public static let mediaCapability = "media"
+    public static let supportedComponentCapabilities = [
+        markdownEditorCapability,
+        mediaCapability,
+    ]
     private static let maximumWireVersion = Int(UInt32.max)
 
     public static func supports(_ version: Int) -> Bool {
@@ -411,8 +417,350 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
     }
 }
 
+public enum MediaFit: String, Codable, Equatable, Hashable, Sendable {
+    case contain
+    case cover
+    case fill
+}
+
+public struct MediaPixelSize: Codable, Equatable, Hashable, Sendable {
+    public let w: Int
+    public let h: Int
+
+    public init(w: Int, h: Int) {
+        self.w = w
+        self.h = h
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        w = try container.decode(Int.self, forKey: .w)
+        h = try container.decode(Int.self, forKey: .h)
+        guard (1...Int(UInt32.max)).contains(w), (1...Int(UInt32.max)).contains(h) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .w,
+                in: container,
+                debugDescription: "Media intrinsic dimensions must be positive UInt32 values"
+            )
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case w
+        case h
+    }
+}
+
+public struct MediaCellSize: Codable, Equatable, Hashable, Sendable {
+    public let w: Int?
+    public let h: Int?
+
+    public init(w: Int? = nil, h: Int? = nil) {
+        self.w = w
+        self.h = h
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        w = try container.decodeIfPresent(Int.self, forKey: .w)
+        h = try container.decodeIfPresent(Int.self, forKey: .h)
+        guard w != nil || h != nil,
+              w.map({ (1...Int(UInt16.max)).contains($0) }) ?? true,
+              h.map({ (1...Int(UInt16.max)).contains($0) }) ?? true
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .w,
+                in: container,
+                debugDescription: "Media cell size needs at least one positive UInt16 axis"
+            )
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case w
+        case h
+    }
+}
+
+public struct MediaPointSize: Codable, Equatable, Hashable, Sendable {
+    public let w: Int?
+    public let h: Int?
+
+    public init(w: Int? = nil, h: Int? = nil) {
+        self.w = w
+        self.h = h
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        w = try container.decodeIfPresent(Int.self, forKey: .w)
+        h = try container.decodeIfPresent(Int.self, forKey: .h)
+        guard w != nil || h != nil,
+              w.map({ (1...Int(UInt32.max)).contains($0) }) ?? true,
+              h.map({ (1...Int(UInt32.max)).contains($0) }) ?? true
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .w,
+                in: container,
+                debugDescription: "Media point size needs at least one positive UInt32 axis"
+            )
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case w
+        case h
+    }
+}
+
+public struct MediaBlobReference: Codable, Equatable, Hashable, Sendable {
+    public let sha256: String
+    public let mediaType: String
+    public let byteLength: Int
+
+    public init(sha256: String, mediaType: String, byteLength: Int) {
+        self.sha256 = sha256
+        self.mediaType = mediaType
+        self.byteLength = byteLength
+    }
+}
+
+public enum MediaSource: Equatable, Hashable, Sendable {
+    case path(String)
+    case inline(mediaType: String, base64: String)
+    case blob(MediaBlobReference)
+}
+
+extension MediaSource: Codable {
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case path
+        case mediaType
+        case base64
+        case sha256
+        case byteLength
+    }
+
+    enum Kind: String, Codable {
+        case path
+        case inline
+        case blob
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(Kind.self, forKey: .kind) {
+        case .path:
+            let path = try container.decode(String.self, forKey: .path)
+            guard !path.isEmpty, path.utf8.count <= 4_096, !path.contains("\0") else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .path,
+                    in: container,
+                    debugDescription: "Media path must contain 1...4096 non-NUL bytes"
+                )
+            }
+            self = .path(path)
+        case .inline:
+            let mediaType = try container.decode(String.self, forKey: .mediaType)
+            let base64 = try container.decode(String.self, forKey: .base64)
+            try Self.validateMediaType(mediaType, key: .mediaType, in: container)
+            guard base64.utf8.count <= 349_528,
+                  let data = Data(base64Encoded: base64),
+                  data.base64EncodedString() == base64,
+                  (1...262_144).contains(data.count)
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .base64,
+                    in: container,
+                    debugDescription: "Inline Media must be valid base64 containing at most 256 KiB"
+                )
+            }
+            self = .inline(mediaType: mediaType, base64: base64)
+        case .blob:
+            let reference = MediaBlobReference(
+                sha256: try container.decode(String.self, forKey: .sha256),
+                mediaType: try container.decode(String.self, forKey: .mediaType),
+                byteLength: try container.decode(Int.self, forKey: .byteLength)
+            )
+            try Self.validateMediaType(reference.mediaType, key: .mediaType, in: container)
+            guard reference.sha256.count == 64,
+                  reference.sha256.utf8.allSatisfy({
+                      (48...57).contains($0) || (97...102).contains($0)
+                  }),
+                  (1...9_007_199_254_740_991).contains(reference.byteLength)
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .sha256,
+                    in: container,
+                    debugDescription: "Media blob metadata is invalid"
+                )
+            }
+            self = .blob(reference)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .path(path):
+            try container.encode(Kind.path, forKey: .kind)
+            try container.encode(path, forKey: .path)
+        case let .inline(mediaType, base64):
+            try container.encode(Kind.inline, forKey: .kind)
+            try container.encode(mediaType, forKey: .mediaType)
+            try container.encode(base64, forKey: .base64)
+        case let .blob(reference):
+            try container.encode(Kind.blob, forKey: .kind)
+            try container.encode(reference.sha256, forKey: .sha256)
+            try container.encode(reference.mediaType, forKey: .mediaType)
+            try container.encode(reference.byteLength, forKey: .byteLength)
+        }
+    }
+
+    private static func validateMediaType<Key: CodingKey>(
+        _ value: String,
+        key: Key,
+        in container: KeyedDecodingContainer<Key>
+    ) throws {
+        let punctuation = Set("!#$&^_.+-/".utf8)
+        guard value.hasPrefix("image/"),
+              value.utf8.count <= 127,
+              value.utf8.allSatisfy({
+                  (48...57).contains($0)
+                      || (65...90).contains($0)
+                      || (97...122).contains($0)
+                      || punctuation.contains($0)
+              })
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: container,
+                debugDescription: "Media mediaType must be an image MIME type"
+            )
+        }
+    }
+}
+
+public struct MediaSpec: Codable, Equatable, Hashable, Sendable {
+    public let source: MediaSource
+    public let intrinsic: MediaPixelSize
+    public let cells: MediaCellSize?
+    public let points: MediaPointSize?
+    public let fit: MediaFit
+    public let alt: String
+    public let activate: String?
+
+    public init(
+        source: MediaSource,
+        intrinsic: MediaPixelSize,
+        cells: MediaCellSize? = nil,
+        points: MediaPointSize? = nil,
+        fit: MediaFit = .contain,
+        alt: String,
+        activate: String? = nil
+    ) {
+        self.source = source
+        self.intrinsic = intrinsic
+        self.cells = cells
+        self.points = points
+        self.fit = fit
+        self.alt = alt
+        self.activate = activate
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case source
+        case intrinsic
+        case cells
+        case points
+        case fit
+        case alt
+        case activate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        source = try container.decode(MediaSource.self, forKey: .source)
+        intrinsic = try container.decode(MediaPixelSize.self, forKey: .intrinsic)
+        cells = try container.decodeIfPresent(MediaCellSize.self, forKey: .cells)
+        points = try container.decodeIfPresent(MediaPointSize.self, forKey: .points)
+        fit = try container.decodeIfPresent(MediaFit.self, forKey: .fit) ?? .contain
+        alt = try container.decode(String.self, forKey: .alt)
+        activate = try container.decodeIfPresent(String.self, forKey: .activate)
+        guard alt.utf8.count <= 16_384 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .alt,
+                in: container,
+                debugDescription: "Media alt text must contain at most 16384 bytes"
+            )
+        }
+        if let activate {
+            guard !activate.isEmpty,
+                  activate.utf8.count <= 256,
+                  activate.utf8.allSatisfy({
+                      (48...57).contains($0)
+                          || (65...90).contains($0)
+                          || (97...122).contains($0)
+                          || [46, 95, 58, 47, 45].contains($0)
+                  })
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .activate,
+                    in: container,
+                    debugDescription: "Media activate must be a portable action identifier"
+                )
+            }
+        }
+    }
+
+    public var resolvedPointSize: (w: Int, h: Int) {
+        guard let points else { return (intrinsic.w, intrinsic.h) }
+        switch (points.w, points.h) {
+        case let (w?, h?):
+            return (w, h)
+        case let (w?, nil):
+            return (w, ratioCeil(w, intrinsic.h, intrinsic.w))
+        case let (nil, h?):
+            return (ratioCeil(h, intrinsic.w, intrinsic.h), h)
+        case (nil, nil):
+            return (intrinsic.w, intrinsic.h)
+        }
+    }
+}
+
+private func ratioCeil(_ value: Int, _ numerator: Int, _ denominator: Int) -> Int {
+    let scaled = UInt64(value) * UInt64(numerator)
+    let divisor = UInt64(max(denominator, 1))
+    let resolved = scaled / divisor + (scaled % divisor == 0 ? 0 : 1)
+    return Int(min(resolved, UInt64(UInt32.max)))
+}
+
 public enum UIComponent: Equatable, Sendable {
     case markdownEditor(MarkdownEditorSpec)
+    case media(MediaSpec)
+    case unsupported(kind: String)
+
+    public var kind: String {
+        switch self {
+        case .markdownEditor:
+            "markdownEditor"
+        case .media:
+            "media"
+        case let .unsupported(kind):
+            kind
+        }
+    }
+
+    public var requiredCapability: String? {
+        switch self {
+        case .markdownEditor:
+            UnpeelUIProtocol.markdownEditorCapability
+        case .media:
+            UnpeelUIProtocol.mediaCapability
+        case .unsupported:
+            nil
+        }
+    }
 }
 
 public struct UINode: Equatable, Sendable {
@@ -431,16 +779,17 @@ extension UINode: Codable {
         case type
     }
 
-    enum ComponentType: String, Codable {
-        case markdownEditor
-    }
-
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
-        switch try container.decode(ComponentType.self, forKey: .type) {
-        case .markdownEditor:
+        let kind = try container.decode(String.self, forKey: .type)
+        switch kind {
+        case "markdownEditor":
             component = .markdownEditor(try MarkdownEditorSpec(from: decoder))
+        case "media":
+            component = .media(try MediaSpec(from: decoder))
+        default:
+            component = .unsupported(kind: kind)
         }
     }
 
@@ -449,8 +798,13 @@ extension UINode: Codable {
         try container.encode(id, forKey: .id)
         switch component {
         case let .markdownEditor(editor):
-            try container.encode(ComponentType.markdownEditor, forKey: .type)
+            try container.encode("markdownEditor", forKey: .type)
             try editor.encode(to: encoder)
+        case let .media(media):
+            try container.encode("media", forKey: .type)
+            try media.encode(to: encoder)
+        case let .unsupported(kind):
+            try container.encode(kind, forKey: .type)
         }
     }
 }

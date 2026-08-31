@@ -3,8 +3,13 @@ import { describe, expect, test } from "bun:test";
 import {
   decodeUiMessage,
   diffText,
+  isMarkdownEditorNode,
+  isMediaNode,
   negotiateUiProtocolVersion,
   applyUiDelta,
+  resolveMediaPointSize,
+  uiNodeCapability,
+  verifyMediaBlobBytes,
   type UiAttached,
   type UiDelta,
   type UiPresence,
@@ -20,7 +25,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(11);
+    expect(messages).toHaveLength(13);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -34,6 +39,7 @@ describe("shared protocol", () => {
     expect(snapshot.appInstanceId).toBe("app-fixture");
     expect(snapshot.clientId).toBe("client-alice-mac");
     expect(snapshot.root.type).toBe("markdownEditor");
+    if (!isMarkdownEditorNode(snapshot.root)) throw new Error("expected Markdown fixture");
     expect(snapshot.root.text).toBe("# Hello\n🙂 world");
     expect(snapshot.root.selection.head.utf16Column).toBe(2);
     expect(messages[3]?.type).toBe("presence");
@@ -46,8 +52,18 @@ describe("shared protocol", () => {
     const delta = messages[10] as UiDelta;
     const updated = applyUiDelta(snapshot, delta);
     expect(updated.revision).toBe(8);
+    if (!isMarkdownEditorNode(updated.root)) throw new Error("expected Markdown delta result");
     expect(updated.root.text).toBe("# Hello\nHello world");
     expect(updated.root.selection.head.utf16Column).toBe(5);
+
+    const mediaSnapshot = messages[11] as UiSnapshot;
+    if (!isMediaNode(mediaSnapshot.root)) throw new Error("expected Media fixture");
+    expect(mediaSnapshot.root.alt).toBe("Tiny fixture pixel");
+    expect(resolveMediaPointSize(mediaSnapshot.root)).toEqual({ w: 40, h: 40 });
+    const mediaDelta = messages[12] as UiDelta;
+    const updatedMedia = applyUiDelta(mediaSnapshot, mediaDelta);
+    if (!isMediaNode(updatedMedia.root)) throw new Error("expected Media delta result");
+    expect(updatedMedia.root.source.kind).toBe("blob");
   });
 
   test("builds the same command envelope", () => {
@@ -117,7 +133,11 @@ describe("shared protocol", () => {
     expect(decodeUiMessage(snapshot).type).toBe("snapshot");
 
     root.type = "futureEditor";
-    expect(() => decodeUiMessage(snapshot)).toThrow("Unsupported UI component");
+    const future = decodeUiMessage(snapshot);
+    expect(future.type).toBe("snapshot");
+    if (future.type === "snapshot") {
+      expect(uiNodeCapability(future.root)).toBeUndefined();
+    }
   });
 });
 
@@ -158,6 +178,7 @@ describe("WorkspaceUiSession", () => {
       rendererId: "renderer-alice-web",
       viewId: "main",
       capabilities: ["markdownEditor"],
+      supportedComponentCapabilities: ["markdownEditor"],
       onSnapshot: (snapshot) => snapshots.push(snapshot),
       onPresence: (value) => {
         presence = value;
@@ -215,7 +236,8 @@ describe("WorkspaceUiSession", () => {
     });
     expect(snapshots).toHaveLength(2);
     expect(snapshots[1]?.revision).toBe(8);
-    expect(snapshots[1]?.root.dirty).toBe(true);
+    const dirtyRoot = snapshots[1]?.root;
+    expect(dirtyRoot && isMarkdownEditorNode(dirtyRoot) ? dirtyRoot.dirty : undefined).toBe(true);
     expect(session.send(
       uiAction("editor", "save", "command"),
       "event-browser-save-1",
@@ -293,6 +315,91 @@ describe("WorkspaceUiSession", () => {
     expect(session.pendingEventCount).toBe(0);
     session.stop();
   });
+
+  test("falls back the pane without closing an unsupported component attachment", () => {
+    const socket = new FakeSocket();
+    const snapshots: UiSnapshot[] = [];
+    const fallbacks: string[] = [];
+    const session = new WorkspaceUiSession({
+      url: "wss://workspace.example/apps/terminal-9/ui",
+      appSessionId: "terminal-9",
+      clientId: "client-alice-web",
+      rendererId: "renderer-alice-web",
+      viewId: "main",
+      supportedComponentCapabilities: ["markdownEditor"],
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+      onTerminalFallback: (kind) => fallbacks.push(kind),
+      webSocketFactory: () => socket,
+    });
+
+    session.start();
+    socket.open();
+    socket.message(attachedFrame());
+    socket.message(mediaSnapshotFrame());
+
+    expect(snapshots).toHaveLength(0);
+    expect(fallbacks).toEqual(["media"]);
+    expect(socket.readyState).toBe(1);
+    const lifecycle = JSON.parse(socket.sent.at(-1)!) as Record<string, unknown>;
+    expect(lifecycle).toMatchObject({
+      type: "lifecycle",
+      protocol: "unpeel.workspace.ui",
+      state: { rendererVisible: false, terminalVisible: true },
+    });
+    expect(session.send(uiAction("hero-image", "open-image", "activate"))).toBeUndefined();
+
+    socket.message({ ...snapshotFrame(), revision: 10 });
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.root.type).toBe("markdownEditor");
+    const restored = JSON.parse(socket.sent.at(-1)!) as Record<string, unknown>;
+    expect(restored).toMatchObject({
+      type: "lifecycle",
+      state: { rendererVisible: true, terminalVisible: false },
+    });
+    expect(session.send(
+      uiAction("editor", "save", "command"),
+      "event-after-fallback",
+    )).toBe("event-after-fallback");
+    session.stop();
+  });
+
+  test("falls back for unknown roots and prevents path Media from reaching browser renderers", () => {
+    const socket = new FakeSocket();
+    const snapshots: UiSnapshot[] = [];
+    const fallbacks: string[] = [];
+    const session = new WorkspaceUiSession({
+      url: "wss://workspace.example/apps/terminal-9/ui",
+      appSessionId: "terminal-9",
+      clientId: "client-alice-web",
+      rendererId: "renderer-alice-web",
+      viewId: "main",
+      onSnapshot: (snapshot) => snapshots.push(snapshot),
+      onTerminalFallback: (kind) => fallbacks.push(kind),
+      webSocketFactory: () => socket,
+    });
+
+    session.start();
+    socket.open();
+    socket.message(attachedFrame());
+    socket.message({
+      ...mediaSnapshotFrame(),
+      root: {
+        ...mediaSnapshotFrame().root,
+        source: { kind: "path", path: "/private/app/secret.png" },
+      },
+    });
+    socket.message({
+      ...snapshotFrame(),
+      revision: 10,
+      root: { id: "future-root", type: "futureGrid", privatePayload: true },
+    });
+
+    expect(snapshots).toHaveLength(0);
+    expect(fallbacks).toEqual(["media", "futureGrid"]);
+    expect(socket.readyState).toBe(1);
+    expect(socket.sent.join("\n")).not.toContain("/private/app/secret.png");
+    session.stop();
+  });
 });
 
 describe("MarkdownEditor", () => {
@@ -314,6 +421,51 @@ describe("MarkdownEditor", () => {
       },
       text: "X",
     });
+  });
+});
+
+describe("Media", () => {
+  test("rejects non-canonical inline base64", () => {
+    const snapshot = mediaSnapshotFrame();
+    expect(() => decodeUiMessage({
+      ...snapshot,
+      root: {
+        ...snapshot.root,
+        source: { kind: "inline", mediaType: "image/png", base64: "AB==" },
+      },
+    })).toThrow("base64");
+  });
+
+  test("derives omitted point axes with integer-safe aspect math", () => {
+    const snapshot = mediaSnapshotFrame();
+    if (!isMediaNode(snapshot.root)) throw new Error("expected Media fixture");
+    const media = {
+      ...snapshot.root,
+      intrinsic: { w: 4_294_967_291, h: 4_294_967_279 },
+      points: { w: 4_294_967_283 },
+    };
+    expect(resolveMediaPointSize(media)).toEqual({
+      w: 4_294_967_283,
+      h: 4_294_967_272,
+    });
+  });
+
+  test("verifies bytes resolved through the broker by length and SHA-256", async () => {
+    const binary = atob(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    );
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const source = {
+      kind: "blob" as const,
+      sha256: "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      mediaType: "image/png",
+      byteLength: 68,
+    };
+    await verifyMediaBlobBytes(source, bytes.buffer);
+    await expect(verifyMediaBlobBytes(
+      { ...source, sha256: "0".repeat(64) },
+      bytes.buffer,
+    )).rejects.toThrow("SHA-256 mismatch");
   });
 });
 
@@ -389,6 +541,31 @@ function snapshotFrame(): UiSnapshot {
         anchor: { line: 0, utf16Column: 7 },
         head: { line: 0, utf16Column: 7 },
       },
+    },
+  };
+}
+
+function mediaSnapshotFrame(): UiSnapshot {
+  return {
+    type: "snapshot",
+    protocol: "unpeel.ui",
+    protocolVersion: 1,
+    appInstanceId: "app-fixture",
+    clientId: "client-alice-web",
+    viewId: "main",
+    revision: 9,
+    root: {
+      id: "hero-image",
+      type: "media",
+      source: {
+        kind: "inline",
+        mediaType: "image/png",
+        base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      },
+      intrinsic: { w: 1, h: 1 },
+      points: { h: 40 },
+      alt: "Tiny fixture pixel",
+      activate: "open-image",
     },
   };
 }

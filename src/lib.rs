@@ -4,6 +4,8 @@
 //! terminal. The default-on `ui-bridge` feature additionally lets a hosted App
 //! publish semantic state to SwiftUI or web; disabling default features removes
 //! all socket, authentication, persistence-envelope, and UI protocol code.
+//! Markdown editing and terminal Media decoding/rendering are separate opt-in
+//! features, so ordinary Apps pay only for the components they use.
 
 #![deny(unsafe_code)]
 
@@ -19,6 +21,8 @@ mod input;
 mod keyboard;
 #[cfg(feature = "markdown-text-area")]
 mod markdown_text_area;
+#[cfg(any(feature = "media", feature = "ui-bridge"))]
+mod media;
 mod menu;
 mod navigator;
 mod path;
@@ -63,6 +67,13 @@ pub use markdown_text_area::{
 };
 #[cfg(all(feature = "markdown-text-area", feature = "ui-bridge"))]
 pub use markdown_text_area::{MarkdownEditorConfig, MarkdownEditorEvent, MarkdownEditorEventError};
+#[cfg(any(feature = "media", feature = "ui-bridge"))]
+pub use media::{
+    MAX_INLINE_MEDIA_BYTES, MEDIA_COMPONENT_CAPABILITY, MediaCellSize, MediaFit, MediaPixelSize,
+    MediaPointSize, MediaSource, MediaSpec, MediaSpecError,
+};
+#[cfg(feature = "media")]
+pub use media::{Media, MediaError, MediaPicker, MediaProtocolType};
 pub use menu::{MenuItem, MenuItemTone, MenuTheme, PopupMenu};
 pub use navigator::Navigator;
 pub use path::display_path_from_root;
@@ -76,13 +87,14 @@ pub use ui::{
     ActionId, AppInstanceId, AppMetadata, ClientId, EventId, MAX_SAFE_UI_INTEGER,
     MAX_UI_FRAME_BYTES, MarkdownEditorActions, MarkdownEditorSpec, MarkdownPresentation, NodeId,
     ParticipantId, RendererId, TextEdit, TextPosition, TextRange, TextSelection,
-    UI_DELTA_CAPABILITY, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME,
-    UI_PROTOCOL_VERSION, UI_SOCKET_ENV, UI_TOKEN_ENV, UiAck, UiAckStatus, UiAction, UiAttach,
-    UiAttached, UiComponent, UiDelta, UiDeltaOperation, UiErrorMessage, UiEvent, UiEventKind,
-    UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode, UiParticipant, UiParticipantKind,
-    UiPresence, UiPresenceMember, UiProtocolError, UiRendererMetadata, UiRendererState,
-    UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId, decode_ui_frame, encode_ui_frame,
-    negotiate_ui_protocol_version, read_ui_message, write_ui_message,
+    UI_DELTA_CAPABILITY, UI_MARKDOWN_EDITOR_CAPABILITY, UI_PROTOCOL_MAX_VERSION,
+    UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UI_PROTOCOL_VERSION, UI_SOCKET_ENV, UI_TOKEN_ENV,
+    UiAck, UiAckStatus, UiAction, UiAttach, UiAttached, UiComponent, UiDelta, UiDeltaOperation,
+    UiErrorMessage, UiEvent, UiEventKind, UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode,
+    UiParticipant, UiParticipantKind, UiPresence, UiPresenceMember, UiProtocolError,
+    UiRendererMetadata, UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId,
+    decode_ui_frame, encode_ui_frame, negotiate_ui_protocol_version, read_ui_message,
+    write_ui_message,
 };
 #[cfg(feature = "ui-bridge")]
 pub use ui_auth::{

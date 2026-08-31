@@ -2,7 +2,7 @@
 
 use std::io::{BufReader, Cursor};
 
-use unpeel_app_kit::{UiComponent, UiEventValue, UiMessage, read_ui_message};
+use unpeel_app_kit::{MediaSource, UiComponent, UiEventValue, UiMessage, read_ui_message};
 
 const STREAM: &str = include_str!("../protocol/unpeel-ui-v1.ndjson");
 
@@ -14,7 +14,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 11);
+    assert_eq!(messages.len(), 13);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -26,7 +26,9 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     let UiMessage::Snapshot(snapshot) = &messages[2] else {
         panic!("third fixture must be a snapshot");
     };
-    let UiComponent::MarkdownEditor(editor) = &snapshot.root.element;
+    let UiComponent::MarkdownEditor(editor) = &snapshot.root.element else {
+        panic!("third fixture must contain a Markdown editor");
+    };
     assert_eq!(editor.text, "# Hello\n🙂 world");
     assert_eq!(editor.selection.head.utf16_column, 2);
 
@@ -62,4 +64,28 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(delta.base_revision, 7);
     assert_eq!(delta.revision, 8);
     assert_eq!(delta.operations.len(), 3);
+
+    let UiMessage::Snapshot(media_snapshot) = &messages[11] else {
+        panic!("twelfth fixture must be a Media snapshot");
+    };
+    let UiComponent::Media(media) = &media_snapshot.root.element else {
+        panic!("twelfth fixture must contain Media");
+    };
+    assert_eq!(media.alt, "Tiny fixture pixel");
+    assert_eq!(media.resolved_points(), (40, 40));
+
+    let UiMessage::Delta(media_delta) = &messages[12] else {
+        panic!("thirteenth fixture must be a Media reference delta");
+    };
+    let updated = media_snapshot.applying(media_delta).unwrap();
+    let UiComponent::Media(media) = updated.root.element else {
+        panic!("Media delta must preserve the component kind");
+    };
+    assert!(matches!(
+        media.source,
+        MediaSource::Blob {
+            byte_length: 68,
+            ..
+        }
+    ));
 }

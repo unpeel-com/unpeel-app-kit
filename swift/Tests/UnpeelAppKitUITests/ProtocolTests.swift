@@ -14,7 +14,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 11)
+    #expect(messages.count == 13)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -50,7 +50,7 @@ func sharedProtocolFixturesDecode() throws {
     #expect(value.text == "Hello")
 
     guard case let .delta(delta) = messages[10] else {
-        Issue.record("last fixture must contain a server delta")
+        Issue.record("eleventh fixture must contain the Markdown server delta")
         return
     }
     let updated = try snapshot.applying(delta)
@@ -61,6 +61,29 @@ func sharedProtocolFixturesDecode() throws {
     #expect(updated.revision == 8)
     #expect(updatedEditor.text == "# Hello\nHello world")
     #expect(updatedEditor.selection.head == UITextPosition(line: 1, utf16Column: 5))
+
+    guard case let .snapshot(mediaSnapshot) = messages[11],
+          case let .media(media) = mediaSnapshot.root.component
+    else {
+        Issue.record("twelfth fixture must contain Media")
+        return
+    }
+    #expect(media.alt == "Tiny fixture pixel")
+    #expect(media.resolvedPointSize.w == 40)
+    #expect(media.resolvedPointSize.h == 40)
+
+    guard case let .delta(mediaDelta) = messages[12] else {
+        Issue.record("thirteenth fixture must contain a Media reference delta")
+        return
+    }
+    let updatedMedia = try mediaSnapshot.applying(mediaDelta)
+    guard case let .media(nextMedia) = updatedMedia.root.component,
+          case let .blob(reference) = nextMedia.source
+    else {
+        Issue.record("Media delta must replace the source with a blob reference")
+        return
+    }
+    #expect(reference.byteLength == 68)
 }
 
 @Test
@@ -182,4 +205,60 @@ func recognizedMessagesIgnoreUnknownFields() throws {
         return
     }
     #expect(snapshot.root.id == "editor")
+}
+
+@Test
+func unknownComponentDecodesForTerminalFallbackWithoutRejectingAttachment() throws {
+    let fixture: [String: Any] = [
+        "type": "snapshot",
+        "protocol": "unpeel.ui",
+        "protocolVersion": 1,
+        "appInstanceId": "app-fixture",
+        "clientId": "client-1",
+        "viewId": "main",
+        "revision": 1,
+        "root": [
+            "id": "future-root",
+            "type": "futureComponent",
+            "privatePayload": ["ignored": true],
+        ],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: fixture)
+    guard case let .snapshot(snapshot) = try JSONDecoder().decode(UIMessage.self, from: data),
+          case let .unsupported(kind) = snapshot.root.component
+    else {
+        Issue.record("unknown component must remain a decodable snapshot")
+        return
+    }
+    #expect(kind == "futureComponent")
+    #expect(snapshot.root.component.requiredCapability == nil)
+}
+
+@Test
+func mediaPointSizingUsesExactIntegerAspectMath() {
+    let media = MediaSpec(
+        source: .path("/tmp/image.png"),
+        intrinsic: MediaPixelSize(w: 4_294_967_291, h: 4_294_967_279),
+        points: MediaPointSize(w: 4_294_967_283),
+        alt: "Large dimensions"
+    )
+    #expect(media.resolvedPointSize.w == 4_294_967_283)
+    #expect(media.resolvedPointSize.h == 4_294_967_272)
+}
+
+@Test
+func mediaRejectsNoncanonicalInlineBytesAndActions() {
+    let inline = Data(
+        #"{"kind":"inline","mediaType":"image/png","base64":"AB=="}"#.utf8
+    )
+    #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(MediaSource.self, from: inline)
+    }
+
+    let invalidAction = Data(
+        #"{"source":{"kind":"path","path":"/tmp/image.png"},"intrinsic":{"w":1,"h":1},"alt":"Image","activate":"not portable"}"#.utf8
+    )
+    #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(MediaSpec.self, from: invalidAction)
+    }
 }

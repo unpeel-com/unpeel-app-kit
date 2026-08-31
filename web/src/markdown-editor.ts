@@ -6,6 +6,7 @@ import {
   type TextSelection,
   type UiAction,
   type UiSnapshot,
+  isMarkdownEditorNode,
   uiAction,
 } from "./protocol";
 
@@ -63,19 +64,20 @@ export class MarkdownEditorRenderer {
   }
 
   render(snapshot: UiSnapshot): void {
-    if (snapshot.root.type !== "markdownEditor") {
+    if (!isMarkdownEditorNode(snapshot.root)) {
       throw new Error(`MarkdownEditorRenderer cannot render ${snapshot.root.type}`);
     }
+    const editor = snapshot.root;
     this.snapshot = snapshot;
-    this.editor = snapshot.root;
+    this.editor = editor;
     this.applyingSnapshot = true;
     try {
-      if (this.textarea.value !== snapshot.root.text) {
-        this.textarea.value = snapshot.root.text;
+      if (this.textarea.value !== editor.text) {
+        this.textarea.value = editor.text;
       }
-      this.textarea.readOnly = snapshot.root.readOnly ?? false;
-      this.textarea.placeholder = snapshot.root.placeholder ?? "";
-      const selection = selectionOffsets(snapshot.root.text, snapshot.root.selection);
+      this.textarea.readOnly = editor.readOnly ?? false;
+      this.textarea.placeholder = editor.placeholder ?? "";
+      const selection = selectionOffsets(editor.text, editor.selection);
       if (selection) {
         this.textarea.setSelectionRange(
           selection.start,
@@ -83,9 +85,9 @@ export class MarkdownEditorRenderer {
           selection.direction,
         );
       }
-      this.renderToolbar(snapshot.root);
-      this.renderPreview(snapshot.root.text);
-      this.applyPresentation(snapshot.root.presentation ?? "source");
+      this.renderToolbar(editor);
+      this.renderPreview(editor.text);
+      this.applyPresentation(editor.presentation ?? "source");
     } finally {
       this.applyingSnapshot = false;
     }

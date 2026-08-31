@@ -11,6 +11,7 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case markdownSetTitle(nodeID: String, title: String?)
     case markdownSetPlaceholder(nodeID: String, placeholder: String)
     case markdownSetActions(nodeID: String, actions: MarkdownEditorActions)
+    case mediaSetSource(nodeID: String, source: MediaSource, intrinsic: MediaPixelSize)
 }
 
 extension UIDeltaOperation: Codable {
@@ -26,6 +27,8 @@ extension UIDeltaOperation: Codable {
         case title
         case placeholder
         case actions
+        case source
+        case intrinsic
     }
 
     enum Operation: String, Codable {
@@ -38,6 +41,7 @@ extension UIDeltaOperation: Codable {
         case markdownSetTitle
         case markdownSetPlaceholder
         case markdownSetActions
+        case mediaSetSource
     }
 
     public init(from decoder: Decoder) throws {
@@ -88,6 +92,12 @@ extension UIDeltaOperation: Codable {
                 nodeID: try container.decode(String.self, forKey: .nodeID),
                 actions: try container.decode(MarkdownEditorActions.self, forKey: .actions)
             )
+        case .mediaSetSource:
+            self = .mediaSetSource(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                source: try container.decode(MediaSource.self, forKey: .source),
+                intrinsic: try container.decode(MediaPixelSize.self, forKey: .intrinsic)
+            )
         }
     }
 
@@ -132,6 +142,11 @@ extension UIDeltaOperation: Codable {
             try container.encode(Operation.markdownSetActions, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
             try container.encode(actions, forKey: .actions)
+        case let .mediaSetSource(nodeID, source, intrinsic):
+            try container.encode(Operation.mediaSetSource, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(source, forKey: .source)
+            try container.encode(intrinsic, forKey: .intrinsic)
         }
     }
 }
@@ -278,6 +293,12 @@ private extension UINode {
         case let .markdownSetActions(nodeID, actions):
             let editor = try markdownEditor(nodeID: nodeID).copying(actions: actions)
             return UINode(id: id, component: .markdownEditor(editor))
+        case let .mediaSetSource(nodeID, source, intrinsic):
+            let media = try media(nodeID: nodeID).copying(
+                source: source,
+                intrinsic: intrinsic
+            )
+            return UINode(id: id, component: .media(media))
         }
     }
 
@@ -286,6 +307,13 @@ private extension UINode {
             throw UIDeltaApplicationError("Delta targets an unavailable Markdown node")
         }
         return editor
+    }
+
+    func media(nodeID: String) throws -> MediaSpec {
+        guard id == nodeID, case let .media(media) = component else {
+            throw UIDeltaApplicationError("Delta targets an unavailable Media node")
+        }
+        return media
     }
 }
 
@@ -321,6 +349,23 @@ private extension MarkdownEditorSpec {
             placeholder: placeholder ?? self.placeholder,
             title: nextTitle,
             actions: actions ?? self.actions
+        )
+    }
+}
+
+private extension MediaSpec {
+    func copying(
+        source: MediaSource? = nil,
+        intrinsic: MediaPixelSize? = nil
+    ) -> Self {
+        Self(
+            source: source ?? self.source,
+            intrinsic: intrinsic ?? self.intrinsic,
+            cells: cells,
+            points: points,
+            fit: fit,
+            alt: alt,
+            activate: activate
         )
     }
 }

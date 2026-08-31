@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://unpeel.com/protocol/unpeel-ui-v1.schema.json",
   "title": "Unpeel App Kit UI protocol v1",
-  "description": "Durable component projections between terminal Apps and Host-brokered native, web, or agent participants. Attachments use Host-minted route-bound participant tokens. Implementations ignore unknown fields inside recognized message and value kinds for forward compatibility, but reject unknown discriminated kinds.",
+  "description": "Durable component projections between terminal Apps and Host-brokered native, web, or agent participants. Attachments use Host-minted route-bound participant tokens. Implementations ignore unknown fields inside recognized message and value kinds. An unsupported component kind causes pane-level terminal fallback without rejecting the attachment.",
   "oneOf": [
     { "$ref": "#/$defs/attach" },
     { "$ref": "#/$defs/attached" },
@@ -222,6 +222,124 @@
         "actions": { "$ref": "#/$defs/markdownActions" }
       }
     },
+    "mediaSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": { "const": "path" },
+            "path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind", "mediaType", "base64"],
+          "properties": {
+            "kind": { "const": "inline" },
+            "mediaType": {
+              "type": "string",
+              "minLength": 7,
+              "maxLength": 127,
+              "pattern": "^image/[A-Za-z0-9!#$&^_.+/-]+$"
+            },
+            "base64": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 349528,
+              "contentEncoding": "base64"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind", "sha256", "mediaType", "byteLength"],
+          "properties": {
+            "kind": { "const": "blob" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "mediaType": {
+              "type": "string",
+              "minLength": 7,
+              "maxLength": 127,
+              "pattern": "^image/[A-Za-z0-9!#$&^_.+/-]+$"
+            },
+            "byteLength": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      ]
+    },
+    "mediaPixelSize": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["w", "h"],
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "mediaCellSize": {
+      "type": "object",
+      "additionalProperties": true,
+      "anyOf": [
+        { "required": ["w"] },
+        { "required": ["h"] }
+      ],
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "mediaPointSize": {
+      "type": "object",
+      "additionalProperties": true,
+      "anyOf": [
+        { "required": ["w"] },
+        { "required": ["h"] }
+      ],
+      "properties": {
+        "w": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "h": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "type", "source", "intrinsic", "alt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "const": "media" },
+        "source": { "$ref": "#/$defs/mediaSource" },
+        "intrinsic": { "$ref": "#/$defs/mediaPixelSize" },
+        "cells": { "$ref": "#/$defs/mediaCellSize" },
+        "points": { "$ref": "#/$defs/mediaPointSize" },
+        "fit": { "enum": ["contain", "cover", "fill"], "default": "contain" },
+        "alt": { "type": "string", "maxLength": 16384 },
+        "activate": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "unsupportedComponent": {
+      "description": "Opaque future root retained only so a renderer can keep its attachment and expose the terminal pane.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "$ref": "#/$defs/identifier" }
+      },
+      "not": {
+        "required": ["type"],
+        "properties": {
+          "type": { "enum": ["markdownEditor", "media"] }
+        }
+      }
+    },
     "snapshot": {
       "type": "object",
       "additionalProperties": true,
@@ -243,7 +361,13 @@
         "clientId": { "$ref": "#/$defs/identifier" },
         "viewId": { "$ref": "#/$defs/identifier" },
         "revision": { "$ref": "#/$defs/revision" },
-        "root": { "$ref": "#/$defs/markdownEditor" }
+        "root": {
+          "oneOf": [
+            { "$ref": "#/$defs/markdownEditor" },
+            { "$ref": "#/$defs/media" },
+            { "$ref": "#/$defs/unsupportedComponent" }
+          ]
+        }
       }
     },
     "deltaOperation": {
@@ -254,7 +378,13 @@
           "required": ["op", "root"],
           "properties": {
             "op": { "const": "replaceRoot" },
-            "root": { "$ref": "#/$defs/markdownEditor" }
+            "root": {
+              "oneOf": [
+                { "$ref": "#/$defs/markdownEditor" },
+                { "$ref": "#/$defs/media" },
+                { "$ref": "#/$defs/unsupportedComponent" }
+              ]
+            }
           }
         },
         {
@@ -335,6 +465,17 @@
             "op": { "const": "markdownSetActions" },
             "nodeId": { "$ref": "#/$defs/identifier" },
             "actions": { "$ref": "#/$defs/markdownActions" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "source", "intrinsic"],
+          "properties": {
+            "op": { "const": "mediaSetSource" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "source": { "$ref": "#/$defs/mediaSource" },
+            "intrinsic": { "$ref": "#/$defs/mediaPixelSize" }
           }
         }
       ]

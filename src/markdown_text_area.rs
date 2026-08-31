@@ -1265,7 +1265,9 @@ mod tests {
 
         let node = editor.ui_node(&config);
         assert_eq!(node.id.as_str(), "markdown-editor");
-        let crate::UiComponent::MarkdownEditor(spec) = node.element;
+        let crate::UiComponent::MarkdownEditor(spec) = node.element else {
+            panic!("Markdown adapter must produce a Markdown editor");
+        };
         assert_eq!(spec.text, "a🙂b\nsecond");
         assert_eq!(
             spec.selection,
@@ -1322,7 +1324,9 @@ mod tests {
         assert_eq!(editor.cursor(), (0, 2));
         assert_eq!(editor.selection_range(), Some(((0, 2), (0, 5))));
         let node = editor.ui_node(&config);
-        let crate::UiComponent::MarkdownEditor(spec) = node.element;
+        let crate::UiComponent::MarkdownEditor(spec) = node.element else {
+            panic!("Markdown adapter must produce a Markdown editor");
+        };
         assert_eq!(spec.selection, selection);
 
         assert!(matches!(

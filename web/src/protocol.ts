@@ -3,6 +3,13 @@ export const UI_PROTOCOL_MIN_VERSION = 1 as const;
 export const UI_PROTOCOL_MAX_VERSION = 1 as const;
 export const UI_PROTOCOL_VERSION = UI_PROTOCOL_MAX_VERSION;
 export const UI_DELTA_CAPABILITY = "serverDelta" as const;
+export const UI_MARKDOWN_EDITOR_CAPABILITY = "markdownEditor" as const;
+export const UI_MEDIA_CAPABILITY = "media" as const;
+export const UI_COMPONENT_CAPABILITIES = [
+  UI_MARKDOWN_EDITOR_CAPABILITY,
+  UI_MEDIA_CAPABILITY,
+] as const;
+export const MAX_INLINE_MEDIA_BYTES = 256 * 1024;
 
 export interface AppMetadata {
   id: string;
@@ -106,7 +113,83 @@ export interface MarkdownEditorNode {
   actions?: MarkdownEditorActions;
 }
 
-export type UiNode = MarkdownEditorNode;
+export type MediaFit = "contain" | "cover" | "fill";
+
+export interface MediaPathSource {
+  kind: "path";
+  path: string;
+}
+
+export interface MediaInlineSource {
+  kind: "inline";
+  mediaType: string;
+  base64: string;
+}
+
+export interface MediaBlobSource {
+  kind: "blob";
+  sha256: string;
+  mediaType: string;
+  byteLength: number;
+}
+
+export type MediaSource = MediaPathSource | MediaInlineSource | MediaBlobSource;
+
+export interface MediaPixelSize {
+  w: number;
+  h: number;
+}
+
+export interface MediaCellSize {
+  w?: number;
+  h?: number;
+}
+
+export interface MediaPointSize {
+  w?: number;
+  h?: number;
+}
+
+export interface MediaNode {
+  id: string;
+  type: "media";
+  source: MediaSource;
+  intrinsic: MediaPixelSize;
+  cells?: MediaCellSize;
+  points?: MediaPointSize;
+  fit?: MediaFit;
+  alt: string;
+  activate?: string;
+}
+
+/** Opaque root retained only so the session can request terminal fallback. */
+export interface UnsupportedUiNode {
+  id: string;
+  type: string;
+  [field: string]: unknown;
+}
+
+export type UiNode = MarkdownEditorNode | MediaNode | UnsupportedUiNode;
+
+export function isMarkdownEditorNode(node: UiNode): node is MarkdownEditorNode {
+  return node.type === "markdownEditor";
+}
+
+export function isMediaNode(node: UiNode): node is MediaNode {
+  return node.type === "media";
+}
+
+/** Capability required for a known root, or undefined for an unknown kind. */
+export function uiNodeCapability(node: UiNode): string | undefined {
+  if (isMarkdownEditorNode(node)) return UI_MARKDOWN_EDITOR_CAPABILITY;
+  if (isMediaNode(node)) return UI_MEDIA_CAPABILITY;
+  return undefined;
+}
+
+/** Filesystem paths must be translated by the Host before entering a browser. */
+export function isBrowserSafeUiNode(node: UiNode): boolean {
+  return !isMediaNode(node) || node.source.kind !== "path";
+}
 
 export interface UiSnapshot {
   type: "snapshot";
@@ -128,7 +211,13 @@ export type UiDeltaOperation =
   | { op: "markdownSetReadOnly"; nodeId: string; readOnly: boolean }
   | { op: "markdownSetTitle"; nodeId: string; title: string | null }
   | { op: "markdownSetPlaceholder"; nodeId: string; placeholder: string }
-  | { op: "markdownSetActions"; nodeId: string; actions: MarkdownEditorActions };
+  | { op: "markdownSetActions"; nodeId: string; actions: MarkdownEditorActions }
+  | {
+    op: "mediaSetSource";
+    nodeId: string;
+    source: MediaSource;
+    intrinsic: MediaPixelSize;
+  };
 
 export interface UiDelta {
   type: "delta";
@@ -266,8 +355,9 @@ export function negotiateUiProtocolVersion(minimum: number, maximum: number): nu
 
 /**
  * Decodes a known message and intentionally ignores unknown object fields for
- * forward compatibility. Unknown message, component, action, and value kinds
- * remain errors because their semantics cannot be inferred safely.
+ * forward compatibility. Unknown component roots remain opaque so a session
+ * can keep its attachment and expose the complete terminal pane. Unknown
+ * message, action, and value kinds remain errors.
  */
 export function decodeUiMessage(input: string | unknown): UiMessage {
   const value: unknown = typeof input === "string" ? JSON.parse(input) : input;
@@ -442,7 +532,17 @@ export function applyUiDelta(snapshot: UiSnapshot, delta: UiDelta): UiSnapshot {
 
 function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode {
   if (operation.op === "replaceRoot") return operation.root;
-  if (root.id !== operation.nodeId || root.type !== "markdownEditor") {
+  if (operation.op === "mediaSetSource") {
+    if (root.id !== operation.nodeId || !isMediaNode(root)) {
+      throw new Error("Delta targets an unavailable Media node");
+    }
+    return {
+      ...root,
+      source: operation.source,
+      intrinsic: operation.intrinsic,
+    };
+  }
+  if (root.id !== operation.nodeId || !isMarkdownEditorNode(root)) {
     throw new Error("Delta targets an unavailable Markdown node");
   }
   switch (operation.op) {
@@ -581,8 +681,13 @@ function validateParticipant(value: unknown, path: string): void {
 function validateNode(value: unknown, path: string): void {
   const root = record(value, path);
   requireIdentifier(root.id, `${path}.id`);
+  requireIdentifier(root.type, `${path}.type`);
+  if (root.type === "media") {
+    validateMediaNode(root, path);
+    return;
+  }
   if (root.type !== "markdownEditor") {
-    throw new Error(`Unsupported UI component ${String(root.type)}`);
+    return;
   }
   requireString(root.text, `${path}.text`, true);
   validateSelection(root.selection, `${path}.selection`);
@@ -600,6 +705,100 @@ function validateNode(value: unknown, path: string): void {
     if (root[field] !== undefined) requireString(root[field], `${path}.${field}`, true);
   }
   if (root.actions !== undefined) validateMarkdownActions(root.actions, `${path}.actions`);
+}
+
+function validateMediaNode(root: Record<string, unknown>, path: string): void {
+  validateMediaSource(root.source, `${path}.source`);
+  validateMediaPixelSize(root.intrinsic, `${path}.intrinsic`);
+  if (root.cells !== undefined) {
+    validateMediaOptionalSize(root.cells, `${path}.cells`, 65_535);
+  }
+  if (root.points !== undefined) {
+    validateMediaOptionalSize(root.points, `${path}.points`, 4_294_967_295);
+  }
+  if (root.fit !== undefined && !["contain", "cover", "fill"].includes(String(root.fit))) {
+    throw new Error(`${path}.fit is unsupported`);
+  }
+  requireString(root.alt, `${path}.alt`, true);
+  if (new TextEncoder().encode(root.alt as string).length > 16_384) {
+    throw new Error(`${path}.alt must contain at most 16384 bytes`);
+  }
+  if (root.activate !== undefined) requireIdentifier(root.activate, `${path}.activate`);
+}
+
+function validateMediaSource(value: unknown, path: string): void {
+  const source = record(value, path);
+  switch (source.kind) {
+    case "path":
+      requireString(source.path, `${path}.path`);
+      if (new TextEncoder().encode(source.path as string).length > 4_096
+        || (source.path as string).includes("\0")) {
+        throw new Error(`${path}.path must contain 1..=4096 non-NUL bytes`);
+      }
+      return;
+    case "inline":
+      validateImageMediaType(source.mediaType, `${path}.mediaType`);
+      requireString(source.base64, `${path}.base64`);
+      if (decodedBase64Length(source.base64 as string) > MAX_INLINE_MEDIA_BYTES) {
+        throw new Error(`${path}.base64 exceeds the 256 KiB decoded limit`);
+      }
+      return;
+    case "blob":
+      requireString(source.sha256, `${path}.sha256`);
+      if (!/^[0-9a-f]{64}$/.test(source.sha256 as string)) {
+        throw new Error(`${path}.sha256 must be lowercase SHA-256 hex`);
+      }
+      validateImageMediaType(source.mediaType, `${path}.mediaType`);
+      requireSafeInteger(source.byteLength, `${path}.byteLength`);
+      if (source.byteLength === 0) throw new Error(`${path}.byteLength must be positive`);
+      return;
+    default:
+      throw new Error(`Unsupported Media source ${String(source.kind)}`);
+  }
+}
+
+function validateMediaPixelSize(value: unknown, path: string): void {
+  const size = record(value, path);
+  for (const axis of ["w", "h"] as const) {
+    requireSafeInteger(size[axis], `${path}.${axis}`);
+    if (size[axis] === 0 || (size[axis] as number) > 4_294_967_295) {
+      throw new Error(`${path}.${axis} must be a positive UInt32`);
+    }
+  }
+}
+
+function validateMediaOptionalSize(value: unknown, path: string, maximum: number): void {
+  const size = record(value, path);
+  if (size.w === undefined && size.h === undefined) {
+    throw new Error(`${path} must contain at least one axis`);
+  }
+  for (const axis of ["w", "h"] as const) {
+    if (size[axis] === undefined) continue;
+    requireSafeInteger(size[axis], `${path}.${axis}`);
+    if (size[axis] === 0 || (size[axis] as number) > maximum) {
+      throw new Error(`${path}.${axis} is outside the supported range`);
+    }
+  }
+}
+
+function validateImageMediaType(value: unknown, path: string): void {
+  requireString(value, path);
+  if ((value as string).length > 127
+    || !/^image\/[A-Za-z0-9!#$&^_.+/-]+$/.test(value as string)) {
+    throw new Error(`${path} must be a portable image MIME type`);
+  }
+}
+
+function decodedBase64Length(value: string): number {
+  if (value.length === 0 || value.length > 349_528 || value.length % 4 !== 0
+    || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+    throw new Error("Media inline base64 is invalid");
+  }
+  const decoded = atob(value);
+  if (btoa(decoded) !== value) throw new Error("Media inline base64 is non-canonical");
+  const length = decoded.length;
+  if (length <= 0) throw new Error("Media inline base64 is empty");
+  return length;
 }
 
 function validateMarkdownActions(value: unknown, path: string): void {
@@ -669,6 +868,11 @@ function validateDeltaOperation(value: unknown, path: string): void {
     case "markdownSetActions":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       validateMarkdownActions(operation.actions, `${path}.actions`);
+      return;
+    case "mediaSetSource":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateMediaSource(operation.source, `${path}.source`);
+      validateMediaPixelSize(operation.intrinsic, `${path}.intrinsic`);
       return;
     default:
       throw new Error(`Unsupported delta operation ${String(operation.op)}`);

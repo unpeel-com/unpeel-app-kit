@@ -9,11 +9,14 @@ import {
   type UiRendererMetadata,
   type UiRendererState,
   type UiSnapshot,
+  UI_COMPONENT_CAPABILITIES,
   UI_DELTA_CAPABILITY,
   applyUiDelta,
   decodeUiMessage,
+  isBrowserSafeUiNode,
   negotiateUiProtocolVersion,
   newEventId,
+  uiNodeCapability,
 } from "./protocol";
 
 export const WORKSPACE_UI_PROTOCOL_NAME = "unpeel.workspace.ui" as const;
@@ -110,6 +113,7 @@ export interface WorkspaceUiSessionOptions {
   rendererId: string;
   viewId: string;
   capabilities?: string[];
+  supportedComponentCapabilities?: string[];
   initialState?: UiRendererState;
   onAttached?: (attached: UiAttached) => void;
   onSnapshot: (snapshot: UiSnapshot) => void;
@@ -117,6 +121,7 @@ export interface WorkspaceUiSessionOptions {
   onAck?: (ack: UiAck) => void;
   onPresence?: (presence: UiPresence) => void;
   onError?: (error: Error | UiErrorMessage) => void;
+  onTerminalFallback?: (componentKind: string) => void;
   onConnectionState?: (state: WorkspaceUiConnectionState) => void;
   webSocketFactory?: (url: string) => WorkspaceWebSocket;
 }
@@ -140,10 +145,17 @@ export class WorkspaceUiSession {
   private appInstanceId: string | undefined;
   private latestSnapshot: UiSnapshot | undefined;
   private rendererState: UiRendererState;
+  private readonly supportedComponentCapabilities: Set<string>;
+  private semanticProjectionAvailable = false;
+  private usingTerminalFallback = false;
+  private rendererStateBeforeFallback: UiRendererState | undefined;
   private readonly pendingActions = new Map<string, WorkspaceUiAction>();
 
   constructor(options: WorkspaceUiSessionOptions) {
     this.options = options;
+    this.supportedComponentCapabilities = new Set(
+      options.supportedComponentCapabilities ?? UI_COMPONENT_CAPABILITIES,
+    );
     this.rendererState = options.initialState ?? {
       rendererVisible: true,
       terminalVisible: false,
@@ -173,6 +185,7 @@ export class WorkspaceUiSession {
   stop(): void {
     this.running = false;
     this.attached = false;
+    this.semanticProjectionAvailable = false;
     this.negotiatedProtocolVersion = undefined;
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
@@ -197,7 +210,7 @@ export class WorkspaceUiSession {
     }
     const snapshot = this.latestSnapshot;
     const appInstanceId = this.appInstanceId;
-    if (!snapshot || !appInstanceId) return undefined;
+    if (!snapshot || !appInstanceId || !this.semanticProjectionAvailable) return undefined;
 
     const event: WorkspaceUiAction = {
       type: "action",
@@ -288,6 +301,7 @@ export class WorkspaceUiSession {
   private sendResume(): void {
     const capabilities = Array.from(new Set([
       ...(this.options.capabilities ?? []),
+      ...this.supportedComponentCapabilities,
       UI_DELTA_CAPABILITY,
     ]));
     const resume: WorkspaceUiResume = {
@@ -356,8 +370,7 @@ export class WorkspaceUiSession {
         break;
       case "snapshot":
         if (this.matchesView(message)) {
-          this.latestSnapshot = message;
-          this.options.onSnapshot(message);
+          if (this.accept(message)) this.options.onSnapshot(message);
         }
         break;
       case "delta":
@@ -368,9 +381,10 @@ export class WorkspaceUiSession {
           }
           try {
             const next = applyUiDelta(this.latestSnapshot, message);
-            this.latestSnapshot = next;
-            this.options.onDelta?.(message);
-            this.options.onSnapshot(next);
+            if (this.accept(next)) {
+              this.options.onDelta?.(message);
+              this.options.onSnapshot(next);
+            }
           } catch (error) {
             this.options.onError?.(asError(error));
             this.requestSnapshot();
@@ -424,6 +438,7 @@ export class WorkspaceUiSession {
     if (!sameInstance) {
       this.pendingActions.clear();
       this.latestSnapshot = undefined;
+      this.semanticProjectionAvailable = false;
     }
     this.appInstanceId = attached.appInstanceId;
     this.negotiatedProtocolVersion = attached.protocolVersion;
@@ -446,6 +461,40 @@ export class WorkspaceUiSession {
     return message.appInstanceId === this.appInstanceId
       && message.clientId === this.options.clientId
       && message.viewId === this.options.viewId;
+  }
+
+  /** Keeps transport identity alive while the Host exposes the complete PTY. */
+  private accept(snapshot: UiSnapshot): boolean {
+    this.latestSnapshot = snapshot;
+    const capability = uiNodeCapability(snapshot.root);
+    if (capability !== undefined
+      && this.supportedComponentCapabilities.has(capability)
+      && isBrowserSafeUiNode(snapshot.root)) {
+      this.semanticProjectionAvailable = true;
+      if (this.usingTerminalFallback) {
+        const restoredState = this.rendererStateBeforeFallback ?? {
+          rendererVisible: true,
+          terminalVisible: false,
+        };
+        this.usingTerminalFallback = false;
+        this.rendererStateBeforeFallback = undefined;
+        if (!rendererStatesEqual(this.rendererState, restoredState)) {
+          this.setRendererState(restoredState);
+        }
+      }
+      return true;
+    }
+    this.semanticProjectionAvailable = false;
+    if (!this.usingTerminalFallback) {
+      this.rendererStateBeforeFallback = this.rendererState;
+      this.usingTerminalFallback = true;
+    }
+    const terminalState = { rendererVisible: false, terminalVisible: true };
+    if (!rendererStatesEqual(this.rendererState, terminalState)) {
+      this.setRendererState(terminalState);
+    }
+    this.options.onTerminalFallback?.(snapshot.root.type);
+    return false;
   }
 
   private matchesRenderer(message: UiAck): boolean {
@@ -481,6 +530,11 @@ export class WorkspaceUiSession {
       this.connect();
     }, delayMs);
   }
+}
+
+function rendererStatesEqual(left: UiRendererState, right: UiRendererState): boolean {
+  return left.rendererVisible === right.rendererVisible
+    && left.terminalVisible === right.terminalVisible;
 }
 
 function asError(value: unknown): Error {

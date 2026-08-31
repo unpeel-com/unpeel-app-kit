@@ -25,6 +25,8 @@ public struct MarkdownEditorView: View {
                 Divider()
                 editorContent(editor)
             }
+        case .media, .unsupported:
+            EmptyView()
         }
     }
 

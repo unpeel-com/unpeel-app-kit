@@ -2258,7 +2258,9 @@ mod tests {
         let UiMessage::Snapshot(first_snapshot) = first.read() else {
             panic!("first client needs a snapshot");
         };
-        let UiComponent::MarkdownEditor(first_editor) = first_snapshot.root.element;
+        let UiComponent::MarkdownEditor(first_editor) = first_snapshot.root.element else {
+            panic!("fixture must contain a Markdown editor");
+        };
         assert_eq!(first_editor.selection.head.utf16_column, 3);
         let _ = first.read();
 
@@ -2276,7 +2278,9 @@ mod tests {
         let UiMessage::Snapshot(second_snapshot) = second.read() else {
             panic!("second client needs a snapshot");
         };
-        let UiComponent::MarkdownEditor(second_editor) = second_snapshot.root.element;
+        let UiComponent::MarkdownEditor(second_editor) = second_snapshot.root.element else {
+            panic!("fixture must contain a Markdown editor");
+        };
         assert_eq!(second_editor.selection.head.utf16_column, 0);
         let UiMessage::Presence(second_presence) = second.read() else {
             panic!("second client needs presence");
@@ -2399,7 +2403,9 @@ mod tests {
             panic!("delta-capable renderer must receive a delta");
         };
         let updated = initial.applying(&delta).unwrap();
-        let UiComponent::MarkdownEditor(editor) = &updated.root.element;
+        let UiComponent::MarkdownEditor(editor) = &updated.root.element else {
+            panic!("fixture must contain a Markdown editor");
+        };
         assert_eq!(updated.revision, 8);
         assert_eq!(editor.text, "# Hello\nHello world");
         assert_eq!(editor.selection.head, TextPosition::new(1, 5));
@@ -2438,7 +2444,9 @@ mod tests {
             panic!("legacy renderer must receive a complete snapshot");
         };
         assert_eq!(snapshot.revision, 2);
-        let UiComponent::MarkdownEditor(editor) = snapshot.root.element;
+        let UiComponent::MarkdownEditor(editor) = snapshot.root.element else {
+            panic!("fixture must contain a Markdown editor");
+        };
         assert!(editor.dirty);
     }
 

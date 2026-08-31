@@ -8,13 +8,16 @@ license = "MIT"
 [features]
 default = ["ui-bridge"]
 markdown-text-area = ["dep:tui-textarea", "dep:unicode-segmentation"]
+media = ["dep:image", "dep:ratatui-image", "dep:sha2"]
 ui-bridge = ["dep:hmac", "dep:libc", "dep:sha2"]
 
 [dependencies]
 base64 = "0.22"
 hmac = { version = "0.12", optional = true }
+image = { version = "0.25.6", default-features = false, features = ["gif", "jpeg", "png", "webp"], optional = true }
 libc = { version = "0.2", optional = true }
 ratatui = { version = "0.30.2", default-features = false }
+ratatui-image = { version = "11.0.6", default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", optional = true }

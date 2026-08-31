@@ -24,12 +24,23 @@ default-features = false
 features = ["markdown-text-area"]
 ```
 
+Static terminal images are independently selectable too:
+
+```toml
+[dependencies.unpeel-app-kit]
+path = "../unpeel-app-kit"
+default-features = false
+features = ["media"]
+```
+
 | Cargo features | Compiled API |
 | --- | --- |
 | `default-features = false` | Core Ratatui components and standalone-safe helpers; no socket or UI protocol modules |
 | `markdown-text-area` | Adds the Ratatui `MarkdownEditor` / `MarkdownTextArea` |
+| `media` | Adds static image decoding and Ratatui rendering through Kitty, iTerm2, Sixel, or Unicode half-blocks |
 | `ui-bridge` (default) | Adds the optional protocol, socket, scoped-token, and state-envelope APIs |
 | `markdown-text-area` + `ui-bridge` | Also adds the Markdown semantic projection/event adapter |
+| `media` + `ui-bridge` | Uses the same Media specification for the standalone TUI and hosted semantic projection |
 
 Keeping `ui-bridge` default-on preserves the existing API, not a runtime
 requirement. Merely compiling it starts no listener or worker and changes no
@@ -44,11 +55,12 @@ parameters or prerequisites for terminal input and rendering.
 ## Optional hosted presentation layer
 
 When Unpeel hosts the App, it may opt into a component-first semantic model—
-`MarkdownEditor`, then `Page`, `List`, `ListItem`, `Input`, and other deliberate
-primitives—not a serialization of terminal cells or a portable clone of every
-Ratatui widget. The Rust terminal process remains the App and owns the model,
-reducer, validation, persistence, and commands. SwiftUI/AppKit and DOM become
-optional renderers of the same state alongside Ratatui.
+`MarkdownEditor`, static `Media`, then `Page`, `List`, `ListItem`, `Input`, and
+other deliberate primitives—not a serialization of terminal cells or a
+portable clone of every Ratatui widget. The Rust terminal process remains the
+App and owns the model, reducer, validation, persistence, and commands.
+SwiftUI/AppKit and DOM become optional renderers of the same state alongside
+Ratatui.
 
 This channel is the decided presentation path in Unpeel's decision log,
 `docs/MASTER PLAN.md` §10 **D16 — The App Kit semantic component channel is a
@@ -267,15 +279,15 @@ component, or typed value. Unknown message, event-kind, and value-kind
 discriminators remain errors because old code cannot safely guess their
 behavior.
 
-Component kinds require a different rule once the vocabulary contains more
-than `MarkdownEditor`. The second component slice must add capability/version
-handling that lets an attached renderer decline an unrecognized component and
-show the complete terminal view for that pane instead. An unsupported
-component must not reject or close the renderer's attachment, and renderers
-must not guess at a partial native representation. This graceful-degradation
-path must cover an absent advertised capability, an incompatible component
-version, and an unknown component discriminator before the second component
-is considered complete.
+Component kinds use a different rule now that Media is the second component.
+Swift and web retain an unrecognized root long enough to switch the complete
+pane to its terminal view; they do not reject or close the attachment and do
+not guess at a partial native representation. The same pane-level fallback
+applies when the renderer omits the required capability, negotiates an
+incompatible component version, receives an unknown component discriminator,
+or receives a local-path Media source in a browser. The renderer reports
+`rendererVisible: false, terminalVisible: true` through the existing lifecycle
+message while its authenticated attachment remains alive.
 
 ## Multi-user workspaces
 
@@ -317,8 +329,14 @@ participant identity, or grant list. The native or headless Host must:
    attachment per renderer;
 5. stamp that participant ID onto translated App events;
 6. apply frame, rate, and connection limits; and
-7. forward only `attached`, `snapshot`, `ack`, filtered `presence`, and `error`
-   frames back to the browser.
+7. forward only `attached`, `snapshot`, `delta`, `ack`, filtered `presence`,
+   and `error` frames back to the browser.
+
+For Media, the Host must additionally prevent local `path` sources from
+crossing this boundary. A browser projection receives a bounded `inline`
+source or a `blob` reference. Blob bytes are fetched out of band through the
+same authenticated App Session route after checking session grants, byte
+length, and SHA-256; neither snapshots nor deltas contain the asset body.
 
 The Host adapter must strip grants and private identity fields from browser
 presence. An agent's public profile can retain its opaque id, `agent` kind,
@@ -433,6 +451,43 @@ Its message callback should move snapshots onto the main actor before updating
 SwiftUI state. A remote Swift client should use the authenticated workspace
 transport rather than receiving any local participant token or signing key.
 
+## Media v1
+
+Media is a static-image component with no child nodes. Its snapshot contains:
+
+- a source reference: trusted-local `path`, inline base64 capped at 256 KiB
+  decoded, or `blob` with SHA-256, MIME type, and byte length;
+- required intrinsic pixel dimensions;
+- optional terminal `cells { w, h }` and native/web `points { w, h }` sizing,
+  where either axis may be omitted and derived from intrinsic aspect;
+- `contain`, `cover`, or `fill` fitting;
+- alt text; and
+- at most one optional `activate` action.
+
+The reference is the transport. Large image bytes never enter snapshot or
+delta JSON. `mediaSetSource` swaps the source plus intrinsic metadata in one
+small operation. A blob resolver belongs to the existing Host route and its
+session grants: App Kit supplies resolver hooks and verifies returned length
+and SHA-256, but does not define a workspace server or a public filesystem
+URL. Trusted local Swift and terminal renderers may open `path`; the Host must
+translate it before forwarding a projection to a browser, and
+`WorkspaceUiSession` defensively falls back to the PTY if one leaks through.
+
+With the standalone `media` feature, `MediaPicker::from_query_stdio()` uses
+`ratatui-image` capability detection. Kitty wins when available (including
+Ghostty/libghostty), followed by iTerm2 or Sixel, with Unicode half-blocks as
+the universal fallback. The component prepares a fixed Ratatui image at its
+specified cell size so ordinary redraws remain cheap. The native renderer
+loads `NSImage` locally or asynchronously through the Host blob resolver at
+the resolved point size. The web renderer uses an accessible `<img>` with CSS
+pixels and `object-fit`, and verifies resolved blobs before creating an object
+URL.
+
+Media v1 models static images only. It has no video, playback, frame, or
+animation state. If an animated raster format reaches the terminal decoder,
+only its first decoded frame is rendered; animation support for native/web is
+a future component version, not part of this contract.
+
 ## Revision and collaboration semantics
 
 An event names the snapshot revision on which the interaction occurred. The
@@ -443,10 +498,11 @@ rejected.
 
 Server-to-client deltas are part of the foundation, not a post-DataGrid
 optimization. `UiDelta` carries `baseRevision`, the next `revision`, and
-ordered component operations. Markdown currently supports range replacement,
-selection, presentation, dirty/read-only/title/placeholder/action updates, and
-`replaceRoot` as an escape hatch. Swift and web clients apply deltas to their
-last complete snapshot and expose the resulting complete state to renderers.
+ordered component operations. Markdown supports range replacement, selection,
+presentation, dirty/read-only/title/placeholder/action updates; Media supports
+an atomic source-reference and intrinsic-size swap; and `replaceRoot` remains
+the escape hatch. Swift and web clients apply deltas to their last complete
+snapshot and expose the resulting complete state to renderers.
 
 A renderer advertises `serverDelta`. `UiBridge` sends operations only when its
 last queued projection for that renderer is the exact base revision and came
@@ -484,13 +540,14 @@ The next useful vocabulary is intentionally conventional:
 | `List` | `ratatui::widgets::List` | contains only keyed `ListItem` values; native list selection and reorder |
 | `ListItem` | Ratatui `ListItem` | semantically keyed row with label/detail and constrained `leading`, `trailing`, and `accessory` slots |
 | `Toggle` | styled boolean row/control | boolean value, label, and one idempotent `set-value(bool)` action; SwiftUI `Toggle`; accessible web checkbox/switch |
+| `Media` | `ratatui-image` at explicit cell size | static reference-only image with intrinsic pixels, point sizing, contain/cover/fill, alt text, and optional activation; native `NSImage`, web `<img>` |
 | `Input` | existing `InputField` | native single-line input and validation |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
 | `Explorer` | existing `Explorer` | hierarchical file navigation and drops |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared
-fixtures. The second component must additionally ship the pane-level terminal
-fallback for renderers that do not advertise or recognize its kind. That keeps
-App Kit opinionated and prevents its public API from becoming an unbounded
-remote widget toolkit.
+fixtures. Media established the required pane-level terminal fallback for
+renderers that do not advertise or recognize a kind; every later component
+inherits that rule. This keeps App Kit opinionated and prevents its public API
+from becoming an unbounded remote widget toolkit.

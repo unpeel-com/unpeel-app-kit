@@ -6,14 +6,17 @@
 //! reconnect without restarting the App.
 //!
 //! Fields added to a recognized message, component, or value are ignored for
-//! forward compatibility. Discriminated kinds remain closed: an unknown
-//! message, component, event kind, or event-value type is rejected because its
-//! semantics cannot be inferred safely.
+//! forward compatibility. Message, event, and event-value discriminators stay
+//! closed. Renderer packages treat an unknown component root as a signal to
+//! expose the pane's complete TUI without closing the attachment; the
+//! authoritative Rust App constructs only the known [`UiComponent`] variants.
 
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 
 use serde::{Deserialize, Serialize};
+
+use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
 
 /// Stable protocol name carried by every independently replayable frame.
 pub const UI_PROTOCOL_NAME: &str = "unpeel.ui";
@@ -38,6 +41,8 @@ pub const UI_SOCKET_ENV: &str = "UNPEEL_UI_SOCKET";
 pub const UI_TOKEN_ENV: &str = "UNPEEL_UI_TOKEN";
 /// Renderer capability required before the App sends revision deltas.
 pub const UI_DELTA_CAPABILITY: &str = "serverDelta";
+/// Renderer capability for the v1 Markdown editor component.
+pub const UI_MARKDOWN_EDITOR_CAPABILITY: &str = "markdownEditor";
 /// Largest individual JSON payload accepted by the protocol.
 pub const MAX_UI_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Largest integer represented exactly by Swift and JavaScript renderers.
@@ -686,6 +691,27 @@ impl MarkdownEditorSpec {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum UiComponent {
     MarkdownEditor(MarkdownEditorSpec),
+    Media(MediaSpec),
+}
+
+impl UiComponent {
+    /// Stable discriminated kind used on the wire.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::MarkdownEditor(_) => "markdownEditor",
+            Self::Media(_) => "media",
+        }
+    }
+
+    /// Capability an attached semantic renderer must advertise for this root.
+    #[must_use]
+    pub const fn required_capability(&self) -> &'static str {
+        match self {
+            Self::MarkdownEditor(_) => UI_MARKDOWN_EDITOR_CAPABILITY,
+            Self::Media(_) => crate::MEDIA_COMPONENT_CAPABILITY,
+        }
+    }
 }
 
 /// A keyed component.
@@ -705,11 +731,28 @@ impl UiNode {
         }
     }
 
+    #[must_use]
+    pub fn media(id: impl Into<NodeId>, media: MediaSpec) -> Self {
+        Self {
+            id: id.into(),
+            element: UiComponent::Media(media),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), UiValidationError> {
         validate_identifier(self.id.as_str(), "root.id")?;
         match &self.element {
             UiComponent::MarkdownEditor(editor) => editor.validate("root"),
+            UiComponent::Media(media) => media.validate().map_err(|error| {
+                UiValidationError::new(error.path.replacen("media", "root", 1), error.message)
+            }),
         }
+    }
+
+    /// Capability required to render this node semantically.
+    #[must_use]
+    pub const fn required_capability(&self) -> &'static str {
+        self.element.required_capability()
     }
 }
 
@@ -822,6 +865,12 @@ pub enum UiDeltaOperation {
         node_id: NodeId,
         actions: MarkdownEditorActions,
     },
+    /// Swaps image bytes by reference and updates their intrinsic metadata.
+    MediaSetSource {
+        node_id: NodeId,
+        source: MediaSource,
+        intrinsic: MediaPixelSize,
+    },
 }
 
 impl UiDeltaOperation {
@@ -841,6 +890,19 @@ impl UiDeltaOperation {
         }
     }
 
+    #[must_use]
+    pub fn media_set_source(
+        node_id: impl Into<NodeId>,
+        source: MediaSource,
+        intrinsic: MediaPixelSize,
+    ) -> Self {
+        Self::MediaSetSource {
+            node_id: node_id.into(),
+            source,
+            intrinsic,
+        }
+    }
+
     fn validate(&self, path: &str) -> Result<(), UiProtocolError> {
         match self {
             Self::ReplaceRoot { root } => root.validate().map_err(UiProtocolError::InvalidView),
@@ -853,6 +915,22 @@ impl UiDeltaOperation {
                     )));
                 }
                 Ok(())
+            }
+            Self::MediaSetSource {
+                node_id,
+                source,
+                intrinsic,
+            } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                MediaSpec::new(source.clone(), *intrinsic, "")
+                    .validate()
+                    .map_err(|error| {
+                        UiProtocolError::InvalidView(UiValidationError::new(
+                            format!("{path}.{}", error.path.replacen("media.", "", 1)),
+                            error.message,
+                        ))
+                    })
             }
             Self::MarkdownSetSelection { node_id, .. }
             | Self::MarkdownSetPresentation { node_id, .. }
@@ -910,6 +988,15 @@ impl UiNode {
                 UiDeltaOperation::MarkdownSetActions { node_id, actions } => {
                     self.markdown_editor_mut(node_id, index)?.actions = actions.clone();
                 }
+                UiDeltaOperation::MediaSetSource {
+                    node_id,
+                    source,
+                    intrinsic,
+                } => {
+                    let media = self.media_mut(node_id, index)?;
+                    media.source = source.clone();
+                    media.intrinsic = *intrinsic;
+                }
             }
         }
         self.validate()
@@ -928,6 +1015,30 @@ impl UiNode {
         }
         match &mut self.element {
             UiComponent::MarkdownEditor(editor) => Ok(editor),
+            UiComponent::Media(_) => Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                "operation requires a Markdown editor",
+            )),
+        }
+    }
+
+    fn media_mut(
+        &mut self,
+        expected_id: &NodeId,
+        operation_index: usize,
+    ) -> Result<&mut MediaSpec, UiValidationError> {
+        if &self.id != expected_id {
+            return Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                format!("node {expected_id:?} is not present"),
+            ));
+        }
+        match &mut self.element {
+            UiComponent::Media(media) => Ok(media),
+            UiComponent::MarkdownEditor(_) => Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                "operation requires Media",
+            )),
         }
     }
 }
@@ -1046,6 +1157,11 @@ impl UiAction {
     #[must_use]
     pub fn command(node_id: impl Into<NodeId>, action: impl Into<ActionId>) -> Self {
         Self::new(node_id, action, UiEventKind::Command, UiEventValue::None)
+    }
+
+    #[must_use]
+    pub fn activate(node_id: impl Into<NodeId>, action: impl Into<ActionId>) -> Self {
+        Self::new(node_id, action, UiEventKind::Activate, UiEventValue::None)
     }
 }
 

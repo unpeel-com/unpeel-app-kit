@@ -12,19 +12,22 @@ public final class UIUnixSessionClient: @unchecked Sendable {
         public let clientID: String
         public let renderer: UIRendererMetadata
         public let viewID: String
+        public let supportedComponentCapabilities: [String]
 
         public init(
             socketPath: String,
             participantToken: String,
             clientID: String,
             renderer: UIRendererMetadata,
-            viewID: String
+            viewID: String,
+            supportedComponentCapabilities: [String] = UnpeelUIProtocol.supportedComponentCapabilities
         ) {
             self.socketPath = socketPath
             participantTokenProvider = { participantToken }
             self.clientID = clientID
             self.renderer = renderer
             self.viewID = viewID
+            self.supportedComponentCapabilities = supportedComponentCapabilities
         }
 
         /// A provider lets the Host mint a fresh short-lived token on reconnect.
@@ -33,13 +36,15 @@ public final class UIUnixSessionClient: @unchecked Sendable {
             participantTokenProvider: @escaping @Sendable () throws -> String,
             clientID: String,
             renderer: UIRendererMetadata,
-            viewID: String
+            viewID: String,
+            supportedComponentCapabilities: [String] = UnpeelUIProtocol.supportedComponentCapabilities
         ) {
             self.socketPath = socketPath
             self.participantTokenProvider = participantTokenProvider
             self.clientID = clientID
             self.renderer = renderer
             self.viewID = viewID
+            self.supportedComponentCapabilities = supportedComponentCapabilities
         }
     }
 
@@ -56,6 +61,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     private let queue: DispatchQueue
     private let onMessage: @Sendable (UIMessage) -> Void
     private let onState: @Sendable (ConnectionState) -> Void
+    private let onTerminalFallback: @Sendable (String) -> Void
     private var connection: NWConnection?
     private var receiveBuffer = Data()
     private var running = false
@@ -66,17 +72,22 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     private var appInstanceID: String?
     private var participantID: String?
     private var latestSnapshot: UISnapshot?
+    private var semanticProjectionAvailable = false
+    private var usingTerminalFallback = false
+    private var rendererStateBeforeFallback: UIRendererState?
     private var pendingEvents: [String: UIEvent] = [:]
     private var pendingEventOrder: [String] = []
 
     public init(
         configuration: Configuration,
         onMessage: @escaping @Sendable (UIMessage) -> Void,
-        onState: @escaping @Sendable (ConnectionState) -> Void = { _ in }
+        onState: @escaping @Sendable (ConnectionState) -> Void = { _ in },
+        onTerminalFallback: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.configuration = configuration
         self.onMessage = onMessage
         self.onState = onState
+        self.onTerminalFallback = onTerminalFallback
         queue = DispatchQueue(label: "com.unpeel.app-kit.ui.\(configuration.clientID)")
     }
 
@@ -94,6 +105,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
             guard let self else { return }
             running = false
             ready = false
+            semanticProjectionAvailable = false
             negotiatedProtocolVersion = nil
             connection?.stateUpdateHandler = nil
             connection?.cancel()
@@ -105,7 +117,9 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     /// Wraps a renderer-local action in authenticated session identity.
     public func send(_ action: UIAction, eventID: String = UUID().uuidString.lowercased()) {
         queue.async { [weak self] in
-            guard let self, let snapshot = latestSnapshot, let participantID else { return }
+            guard let self, semanticProjectionAvailable,
+                  let snapshot = latestSnapshot, let participantID
+            else { return }
             let event = UIEvent(
                 snapshot: snapshot,
                 participantID: participantID,
@@ -197,6 +211,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
         do {
             let capabilities = Array(Set(
                 configuration.renderer.capabilities
+                    + configuration.supportedComponentCapabilities
                     + [UnpeelUIProtocol.deltaCapability]
             )).sorted()
             let renderer = UIRendererMetadata(
@@ -290,6 +305,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                 pendingEvents.removeAll()
                 pendingEventOrder.removeAll()
                 latestSnapshot = nil
+                semanticProjectionAvailable = false
             }
             appInstanceID = attached.appInstanceID
             participantID = attached.participantID
@@ -311,7 +327,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                   snapshot.viewID == configuration.viewID,
                   snapshot.appInstanceID == appInstanceID
             else { return }
-            latestSnapshot = snapshot
+            guard accept(snapshot) else { return }
         case let .delta(delta):
             guard delta.protocolVersion == negotiatedProtocolVersion else { return }
             guard let snapshot = latestSnapshot else {
@@ -320,8 +336,9 @@ public final class UIUnixSessionClient: @unchecked Sendable {
             }
             do {
                 let next = try snapshot.applying(delta)
-                latestSnapshot = next
-                onMessage(.snapshot(next))
+                if accept(next) {
+                    onMessage(.snapshot(next))
+                }
             } catch {
                 requestSnapshot()
             }
@@ -347,6 +364,52 @@ public final class UIUnixSessionClient: @unchecked Sendable {
             else { return }
         }
         onMessage(message)
+    }
+
+    /// Keeps the attachment alive but asks the Host to expose the complete PTY
+    /// when this renderer cannot safely map a component kind.
+    private func accept(_ snapshot: UISnapshot) -> Bool {
+        latestSnapshot = snapshot
+        let component = snapshot.root.component
+        if let capability = component.requiredCapability,
+           configuration.supportedComponentCapabilities.contains(capability)
+        {
+            semanticProjectionAvailable = true
+            if usingTerminalFallback {
+                let restoredState = rendererStateBeforeFallback ?? .component
+                usingTerminalFallback = false
+                rendererStateBeforeFallback = nil
+                if rendererState != restoredState {
+                    rendererState = restoredState
+                    if ready {
+                        sendMessage(.lifecycle(UILifecycle(
+                            snapshot: snapshot,
+                            rendererID: configuration.renderer.id,
+                            state: restoredState
+                        )))
+                    }
+                }
+            }
+            return true
+        }
+
+        semanticProjectionAvailable = false
+        if !usingTerminalFallback {
+            rendererStateBeforeFallback = rendererState
+            usingTerminalFallback = true
+        }
+        if rendererState != .terminal {
+            rendererState = .terminal
+            if ready {
+                sendMessage(.lifecycle(UILifecycle(
+                    snapshot: snapshot,
+                    rendererID: configuration.renderer.id,
+                    state: .terminal
+                )))
+            }
+        }
+        onTerminalFallback(component.kind)
+        return false
     }
 
     private func sendMessage(_ message: UIMessage) {
