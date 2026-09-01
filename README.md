@@ -523,9 +523,12 @@ or mandatory background, so Apps can compose it without inherited chrome.
 The current hosted vocabulary does not flatten Explorer rows into semantic
 `ListItem`s. The planned Explorer/Tree projection keeps directory hierarchy,
 the filter/tree focus loop, single-step selection wrapping, and the synthetic
-parent entry as distinct schema semantics. Until that complete Rust + Swift +
-web slice lands, Filetree and Markdown's picker remain on this fully functional
-Ratatui Explorer and hosted renderers use the pane's terminal fallback. See
+parent entry as distinct schema semantics. Its first implementation step is an
+internal, parity-tested rebuild of Ratatui Explorer rows and navigation on
+`SelectableRow` and the shared navigation engine; outward page/wrap and filter
+behavior will not change. Until the complete Rust + Swift + web slice lands,
+Filetree and Markdown's picker remain on this fully functional Ratatui Explorer
+and hosted renderers use the pane's terminal fallback. See
 [the Explorer/Tree follow-up contract](docs/ui-components.md#explorertree-follow-up-contract).
 
 ## Project paths and preferred editor

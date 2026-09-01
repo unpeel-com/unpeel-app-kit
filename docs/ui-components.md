@@ -524,11 +524,38 @@ generic dashboard or flex container.
 ## Explorer/Tree follow-up contract
 
 Filetree and Markdown's note picker are not flat Lists. Their standalone TUIs
-continue to use the existing `Explorer` unchanged, including its current-folder
-navigation, filter focus, synthetic parent row, directory/file distinction,
-selection wrapping, page behavior, path hit testing, and drag registration.
-They must not be migrated by serializing the visible rows as `ListItem`s: doing
-so would erase hierarchy and make parent navigation look like file activation.
+keep the existing `Explorer` outward contract unchanged, including its
+current-folder navigation, filter focus, synthetic parent row, directory/file
+distinction, selection wrapping, page behavior, path hit testing, and drag
+registration. They must not be migrated by serializing the visible rows as
+`ListItem`s: doing so would erase hierarchy and make parent navigation look
+like file activation.
+
+### Shared primitives before a wire component
+
+`Explorer` currently paints selected rows itself and owns a separate movement
+implementation. That duplication is temporary. Before adding the semantic
+component, refactor the existing Ratatui Explorer internally onto
+`SelectableRow`, `VerticalScrollbar`, and the same lower-level selection/
+viewport navigation engine used by `ListState`, with key decoding shared with
+`ListKeymap`.
+
+The common navigation engine must expose an explicit boundary policy rather
+than forcing Explorer into List's clamp policy. Flat Lists stay clamped;
+Explorer preserves its current page/wrap contract exactly (single-row moves
+wrap, while page moves retain the existing viewport and boundary behavior).
+Explorer's filter-aware key adapter also keeps printable `j`, `k`, and `q` as
+filter input instead of inheriting List aliases. Shared implementation means
+shared mechanics, not identical public bindings in incompatible focus modes.
+
+This internal refactor has a hard parity gate: capture the pre-refactor
+Explorer buffer and keystroke sequences, then assert cell-for-cell Ratatui
+buffers plus identical selection, scroll, filter-focus, directory, parent-row,
+and activation outcomes afterward. Filetree and Markdown picker fixtures must
+exercise the same shared engine. Only after those tests pass should the new
+Explorer/Tree snapshot and Swift/web renderers land. This order ensures the
+terminal generation and semantic generation cannot drift in selection styling
+or navigation behavior.
 
 The later hosted component is one closed `Explorer`/`Tree` family, not an
 arbitrary recursive `UiNode` container. Its proposed snapshot has:
@@ -948,7 +975,7 @@ The next useful vocabulary is intentionally conventional:
 | --- | --- | --- |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
-| `Explorer` / `Tree` | existing `Explorer` retained exactly | closed hierarchical file/document navigation with filter-focus and a distinct parent-entry action; design above, not yet a wire component |
+| `Explorer` / `Tree` | existing `Explorer` behavior retained while its internals move to shared `SelectableRow` and navigation primitives | closed hierarchical file/document navigation with filter-focus and a distinct parent-entry action; design above, not yet a wire component |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared
