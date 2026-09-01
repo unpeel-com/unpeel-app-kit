@@ -8,8 +8,9 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,7 @@ use crate::components::{
     BUTTON_COMPONENT_CAPABILITY, Button, ComponentValidationError,
     validate_identifier as validate_component_identifier, validate_text,
 };
+use crate::{TerminalPointerPhase, TerminalPointerState};
 
 /// Renderer capability for the v1 reference-only Surface component.
 pub const SURFACE_COMPONENT_CAPABILITY: &str = "surface";
@@ -453,7 +455,37 @@ impl CanvasPage {
             page: self,
             selected_control,
             theme: CanvasPageTheme::DEFAULT,
+            pointer: TerminalPointerState::new(),
         }
+    }
+
+    #[must_use]
+    pub fn control_at(&self, area: Rect, position: Position) -> Option<(usize, &Button)> {
+        self.layout(area)
+            .controls
+            .iter()
+            .position(|control| control.contains(position))
+            .and_then(|index| {
+                self.controls
+                    .get(index)
+                    .map(|control| (index, control.as_button()))
+            })
+    }
+
+    #[must_use]
+    pub fn action_for_mouse(&self, area: Rect, event: &MouseEvent) -> Option<(usize, &Button)> {
+        let position = TerminalPointerState::click_position(event)?;
+        self.control_at(area, position)
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_mouse(&self, area: Rect, event: &MouseEvent) -> Option<crate::UiAction> {
+        let (_, button) = self.action_for_mouse(area, event)?;
+        Some(crate::UiAction::activate(
+            button.id.clone(),
+            button.action.clone(),
+        ))
     }
 
     #[cfg(feature = "ui-bridge")]
@@ -523,12 +555,19 @@ pub struct CanvasPageWidget<'a> {
     page: &'a CanvasPage,
     selected_control: Option<usize>,
     theme: CanvasPageTheme,
+    pointer: TerminalPointerState,
 }
 
 impl CanvasPageWidget<'_> {
     #[must_use]
     pub const fn theme(mut self, theme: CanvasPageTheme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    #[must_use]
+    pub const fn pointer(mut self, pointer: TerminalPointerState) -> Self {
+        self.pointer = pointer;
         self
     }
 }
@@ -558,7 +597,18 @@ impl Widget for CanvasPageWidget<'_> {
                 continue;
             }
             let button = control.as_button();
-            let style = if self.selected_control == Some(index) {
+            let phase = self.pointer.phase(area);
+            let style = if phase != TerminalPointerPhase::Idle {
+                match phase {
+                    TerminalPointerPhase::Idle => unreachable!(),
+                    TerminalPointerPhase::Hovered => {
+                        self.theme.selected.add_modifier(Modifier::DIM)
+                    }
+                    TerminalPointerPhase::Pressed => {
+                        self.theme.selected.add_modifier(Modifier::BOLD)
+                    }
+                }
+            } else if self.selected_control == Some(index) {
                 self.theme.selected
             } else {
                 match button.role {
@@ -889,5 +939,40 @@ mod tests {
         assert!(text.contains("Next"));
         let next = layout.controls[1];
         assert_eq!(buffer[(next.x, next.y)].bg, Color::White);
+    }
+
+    #[test]
+    fn canvas_button_click_uses_the_declared_semantic_action() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+
+        let page = canvas_page();
+        let area = Rect::new(0, 0, 80, 20);
+        let control = page.layout(area).controls[1];
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: control.x,
+            row: control.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let (_, button) = page.action_for_mouse(area, &click).unwrap();
+        assert_eq!(
+            (button.id.as_str(), button.action.as_str()),
+            ("next", "next-planet")
+        );
+        #[cfg(feature = "ui-bridge")]
+        assert_eq!(
+            page.ui_action_for_mouse(area, &click),
+            Some(crate::UiAction::activate("next", "next-planet"))
+        );
+
+        let mut pointer = TerminalPointerState::new();
+        pointer.track(&click);
+        let mut buffer = Buffer::empty(area);
+        page.widget(None).pointer(pointer).render(area, &mut buffer);
+        assert!(
+            buffer[(control.x, control.y)]
+                .modifier
+                .contains(Modifier::BOLD)
+        );
     }
 }

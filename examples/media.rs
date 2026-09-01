@@ -8,21 +8,23 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Paragraph;
 use serde::{Deserialize, Serialize};
 use unpeel_app_kit::{
     AppMetadata, Media, MediaCellSize, MediaFit, MediaPicker, MediaPixelSize, MediaPointSize,
-    MediaSource, MediaSpec, UiBridge, UiBridgeEvent, UiDeltaOperation, UiEventKind, UiEventOutcome,
-    UiEventValue,
+    MediaSource, MediaSpec, TerminalPointerState, UiBridge, UiBridgeEvent, UiDeltaOperation,
+    UiEventKind, UiEventOutcome, UiEventValue,
 };
 
 const STATE_FORMAT: &str = "unpeel.app-kit.example.media";
@@ -235,11 +237,13 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
+    let mut media_area = Rect::default();
+    let mut pointer = TerminalPointerState::new();
     let result = (|| -> Result<(), Box<dyn Error>> {
         loop {
             drain_bridge(&mut app, &mut bridge)?;
@@ -267,9 +271,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                             Constraint::Fill(1),
                         ])
                         .split(vertical[1]);
-                    frame.render_widget(&app.media, horizontal[1]);
+                    media_area = horizontal[1];
+                    frame.render_widget(app.media.widget().pointer(pointer), media_area);
                     frame.render_widget(
-                        Paragraph::new("Space/Enter cycles fit · Esc quits")
+                        Paragraph::new("Space/Enter/click cycles fit · Esc quits")
                             .alignment(Alignment::Center)
                             .style(Style::new().fg(Color::DarkGray)),
                         vertical[2],
@@ -295,6 +300,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                         publish_root(&app, &mut bridge, base)?;
                     }
                 }
+                Event::Mouse(mouse) => {
+                    pointer.track(&mouse);
+                    if app.spec().action_for_mouse(&mouse, media_area).is_some() {
+                        let (base, _) = app.cycle_fit()?;
+                        publish_root(&app, &mut bridge, base)?;
+                    }
+                }
                 Event::Resize(_, _) => terminal.autoresize()?,
                 _ => {}
             }
@@ -303,7 +315,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     })();
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -311,7 +327,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn main() {
     if let Err(error) = run() {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         eprintln!("media: {error}");
         std::process::exit(1);
     }

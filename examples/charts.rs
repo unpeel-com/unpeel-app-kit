@@ -8,19 +8,21 @@ use std::error::Error;
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
 use unpeel_app_kit::{
     BarChart, BarChartBar, BarChartEmphasis, Gauge, InputField, KitTheme, LineChart, LineChartAxis,
-    LineChartPoint, LineChartSeries, ListState, Page, PageTheme, Sparkline,
+    LineChartPoint, LineChartSeries, ListState, Page, PagePointerDecision, PageTheme, Sparkline,
 };
 
 #[cfg(feature = "ui-bridge")]
@@ -214,11 +216,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
+    let mut page_area = Rect::default();
     let result = (|| -> Result<(), Box<dyn Error>> {
         loop {
             #[cfg(feature = "ui-bridge")]
@@ -237,6 +240,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         .direction(Direction::Vertical)
                         .constraints([Constraint::Min(0), Constraint::Length(1)])
                         .split(frame.area());
+                    page_area = areas[0];
                     frame.render_widget(
                         page.widget(&mut app.input, &mut app.list_state)
                             .theme(theme),
@@ -244,7 +248,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     );
                     frame.render_widget(
                         Paragraph::new(
-                            "←/→ previous/next · Enter/Space next · Esc/q quit · 4 semantic charts",
+                            "←/→ previous/next · Enter/Space/click next · Esc/q quit · 4 semantic charts",
                         )
                         .style(Style::new().fg(KitTheme::detected().subtle)),
                         areas[1],
@@ -279,6 +283,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 Event::Resize(_, _) => terminal.autoresize()?,
+                Event::Mouse(mouse) => {
+                    app.list_state.track_mouse(&mouse);
+                    let page = app.page();
+                    if matches!(
+                        page.pointer_decision(&mut app.list_state, &mouse, page_area),
+                        Some(PagePointerDecision::Activate { .. })
+                    ) {
+                        let base = app.advance(1);
+                        #[cfg(not(feature = "ui-bridge"))]
+                        let _ = base;
+                        #[cfg(feature = "ui-bridge")]
+                        publish_page(&app, &mut bridge, base)?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -286,7 +304,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     })();
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -294,7 +316,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn main() {
     if let Err(error) = run() {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         eprintln!("charts: {error}");
         std::process::exit(1);
     }

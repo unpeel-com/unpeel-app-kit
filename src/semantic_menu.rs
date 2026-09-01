@@ -235,6 +235,32 @@ impl SemanticMenu {
     pub fn item(&self, id: &str) -> Option<&SemanticMenuItem> {
         self.items.iter().find(|item| item.id == id)
     }
+
+    /// Builds the exact semantic action used by every Menu interpreter. A
+    /// row/tree target remains an opaque App-owned id in the optional value.
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_item(&self, id: &str, target: Option<String>) -> Option<crate::UiAction> {
+        let item = self.item(id).filter(|item| !item.disabled)?;
+        Some(crate::UiAction::new(
+            item.id.clone(),
+            item.action.clone(),
+            crate::UiEventKind::Activate,
+            target.map_or(crate::UiEventValue::None, crate::UiEventValue::Text),
+        ))
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    pub fn ui_action_for_popup_mouse(
+        &self,
+        popup: &mut PopupMenu<String>,
+        event: &crossterm::event::MouseEvent,
+        target: Option<String>,
+    ) -> Option<crate::UiAction> {
+        let index = popup.action_index_for_mouse(event)?;
+        let id = popup.items().get(index)?.value();
+        self.ui_action_for_item(id, target)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

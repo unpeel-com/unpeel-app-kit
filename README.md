@@ -210,6 +210,7 @@ The standalone component layer currently provides:
 | `Content` / `ContentWidget` | Read-only scrollable styled lines for issue, diff, and document detail screens; keyed range selection and bounded context actions without editor semantics |
 | `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and closed slots including compact Sparkline/Gauge metrics |
 | `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
+| `TerminalPointerState` / `PagePointerDecision` | Renderer-local hover/left-press lifecycle and pure-TUI Page hit decisions shared by Lists, Trees, Explorer, Menus, charts, Media, Canvas Buttons, Markdown footers, and clickable FooterActions; action meaning remains in the Rust component spec |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
 | `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
 | `Sparkline` / `SparklineWidget` | Closed numeric history series with shared bounds/accessibility semantics, optional activation, and a Ratatui newest-points viewport |
@@ -235,7 +236,7 @@ The standalone component layer currently provides:
 | `VerticalScrollbar` | Shared proportional, capless scrollbar |
 | `MarkdownEditor` / `MarkdownTextArea` | Ratatui-backed Markdown editor behind the independent `markdown-text-area` feature |
 | `MarkdownEditorInteraction` | Optional closed `/` block menu, Markdown-aware Enter/Backspace, and drag/word/line selection for `MarkdownTextArea` |
-| `Media` | Static images behind the independent `media` feature, using Kitty/iTerm2/Sixel with a Unicode half-block fallback |
+| `Media` | Static images behind the independent `media` feature, using Kitty/iTerm2/Sixel with a Unicode half-block fallback plus pointer-aware optional activation |
 | `Surface` / `SurfaceView` | Optional `surface-embed` delegation to unpeel-surface's WASM guest, local wgpu renderer, mmap ring, and Kitty presenter; absent from default/pure-TUI builds |
 
 The crate owns reusable component behavior and the standard flat-list keymap,
@@ -673,7 +674,10 @@ let mut menu = PopupMenu::new(
 )
 .with_theme(MenuTheme::detected());
 
-menu.hover_at(Position::new(mouse.column, mouse.row));
+menu.track_mouse(&mouse);
+if let Some(index) = menu.action_index_for_mouse(&mouse) {
+    // Activate menu.items()[index] through the same reducer path as Enter.
+}
 menu.move_selection(1);
 menu.render(frame);
 ```

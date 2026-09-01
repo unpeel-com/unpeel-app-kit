@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -21,8 +21,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     BarChart, Content, ContentState, ContentTheme, Gauge, InputField, InputFieldTheme, KitTheme,
-    LineChart, ListPageBehavior, ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow,
-    SemanticMenu, Sparkline, VerticalScrollbar,
+    LineChart, ListPageBehavior, ListState, RowPointerDecision, RowPrimaryRole,
+    SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, Sparkline, TerminalPointerPhase,
+    TerminalPointerState, VerticalScrollbar,
 };
 
 /// Renderer capability for the v1 Page container.
@@ -222,6 +223,13 @@ impl FooterAction {
         }
     }
 
+    /// Builds the exact action emitted by every hosted renderer.
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action(&self) -> crate::UiAction {
+        crate::UiAction::activate(self.id.clone(), self.action.clone())
+    }
+
     fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
         validate_identifier(&self.id, &format!("{path}.id"))?;
         validate_text(&self.label, MAX_SHORT_TEXT_BYTES, &format!("{path}.label"))?;
@@ -271,6 +279,27 @@ impl FooterActions {
     #[must_use]
     pub fn action_for_key(&self, key: &KeyEvent) -> Option<&FooterAction> {
         self.actions.iter().find(|action| action.matches_key(key))
+    }
+
+    /// Resolves a terminal click through the same ordered action vocabulary
+    /// used by accelerators, Swift toolbar buttons, and web footer buttons.
+    #[must_use]
+    pub fn action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<&FooterAction> {
+        TerminalPointerState::click_position(event)
+            .and_then(|position| self.action_at(position, area))
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_key(&self, key: &KeyEvent) -> Option<crate::UiAction> {
+        self.action_for_key(key).map(FooterAction::ui_action)
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<crate::UiAction> {
+        self.action_for_mouse(event, area)
+            .map(FooterAction::ui_action)
     }
 
     /// Resolves a pointer against the exact compact terminal hint geometry.
@@ -340,6 +369,11 @@ impl FooterActions {
             label_style: Style::new(),
             danger_style: Style::new(),
             disabled_style: Style::new().add_modifier(Modifier::DIM),
+            hover_style: Style::new().add_modifier(Modifier::UNDERLINED),
+            pressed_style: Style::new()
+                .add_modifier(Modifier::REVERSED)
+                .add_modifier(Modifier::BOLD),
+            pointer: TerminalPointerState::new(),
         }
     }
 }
@@ -352,6 +386,9 @@ pub struct FooterActionsWidget<'a> {
     label_style: Style,
     danger_style: Style,
     disabled_style: Style,
+    hover_style: Style,
+    pressed_style: Style,
+    pointer: TerminalPointerState,
 }
 
 impl FooterActionsWidget<'_> {
@@ -371,6 +408,21 @@ impl FooterActionsWidget<'_> {
         self.disabled_style = disabled_style;
         self
     }
+
+    /// Supplies renderer-local hover/press state. Action identity remains in
+    /// the immutable [`FooterActions`] value.
+    #[must_use]
+    pub const fn pointer(mut self, pointer: TerminalPointerState) -> Self {
+        self.pointer = pointer;
+        self
+    }
+
+    #[must_use]
+    pub const fn interaction_styles(mut self, hover: Style, pressed: Style) -> Self {
+        self.hover_style = hover;
+        self.pressed_style = pressed;
+        self
+    }
 }
 
 impl Widget for FooterActionsWidget<'_> {
@@ -380,29 +432,57 @@ impl Widget for FooterActionsWidget<'_> {
         }
         buffer.set_style(area, self.style);
         let mut spans = vec![Span::raw("  ")];
+        let mut x = area.x.saturating_add(2);
         for (index, action) in self.footer.actions.iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw("  "));
+                x = x.saturating_add(2);
             }
-            let action_style = if action.disabled {
+            let mut action_style = if action.disabled {
                 self.disabled_style
             } else if action.role == FooterActionRole::Danger {
                 self.danger_style
             } else {
                 self.label_style
             };
-            if let Some(accelerator) = action.accelerator_label() {
-                spans.push(Span::styled(
-                    accelerator,
-                    if action.disabled {
-                        self.disabled_style
-                    } else {
-                        self.key_style
-                    },
-                ));
-                spans.push(Span::raw(" "));
+            let accelerator = action.accelerator_label();
+            let key_width = accelerator.as_deref().map_or(0, UnicodeWidthStr::width);
+            let width = key_width
+                .saturating_add(usize::from(key_width > 0))
+                .saturating_add(UnicodeWidthStr::width(action.label.as_str()));
+            let hit = Rect::new(
+                x,
+                area.y,
+                u16::try_from(width)
+                    .unwrap_or(u16::MAX)
+                    .min(area.right().saturating_sub(x)),
+                1,
+            );
+            let phase = if action.disabled {
+                TerminalPointerPhase::Idle
+            } else {
+                self.pointer.phase(hit)
+            };
+            action_style = match phase {
+                TerminalPointerPhase::Idle => action_style,
+                TerminalPointerPhase::Hovered => action_style.patch(self.hover_style),
+                TerminalPointerPhase::Pressed => action_style.patch(self.pressed_style),
+            };
+            if let Some(accelerator) = accelerator {
+                let key_style = if action.disabled {
+                    self.disabled_style
+                } else {
+                    match phase {
+                        TerminalPointerPhase::Idle => self.key_style,
+                        TerminalPointerPhase::Hovered => self.key_style.patch(self.hover_style),
+                        TerminalPointerPhase::Pressed => self.key_style.patch(self.pressed_style),
+                    }
+                };
+                spans.push(Span::styled(accelerator, key_style));
+                spans.push(Span::styled(" ", action_style));
             }
             spans.push(Span::styled(action.label.clone(), action_style));
+            x = x.saturating_add(u16::try_from(width).unwrap_or(u16::MAX));
         }
         Line::from(spans).render(area, buffer);
     }
@@ -1019,6 +1099,54 @@ impl ListItem {
         self.slots().find_map(ListItemSlot::as_gauge)
     }
 
+    #[must_use]
+    pub fn primary_sparkline(&self) -> Option<&Sparkline> {
+        self.slots().find_map(ListItemSlot::as_sparkline)
+    }
+
+    /// Builds the authoritative primary action shared by Enter, Space for a
+    /// Toggle, and a terminal row click.
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn primary_ui_action(&self) -> Option<crate::UiAction> {
+        if let Some(toggle) = self.primary_toggle() {
+            return Some(crate::UiAction::new(
+                toggle.id.clone(),
+                toggle.set_value.clone(),
+                crate::UiEventKind::Change,
+                crate::UiEventValue::Bool(!toggle.value),
+            ));
+        }
+        if let Some(checkmark) = self.primary_checkmark() {
+            return Some(crate::UiAction::new(
+                checkmark.id.clone(),
+                checkmark.set_value.clone(),
+                crate::UiEventKind::Change,
+                crate::UiEventValue::Bool(!checkmark.value),
+            ));
+        }
+        if let Some(action) = &self.activate {
+            return Some(crate::UiAction::activate(self.id.clone(), action.clone()));
+        }
+        if let Some(sparkline) = self
+            .primary_sparkline()
+            .filter(|sparkline| sparkline.activate.is_some())
+        {
+            return sparkline
+                .activate
+                .clone()
+                .map(|action| crate::UiAction::activate(sparkline.id.clone(), action));
+        }
+        self.primary_gauge()
+            .filter(|gauge| gauge.activate.is_some())
+            .and_then(|gauge| {
+                gauge
+                    .activate
+                    .clone()
+                    .map(|action| crate::UiAction::activate(gauge.id.clone(), action))
+            })
+    }
+
     pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
         validate_identifier(&self.id, &format!("{path}.id"))?;
         validate_text(&self.label, MAX_LABEL_BYTES, &format!("{path}.label"))?;
@@ -1300,6 +1428,50 @@ impl List {
             list: self,
             state,
             theme: PageTheme::default(),
+        }
+    }
+
+    /// Interprets one terminal pointer event using the same row-role table as
+    /// Enter/Space. The first click selects static rows and immediately invokes
+    /// the primary role of interactive rows.
+    pub fn pointer_decision(
+        &self,
+        state: &mut ListState,
+        event: &MouseEvent,
+    ) -> Option<RowPointerDecision> {
+        state.track_mouse(event);
+        let position = TerminalPointerState::click_position(event)?;
+        let index = state.item_at(position, self.items.len())?;
+        let changed = state.select(Some(index), self.items.len());
+        if self.items[index].primary_role().is_interactive() {
+            Some(RowPointerDecision::InvokePrimary(index))
+        } else {
+            changed.then_some(RowPointerDecision::Select(index))
+        }
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn selection_ui_action(&self, index: usize) -> Option<crate::UiAction> {
+        let item = self.items.get(index)?;
+        let action = self.select.clone()?;
+        Some(crate::UiAction::new(
+            self.id.clone(),
+            action,
+            crate::UiEventKind::Change,
+            crate::UiEventValue::Text(item.id.clone()),
+        ))
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    pub fn ui_action_for_mouse(
+        &self,
+        state: &mut ListState,
+        event: &MouseEvent,
+    ) -> Option<crate::UiAction> {
+        match self.pointer_decision(state, event)? {
+            RowPointerDecision::Select(index) => self.selection_ui_action(index),
+            RowPointerDecision::InvokePrimary(index) => self.items.get(index)?.primary_ui_action(),
         }
     }
 
@@ -2004,6 +2176,100 @@ impl Page {
         }
     }
 
+    /// Resolves one terminal click from the exact Page layout and closed
+    /// component vocabulary. This remains available in pure-TUI builds.
+    pub fn pointer_decision<'a>(
+        &'a self,
+        list_state: &mut ListState,
+        event: &MouseEvent,
+        area: Rect,
+    ) -> Option<PagePointerDecision<'a>> {
+        list_state.track_mouse(event);
+        let position = TerminalPointerState::click_position(event)?;
+        let layout = self.layout(area);
+        if let Some(footer) = layout.footer
+            && let Some(action) = self.footer.action_for_mouse(event, footer)
+        {
+            return Some(PagePointerDecision::Footer(action));
+        }
+        if layout.title.contains(position)
+            && let Some(back) = &self.back
+        {
+            return Some(PagePointerDecision::Back(back));
+        }
+        if !layout.list.contains(position) {
+            return None;
+        }
+        match &self.body {
+            PageBodySlot::List(list) => list
+                .pointer_decision(list_state, event)
+                .map(PagePointerDecision::List),
+            PageBodySlot::Sparkline(chart) => {
+                chart.action_for_mouse(event, layout.list).map(|action| {
+                    PagePointerDecision::Activate {
+                        node_id: chart.id.as_str(),
+                        action,
+                    }
+                })
+            }
+            PageBodySlot::BarChart(chart) => {
+                chart.action_for_mouse(event, layout.list).map(|action| {
+                    PagePointerDecision::Activate {
+                        node_id: chart.id.as_str(),
+                        action,
+                    }
+                })
+            }
+            PageBodySlot::LineChart(chart) => {
+                chart.action_for_mouse(event, layout.list).map(|action| {
+                    PagePointerDecision::Activate {
+                        node_id: chart.id.as_str(),
+                        action,
+                    }
+                })
+            }
+            PageBodySlot::Gauge(chart) => {
+                chart.action_for_mouse(event, layout.list).map(|action| {
+                    PagePointerDecision::Activate {
+                        node_id: chart.id.as_str(),
+                        action,
+                    }
+                })
+            }
+            PageBodySlot::Content(_) => None,
+        }
+    }
+
+    /// Converts the standalone terminal decision to the identical typed
+    /// action emitted by Swift and web.
+    #[cfg(feature = "ui-bridge")]
+    pub fn ui_action_for_mouse(
+        &self,
+        node_id: impl Into<crate::NodeId>,
+        list_state: &mut ListState,
+        event: &MouseEvent,
+        area: Rect,
+    ) -> Option<crate::UiAction> {
+        match self.pointer_decision(list_state, event, area)? {
+            PagePointerDecision::Footer(action) => Some(action.ui_action()),
+            PagePointerDecision::Back(action) => Some(crate::UiAction::new(
+                node_id,
+                action.to_owned(),
+                crate::UiEventKind::Cancel,
+                crate::UiEventValue::None,
+            )),
+            PagePointerDecision::List(RowPointerDecision::Select(index)) => {
+                self.list().selection_ui_action(index)
+            }
+            PagePointerDecision::List(RowPointerDecision::InvokePrimary(index)) => {
+                self.list().items.get(index)?.primary_ui_action()
+            }
+            PagePointerDecision::Activate { node_id, action } => {
+                Some(crate::UiAction::activate(node_id, action))
+            }
+        }
+    }
+
     pub(crate) fn set_input_value(
         &mut self,
         input_id: &str,
@@ -2337,6 +2603,17 @@ pub struct PageLayout {
     pub footer: Option<Rect>,
 }
 
+/// Renderer-neutral meaning of one terminal click inside a Page. Apps that
+/// compile without `ui-bridge` can reduce this directly; hosted Apps convert
+/// it to the same typed `UiAction` used by Swift and web.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PagePointerDecision<'a> {
+    Footer(&'a FooterAction),
+    Back(&'a str),
+    List(RowPointerDecision),
+    Activate { node_id: &'a str, action: &'a str },
+}
+
 impl PageTheme {
     #[must_use]
     pub const fn for_theme(theme: KitTheme) -> Self {
@@ -2514,6 +2791,7 @@ impl Widget for ListWidget<'_> {
                         1,
                     ),
                     self.state.selected() == Some(index),
+                    self.state.pointer_phase_at(index),
                     self.state.spinner_frame(),
                     self.theme,
                     buffer,
@@ -2540,6 +2818,7 @@ fn render_list_item(
     item: &ListItem,
     area: Rect,
     selected: bool,
+    pointer_phase: TerminalPointerPhase,
     spinner_frame: usize,
     theme: PageTheme,
     buffer: &mut Buffer,
@@ -2547,11 +2826,18 @@ fn render_list_item(
     if area.is_empty() {
         return;
     }
-    let content = SelectableRow::new(selected, theme.selected)
+    let highlighted = selected || pointer_phase != TerminalPointerPhase::Idle;
+    let active_style = match pointer_phase {
+        TerminalPointerPhase::Idle | TerminalPointerPhase::Hovered if selected => theme.selected,
+        TerminalPointerPhase::Idle => theme.selected,
+        TerminalPointerPhase::Hovered => theme.selected.add_modifier(Modifier::DIM),
+        TerminalPointerPhase::Pressed => theme.selected.add_modifier(Modifier::BOLD),
+    };
+    let content = SelectableRow::new(highlighted, active_style)
         .inactive_style(theme.style)
         .right_padding(theme.right_padding)
         .paint(area, buffer);
-    if !selected && theme.left_padding_style != Style::new() {
+    if !highlighted && theme.left_padding_style != Style::new() {
         buffer.set_style(
             Rect::new(
                 area.x,
@@ -2568,7 +2854,7 @@ fn render_list_item(
 
     let mut left = Vec::new();
     if item.busy {
-        let style = if selected {
+        let style = if highlighted {
             theme.selected_busy
         } else {
             theme.busy
@@ -2582,16 +2868,16 @@ fn render_list_item(
         ));
     }
     if let Some(slot) = &item.leading {
-        append_leading_slot(&mut left, slot, selected, theme);
+        append_leading_slot(&mut left, slot, highlighted, theme);
     }
     let mut label_style = if item.done {
-        if selected {
+        if highlighted {
             theme.selected_detail
         } else {
             theme.done
         }
         .add_modifier(Modifier::CROSSED_OUT)
-    } else if selected {
+    } else if highlighted {
         theme.selected_item
     } else if item.action_role == ListItemActionRole::Destructive {
         theme.danger
@@ -2606,7 +2892,7 @@ fn render_list_item(
         left.push(Span::raw(" "));
         left.push(Span::styled(
             badge.text.clone(),
-            if selected {
+            if highlighted {
                 theme.selected_badge
             } else {
                 theme.tone(badge.tone)
@@ -2616,7 +2902,7 @@ fn render_list_item(
     if let Some(detail) = &item.detail {
         left.push(Span::styled(
             format!("  {detail}"),
-            if selected {
+            if highlighted {
                 theme.selected_detail
             } else {
                 theme.detail
@@ -2630,17 +2916,17 @@ fn render_list_item(
     if let Some(slot) = &item.trailing
         && !matches!(slot, ListItemSlot::Sparkline(_) | ListItemSlot::Gauge(_))
     {
-        append_trailing_slot(&mut suffix, slot, selected, theme);
+        append_trailing_slot(&mut suffix, slot, highlighted, theme);
     }
     if let Some(slot) = &item.accessory
         && !matches!(slot, ListItemSlot::Badge(_))
     {
-        append_trailing_slot(&mut suffix, slot, selected, theme);
+        append_trailing_slot(&mut suffix, slot, highlighted, theme);
     }
     if item.delete.is_some() {
         suffix.push(Span::styled(
             "[d]",
-            if selected {
+            if highlighted {
                 theme.selected_detail
             } else {
                 theme.delete
@@ -2667,7 +2953,7 @@ fn render_list_item(
                 )
         });
     let value_style = value.map(|_| {
-        if selected {
+        if highlighted {
             theme.selected_value
         } else {
             theme.tone(item.value_tone)
@@ -2760,7 +3046,7 @@ fn render_list_item(
         );
         sparkline
             .widget()
-            .style(if selected {
+            .style(if highlighted {
                 theme.selected_value
             } else {
                 theme.tone(item.value_tone)
@@ -2783,12 +3069,12 @@ fn render_list_item(
             .widget()
             .without_label()
             .styles(
-                if selected {
+                if highlighted {
                     theme.selected_value
                 } else {
                     theme.tone(item.value_tone)
                 },
-                if selected {
+                if highlighted {
                     theme.selected_detail
                 } else {
                     theme.navigation
@@ -2961,6 +3247,11 @@ impl Widget for PageWidget<'_> {
         }
         buffer.set_style(area, self.theme.style);
         let layout = self.page.layout(area);
+        let title_style = self.theme.title.patch(
+            self.list_state
+                .pointer()
+                .interaction_style(layout.title, self.page.back.is_some()),
+        );
         Paragraph::new(format!(
             "{}{}{}",
             " ".repeat(usize::from(self.theme.left_padding)),
@@ -2971,7 +3262,7 @@ impl Widget for PageWidget<'_> {
             },
             self.page.title
         ))
-        .style(self.theme.title)
+        .style(title_style)
         .render(layout.title, buffer);
 
         if let Some(input) = self.page.input_spec() {
@@ -3028,6 +3319,7 @@ impl Widget for PageWidget<'_> {
                 sparkline
                     .widget()
                     .style(self.theme.accent)
+                    .pointer(self.list_state.pointer())
                     .render(area, buffer);
             }
             PageBodySlot::BarChart(chart) => chart
@@ -3038,6 +3330,7 @@ impl Widget for PageWidget<'_> {
                     self.theme.danger,
                     self.theme.item,
                 )
+                .pointer(self.list_state.pointer())
                 .render(self.theme.inset_body(layout.list), buffer),
             PageBodySlot::LineChart(chart) => chart
                 .widget()
@@ -3052,6 +3345,7 @@ impl Widget for PageWidget<'_> {
                         self.theme.item,
                     ],
                 )
+                .pointer(self.list_state.pointer())
                 .render(self.theme.inset_body(layout.list), buffer),
             PageBodySlot::Gauge(gauge) => {
                 let body = self.theme.inset_body(layout.list);
@@ -3065,6 +3359,7 @@ impl Widget for PageWidget<'_> {
                 gauge
                     .widget()
                     .styles(self.theme.accent, self.theme.value)
+                    .pointer(self.list_state.pointer())
                     .render(area, buffer);
             }
         }
@@ -3078,6 +3373,11 @@ impl Widget for PageWidget<'_> {
                     self.theme.detail,
                     self.theme.danger,
                     self.theme.navigation.add_modifier(Modifier::DIM),
+                )
+                .pointer(self.list_state.pointer())
+                .interaction_styles(
+                    self.theme.selected.add_modifier(Modifier::DIM),
+                    self.theme.selected.add_modifier(Modifier::BOLD),
                 )
                 .render(footer, buffer);
         }
@@ -3165,7 +3465,9 @@ fn validate_single_line(value: &str, path: &str) -> Result<(), ComponentValidati
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -3292,6 +3594,136 @@ mod tests {
                 .action_at(ratatui::layout::Position::new(14, footer.y), footer)
                 .map(|action| action.id.as_str()),
             Some("refresh")
+        );
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 14,
+            row: footer.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            page.footer
+                .action_for_mouse(&click, footer)
+                .map(|action| action.action.as_str()),
+            Some("refresh-usage")
+        );
+        #[cfg(feature = "ui-bridge")]
+        assert_eq!(
+            page.footer.ui_action_for_mouse(&click, footer),
+            page.footer
+                .ui_action_for_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE,))
+        );
+
+        state.track_mouse(&click);
+        terminal
+            .draw(|frame| frame.render_widget(page.widget(&mut input, &mut state), frame.area()))
+            .unwrap();
+        assert!(
+            terminal.backend().buffer()[(14, footer.y)]
+                .modifier
+                .contains(Modifier::BOLD),
+            "a pressed footer hint receives the terminal press affordance"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ui-bridge")]
+    fn terminal_list_click_and_keyboard_primary_emit_the_same_action() {
+        let list = List::new(
+            "todos",
+            vec![
+                ListItem::new("todo-1", "Ship it").trailing(ListItemSlot::toggle(Toggle::new(
+                    "todo-1-toggle",
+                    "Completed",
+                    false,
+                    "set-done",
+                ))),
+            ],
+        );
+        let mut state = ListState::new(Some(0));
+        let area = Rect::new(0, 0, 24, 1);
+        let mut buffer = Buffer::empty(area);
+        list.widget(&mut state).render(area, &mut buffer);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let pointer = list.ui_action_for_mouse(&mut state, &click).unwrap();
+        let keyboard = list.items[0].primary_ui_action().unwrap();
+        assert_eq!(pointer, keyboard);
+        assert_eq!(pointer.node_id.as_str(), "todo-1-toggle");
+        assert_eq!(pointer.value, crate::UiEventValue::Bool(true));
+
+        let mut pressed = Buffer::empty(area);
+        list.widget(&mut state).render(area, &mut pressed);
+        assert!(pressed[(8, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn page_pointer_decision_remains_available_without_the_bridge() {
+        let page = Page::with_gauge(
+            "Gauge",
+            Gauge::new("gauge", 0.5, "Half", "Half full").activate("open-gauge"),
+        );
+        let area = Rect::new(0, 0, 24, 8);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            page.pointer_decision(&mut ListState::default(), &click, area),
+            Some(PagePointerDecision::Activate {
+                node_id: "gauge",
+                action: "open-gauge",
+            })
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "ui-bridge")]
+    fn terminal_chart_clicks_emit_their_declared_actions() {
+        let area = Rect::new(2, 3, 20, 5);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            Sparkline::new("spark", [1.0, 2.0], "Trend")
+                .activate("open-spark")
+                .ui_action_for_mouse(&click, area),
+            Some(crate::UiAction::activate("spark", "open-spark"))
+        );
+        assert_eq!(
+            BarChart::new("bars", [crate::BarChartBar::new("A", 1.0)], "One bar",)
+                .activate("open-bars")
+                .ui_action_for_mouse(&click, area),
+            Some(crate::UiAction::activate("bars", "open-bars"))
+        );
+        assert_eq!(
+            LineChart::new(
+                "line",
+                [crate::LineChartSeries::new(
+                    "Series",
+                    [crate::LineChartPoint::new(0.0, 1.0)],
+                )],
+                "One line",
+            )
+            .activate("open-line")
+            .ui_action_for_mouse(&click, area),
+            Some(crate::UiAction::activate("line", "open-line"))
+        );
+        assert_eq!(
+            Gauge::new("gauge", 0.5, "Half", "Half full")
+                .activate("open-gauge")
+                .ui_action_for_mouse(&click, area),
+            Some(crate::UiAction::activate("gauge", "open-gauge"))
         );
     }
 

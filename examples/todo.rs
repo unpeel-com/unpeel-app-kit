@@ -29,7 +29,8 @@ use ratatui::widgets::Paragraph;
 use serde::{Deserialize, Serialize};
 use unpeel_app_kit::{
     Input, InputField, InputFieldAction, KitTheme, List, ListItem, ListItemSlot, ListKeymap,
-    ListNavigationOutcome, ListState, Page, PageTheme, RowKeyDecision, RowPrimaryRole, Toggle,
+    ListNavigationOutcome, ListState, Page, PageTheme, RowKeyDecision, RowPointerDecision,
+    RowPrimaryRole, Toggle,
 };
 
 #[cfg(feature = "ui-bridge")]
@@ -277,6 +278,7 @@ impl TodoApp {
 
 fn terminal_mouse_intent(app: &mut TodoApp, mouse: MouseEvent) -> Option<Intent> {
     let position = Position::new(mouse.column, mouse.row);
+    app.list_state.track_mouse(&mouse);
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             if app.input.area().contains(position) {
@@ -285,20 +287,19 @@ fn terminal_mouse_intent(app: &mut TodoApp, mouse: MouseEvent) -> Option<Intent>
                     .mouse_down(position, mouse.modifiers.contains(KeyModifiers::SHIFT));
                 return None;
             }
-            if !app.list_area.contains(position) {
-                return None;
-            }
-            let index = app
-                .list_state
-                .offset()
-                .saturating_add(usize::from(position.y.saturating_sub(app.list_area.y)));
+            let page = app.page();
+            let decision = page.list().pointer_decision(&mut app.list_state, &mouse)?;
+            let index = match decision {
+                RowPointerDecision::InvokePrimary(index) | RowPointerDecision::Select(index) => {
+                    index
+                }
+            };
             let todo = app.state.todos.get(index)?;
             let intent = Intent::Toggle {
                 id: todo.id,
                 value: !todo.done,
             };
             app.focus_input(false);
-            app.list_state.select(Some(index), app.state.todos.len());
             Some(intent)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -801,6 +802,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut app = TodoApp::load(directory.path().join("todo.json")).unwrap();
         app.list_area = Rect::new(4, 8, 60, 10);
+        let page = app.page();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(page.list().widget(&mut app.list_state), app.list_area);
+            })
+            .unwrap();
         let intent = terminal_mouse_intent(
             &mut app,
             MouseEvent {

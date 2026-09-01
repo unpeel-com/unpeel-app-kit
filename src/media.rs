@@ -7,7 +7,11 @@
 use std::fmt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use crossterm::event::MouseEvent;
+use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
+
+use crate::TerminalPointerState;
 
 /// Renderer capability for the v1 static Media component.
 pub const MEDIA_COMPONENT_CAPABILITY: &str = "media";
@@ -330,6 +334,27 @@ impl MediaSpec {
             .clone()
             .map(|action| crate::UiAction::activate(id, action))
     }
+
+    /// Resolves a terminal image click through the declared optional action.
+    #[must_use]
+    pub fn action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<&str> {
+        let position = TerminalPointerState::click_position(event)?;
+        area.contains(position)
+            .then_some(self.activate.as_deref())
+            .flatten()
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_mouse(
+        &self,
+        id: impl Into<crate::NodeId>,
+        event: &MouseEvent,
+        area: Rect,
+    ) -> Option<crate::UiAction> {
+        self.action_for_mouse(event, area)
+            .map(|action| crate::UiAction::activate(id, action.to_owned()))
+    }
 }
 
 /// Semantic Media validation failure.
@@ -446,6 +471,7 @@ mod terminal {
     use sha2::{Digest, Sha256};
 
     use super::{MediaFit, MediaSource, MediaSpec, MediaSpecError, resolve_size};
+    use crate::TerminalPointerState;
 
     /// Loaded terminal Media using Kitty, iTerm2, Sixel, or half-block output.
     pub struct Media {
@@ -527,6 +553,15 @@ mod terminal {
             self.spec.activation_action(id)
         }
 
+        /// Ratatui view with optional renderer-local hover/press treatment.
+        #[must_use]
+        pub const fn widget(&self) -> MediaWidget<'_> {
+            MediaWidget {
+                media: self,
+                pointer: TerminalPointerState::new(),
+            }
+        }
+
         fn build_from_bytes(
             spec: MediaSpec,
             bytes: &[u8],
@@ -573,16 +608,41 @@ mod terminal {
         }
     }
 
-    impl Widget for &Media {
+    /// Pointer-aware terminal interpretation of a loaded static image.
+    pub struct MediaWidget<'a> {
+        media: &'a Media,
+        pointer: TerminalPointerState,
+    }
+
+    impl MediaWidget<'_> {
+        #[must_use]
+        pub const fn pointer(mut self, pointer: TerminalPointerState) -> Self {
+            self.pointer = pointer;
+            self
+        }
+    }
+
+    impl Widget for MediaWidget<'_> {
         fn render(self, area: Rect, buffer: &mut Buffer) {
             let target = Rect {
-                width: area.width.min(self.cell_size.width),
-                height: area.height.min(self.cell_size.height),
+                width: area.width.min(self.media.cell_size.width),
+                height: area.height.min(self.media.cell_size.height),
                 ..area
             };
-            RatatuiImage::new(&self.protocol)
+            RatatuiImage::new(&self.media.protocol)
                 .allow_clipping(true)
                 .render(target, buffer);
+            buffer.set_style(
+                target,
+                self.pointer
+                    .interaction_style(target, self.media.spec.activate.is_some()),
+            );
+        }
+    }
+
+    impl Widget for &Media {
+        fn render(self, area: Rect, buffer: &mut Buffer) {
+            self.widget().render(area, buffer);
         }
     }
 
@@ -725,7 +785,7 @@ mod terminal {
 #[cfg(feature = "media")]
 pub use ratatui_image::picker::{Picker as MediaPicker, ProtocolType as MediaProtocolType};
 #[cfg(feature = "media")]
-pub use terminal::{Media, MediaError};
+pub use terminal::{Media, MediaError, MediaWidget};
 
 #[cfg(test)]
 mod tests {
@@ -779,6 +839,28 @@ mod tests {
         assert_eq!(action.action.as_str(), "open-image");
         assert_eq!(action.kind, crate::UiEventKind::Activate);
         assert_eq!(action.value, crate::UiEventValue::None);
+    }
+
+    #[test]
+    fn terminal_media_click_uses_the_declared_action() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        let spec = inline_spec();
+        assert_eq!(
+            spec.action_for_mouse(&click, Rect::new(1, 1, 8, 4)),
+            Some("open-image")
+        );
+        #[cfg(feature = "ui-bridge")]
+        assert_eq!(
+            spec.ui_action_for_mouse("hero-image", &click, Rect::new(1, 1, 8, 4)),
+            spec.activation_action("hero-image")
+        );
     }
 
     #[cfg(feature = "media")]

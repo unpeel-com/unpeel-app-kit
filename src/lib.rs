@@ -36,6 +36,7 @@ mod media;
 mod menu;
 mod navigator;
 mod path;
+mod pointer;
 #[cfg(feature = "ui-bridge")]
 #[allow(unsafe_code)]
 mod process_security;
@@ -73,8 +74,8 @@ pub use components::{
     LIST_ITEM_METADATA_CAPABILITY, LIST_ITEM_PRESENTATION_CAPABILITY, LIST_ITEM_ROLE_CAPABILITY,
     LIST_SELECTION_CAPABILITY, List, ListItem, ListItemActionRole, ListItemEmphasis, ListItemSlot,
     ListItemTone, ListWidget, PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page, PageBodySlot,
-    PageHeaderSlot, PageLayout, PageTheme, PageWidget, STATUS_SYMBOL_COMPONENT_CAPABILITY,
-    StatusSymbol, TOGGLE_COMPONENT_CAPABILITY, Toggle,
+    PageHeaderSlot, PageLayout, PagePointerDecision, PageTheme, PageWidget,
+    STATUS_SYMBOL_COMPONENT_CAPABILITY, StatusSymbol, TOGGLE_COMPONENT_CAPABILITY, Toggle,
 };
 pub use content::{
     CONTENT_COMPONENT_CAPABILITY, CONTENT_SELECTION_CAPABILITY, Content, ContentEmphasis,
@@ -103,7 +104,7 @@ pub use line_chart::{
 };
 pub use list_navigation::{
     ListKeymap, ListNavigationAction, ListNavigationOutcome, ListPageBehavior, ListState,
-    RowBoundaryBehavior, RowKeyDecision, RowNavigationState, RowPrimaryRole,
+    RowBoundaryBehavior, RowKeyDecision, RowNavigationState, RowPointerDecision, RowPrimaryRole,
 };
 pub use markdown::{MarkdownCommandHint, MarkdownCommandHintVisibility};
 #[cfg(feature = "markdown-text-area")]
@@ -126,10 +127,11 @@ pub use media::{
     MediaPointSize, MediaSource, MediaSpec, MediaSpecError,
 };
 #[cfg(feature = "media")]
-pub use media::{Media, MediaError, MediaPicker, MediaProtocolType};
+pub use media::{Media, MediaError, MediaPicker, MediaProtocolType, MediaWidget};
 pub use menu::{MenuItem, MenuItemTone, MenuTheme, PopupMenu};
 pub use navigator::Navigator;
 pub use path::display_path_from_root;
+pub use pointer::{TerminalPointerPhase, TerminalPointerState};
 pub use scrollbar::VerticalScrollbar;
 pub use selectable::SelectableRow;
 pub use semantic_menu::{
@@ -155,7 +157,7 @@ pub use theme::{
 pub use tree::{
     TREE_COMPONENT_CAPABILITY, TREE_FILTER_CAPABILITY, TREE_HIERARCHY_CAPABILITY,
     TREE_PARENT_CAPABILITY, Tree, TreeActions, TreeChildState, TreeFilter, TreeItem, TreeItemKind,
-    TreePresentation, TreeState, TreeTheme, TreeValidationError, TreeWidget,
+    TreePointerOutcome, TreePresentation, TreeState, TreeTheme, TreeValidationError, TreeWidget,
 };
 #[cfg(feature = "ui-bridge")]
 pub use ui::{

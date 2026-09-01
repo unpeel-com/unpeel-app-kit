@@ -1,13 +1,14 @@
 //! Closed, read-only Sparkline component shared by terminal and semantic renderers.
 
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Sparkline as RatatuiSparkline, Widget};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::KitTheme;
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
+use crate::{KitTheme, TerminalPointerState};
 
 /// Renderer capability for the read-only Sparkline component.
 pub const SPARKLINE_COMPONENT_CAPABILITY: &str = "sparkline";
@@ -146,6 +147,23 @@ impl Sparkline {
         self
     }
 
+    /// Resolves a terminal click through the same optional action carried by
+    /// the semantic component.
+    #[must_use]
+    pub fn action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<&str> {
+        let position = TerminalPointerState::click_position(event)?;
+        area.contains(position)
+            .then_some(self.activate.as_deref())
+            .flatten()
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<crate::UiAction> {
+        self.action_for_mouse(event, area)
+            .map(|action| crate::UiAction::activate(self.id.clone(), action.to_owned()))
+    }
+
     #[must_use]
     pub fn values(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
         self.series.iter().copied().map(SparklinePoint::value)
@@ -270,6 +288,7 @@ impl Sparkline {
         SparklineWidget {
             sparkline: self,
             style: Style::new().fg(KitTheme::dark().accent),
+            pointer: TerminalPointerState::new(),
         }
     }
 }
@@ -278,6 +297,7 @@ impl Sparkline {
 pub struct SparklineWidget<'a> {
     sparkline: &'a Sparkline,
     style: Style,
+    pointer: TerminalPointerState,
 }
 
 impl SparklineWidget<'_> {
@@ -291,6 +311,12 @@ impl SparklineWidget<'_> {
     #[must_use]
     pub const fn style(mut self, style: Style) -> Self {
         self.style = style;
+        self
+    }
+
+    #[must_use]
+    pub const fn pointer(mut self, pointer: TerminalPointerState) -> Self {
+        self.pointer = pointer;
         self
     }
 }
@@ -331,10 +357,14 @@ impl Widget for SparklineWidget<'_> {
             .map(|point| ((point.value() - min) * TERMINAL_SCALE).round().max(0.0) as u64)
             .collect::<Vec<_>>();
         let terminal_max = ((max - min) * TERMINAL_SCALE).round().max(1.0) as u64;
+        let style = self.style.patch(
+            self.pointer
+                .interaction_style(area, self.sparkline.activate.is_some()),
+        );
         RatatuiSparkline::default()
             .data(data)
             .max(terminal_max)
-            .style(self.style)
+            .style(style)
             .render(area, buffer);
     }
 }

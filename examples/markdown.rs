@@ -431,6 +431,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 }
                 Event::Mouse(mouse) => {
                     let previous = app.node();
+                    app.editor.track_mouse(&mouse);
                     let position = Position::new(mouse.column, mouse.row);
                     let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
                     let outcome = match mouse.kind {

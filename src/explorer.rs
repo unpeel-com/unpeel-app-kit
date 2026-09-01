@@ -3,7 +3,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -15,7 +17,7 @@ use crate::{
     ColorScheme, DragSurface, InputField, InputFieldAction, InputFieldTheme, KitTheme, ListKeymap,
     ListNavigationAction, ListNavigationOutcome, ListPageBehavior, RowBoundaryBehavior,
     RowKeyDecision, RowNavigationState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow,
-    VerticalScrollbar,
+    TerminalPointerPhase, TerminalPointerState, VerticalScrollbar,
 };
 
 /// One item in the current directory shown by [`Explorer`].
@@ -749,6 +751,78 @@ impl Explorer {
         self.set_selected_index(index)
     }
 
+    #[must_use]
+    pub const fn pointer(&self) -> TerminalPointerState {
+        self.navigation.pointer()
+    }
+
+    pub fn track_mouse(&mut self, event: &MouseEvent) -> bool {
+        self.navigation.track_mouse(event)
+    }
+
+    /// Complete standalone pointer interpretation for Explorer. It preserves
+    /// the established single-click selection/double-click activation model,
+    /// and routes wheel/filter gestures through the same state as keyboard.
+    pub fn handle_mouse(
+        &mut self,
+        event: &MouseEvent,
+        clicks: &mut crate::DoubleClickTracker<PathBuf>,
+    ) -> io::Result<ExplorerEvent> {
+        self.track_mouse(event);
+        let position = Position::new(event.column, event.row);
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) if self.filter_area().contains(position) => {
+                clicks.reset();
+                Ok(
+                    if self
+                        .filter_mouse_down(position, event.modifiers.contains(KeyModifiers::SHIFT))
+                    {
+                        ExplorerEvent::FilterFocusChanged
+                    } else {
+                        ExplorerEvent::None
+                    },
+                )
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.filter_dragging() => {
+                Ok(if self.filter_mouse_drag(position) {
+                    ExplorerEvent::FilterChanged
+                } else {
+                    ExplorerEvent::None
+                })
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.filter_mouse_up();
+                Ok(ExplorerEvent::None)
+            }
+            MouseEventKind::ScrollUp if self.list_area.contains(position) => {
+                clicks.reset();
+                self.handle(ExplorerInput::Up)
+            }
+            MouseEventKind::ScrollDown if self.list_area.contains(position) => {
+                clicks.reset();
+                self.handle(ExplorerInput::Down)
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(index) = self.entry_index_at(position) else {
+                    clicks.reset();
+                    return Ok(ExplorerEvent::None);
+                };
+                let path = self.entries[index].path.clone();
+                let activate = clicks.click(path);
+                let changed = self.set_selected_index(index);
+                self.filter.set_focused(false);
+                if activate {
+                    self.open_selected()
+                } else if changed {
+                    Ok(ExplorerEvent::SelectionChanged)
+                } else {
+                    Ok(ExplorerEvent::None)
+                }
+            }
+            _ => Ok(ExplorerEvent::None),
+        }
+    }
+
     /// Selects an entry by index, clamped to the available entries.
     pub fn set_selected_index(&mut self, index: usize) -> bool {
         if self.entries.is_empty() {
@@ -1300,9 +1374,18 @@ impl Explorer {
             );
             let entry = &self.entries[index];
             let selected = self.navigation.selected() == Some(index);
+            let pointer_phase = self.navigation.pointer_phase_at(index);
+            let highlighted = selected || pointer_phase != TerminalPointerPhase::Idle;
             let inactive_style = self.entry_style(entry);
-            let active_style = inactive_style.patch(self.theme.selected);
-            let content = SelectableRow::new(selected, active_style)
+            let active_style = inactive_style.patch(match pointer_phase {
+                TerminalPointerPhase::Idle | TerminalPointerPhase::Hovered if selected => {
+                    self.theme.selected
+                }
+                TerminalPointerPhase::Idle => self.theme.selected,
+                TerminalPointerPhase::Hovered => self.theme.selected.add_modifier(Modifier::DIM),
+                TerminalPointerPhase::Pressed => self.theme.selected.add_modifier(Modifier::BOLD),
+            });
+            let content = SelectableRow::new(highlighted, active_style)
                 .inactive_style(inactive_style)
                 .left_padding(self.theme.left_padding)
                 .right_padding(0)
@@ -1310,7 +1393,7 @@ impl Explorer {
             let label = self.entry_label(entry, selected, content.width);
             Line::styled(
                 label,
-                if selected {
+                if highlighted {
                     active_style
                 } else {
                     inactive_style
@@ -1904,6 +1987,37 @@ mod tests {
         assert_eq!(explorer.selected_index(), 0);
         explorer.handle(ExplorerInput::PageDown).unwrap();
         assert_eq!(explorer.selected_index(), 3);
+    }
+
+    #[test]
+    fn explorer_pointer_shares_selection_and_activation_state_with_keyboard() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("a.md"), "a").unwrap();
+        fs::write(temp.path().join("b.md"), "b").unwrap();
+        let mut explorer = Explorer::scoped(temp.path()).unwrap();
+        let mut drags = DragSurface::disabled();
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buffer = Buffer::empty(area);
+        explorer.widget(&mut drags).render(area, &mut buffer);
+        let target = Position::new(explorer.list_area().x + 4, explorer.list_area().y + 1);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: target.x,
+            row: target.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut clicks = crate::DoubleClickTracker::new();
+
+        assert_eq!(
+            explorer.handle_mouse(&click, &mut clicks).unwrap(),
+            ExplorerEvent::SelectionChanged
+        );
+        let activated = explorer.handle_mouse(&click, &mut clicks).unwrap();
+        assert!(matches!(activated, ExplorerEvent::FileActivated(path) if path.ends_with("b.md")));
+
+        let mut pressed = Buffer::empty(area);
+        explorer.widget(&mut drags).render(area, &mut pressed);
+        assert!(pressed[target].modifier.contains(Modifier::BOLD));
     }
 
     #[test]

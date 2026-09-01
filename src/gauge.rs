@@ -1,5 +1,6 @@
 //! Closed, data-first ratio Gauge component.
 
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -7,7 +8,7 @@ use ratatui::widgets::{Gauge as RatatuiGauge, LineGauge, Widget};
 use serde::{Deserialize, Serialize};
 
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
-use crate::{ChartValue, KitTheme};
+use crate::{ChartValue, KitTheme, TerminalPointerState};
 
 /// Renderer capability for the Gauge component.
 pub const GAUGE_COMPONENT_CAPABILITY: &str = "gauge";
@@ -53,6 +54,21 @@ impl Gauge {
     pub fn activate(mut self, action: impl Into<String>) -> Self {
         self.activate = Some(action.into());
         self
+    }
+
+    #[must_use]
+    pub fn action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<&str> {
+        let position = TerminalPointerState::click_position(event)?;
+        area.contains(position)
+            .then_some(self.activate.as_deref())
+            .flatten()
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<crate::UiAction> {
+        self.action_for_mouse(event, area)
+            .map(|action| crate::UiAction::activate(self.id.clone(), action.to_owned()))
     }
 
     /// Supplies the canonical visible value copy for this ratio. This is used
@@ -121,6 +137,7 @@ impl Gauge {
             unfilled_style: Style::new().fg(theme.subtle),
             compact: false,
             show_label: true,
+            pointer: TerminalPointerState::new(),
         }
     }
 }
@@ -132,6 +149,7 @@ pub struct GaugeWidget<'a> {
     unfilled_style: Style,
     compact: bool,
     show_label: bool,
+    pointer: TerminalPointerState,
 }
 
 impl GaugeWidget<'_> {
@@ -165,6 +183,12 @@ impl GaugeWidget<'_> {
         self.show_label = false;
         self
     }
+
+    #[must_use]
+    pub const fn pointer(mut self, pointer: TerminalPointerState) -> Self {
+        self.pointer = pointer;
+        self
+    }
 }
 
 impl Widget for GaugeWidget<'_> {
@@ -173,6 +197,11 @@ impl Widget for GaugeWidget<'_> {
             return;
         }
         let ratio = self.gauge.ratio.value();
+        let interaction = self
+            .pointer
+            .interaction_style(area, self.gauge.activate.is_some());
+        let filled_style = self.filled_style.patch(interaction);
+        let unfilled_style = self.unfilled_style.patch(interaction);
         let label = if !self.show_label {
             String::new()
         } else if self.compact {
@@ -184,15 +213,15 @@ impl Widget for GaugeWidget<'_> {
             LineGauge::default()
                 .ratio(ratio)
                 .label(label)
-                .filled_style(self.filled_style)
-                .unfilled_style(self.unfilled_style)
+                .filled_style(filled_style)
+                .unfilled_style(unfilled_style)
                 .render(area, buffer);
         } else {
             RatatuiGauge::default()
                 .ratio(ratio)
                 .label(label)
-                .gauge_style(self.filled_style)
-                .style(self.unfilled_style)
+                .gauge_style(filled_style)
+                .style(unfilled_style)
                 .use_unicode(true)
                 .render(area, buffer);
         }

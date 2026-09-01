@@ -2,9 +2,11 @@
 
 use std::ops::{Deref, DerefMut};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::layout::{Position, Rect};
 use serde::{Deserialize, Serialize};
+
+use crate::{TerminalPointerPhase, TerminalPointerState};
 
 /// What PageUp/PageDown change for a list.
 ///
@@ -79,6 +81,13 @@ pub enum ListNavigationOutcome {
 pub enum RowKeyDecision {
     Navigate(ListNavigationAction),
     InvokePrimary,
+}
+
+/// Role-aware result of clicking one row in a terminal collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowPointerDecision {
+    Select(usize),
+    InvokePrimary(usize),
 }
 
 /// App Kit's standard list keymap.
@@ -216,6 +225,7 @@ pub struct RowNavigationState {
     boundary_behavior: RowBoundaryBehavior,
     reveal_selected: bool,
     rows_area: Rect,
+    pointer: TerminalPointerState,
 }
 
 impl Default for RowNavigationState {
@@ -230,6 +240,7 @@ impl Default for RowNavigationState {
             boundary_behavior: RowBoundaryBehavior::Clamp,
             reveal_selected: true,
             rows_area: Rect::default(),
+            pointer: TerminalPointerState::new(),
         }
     }
 }
@@ -247,6 +258,7 @@ impl RowNavigationState {
             boundary_behavior: RowBoundaryBehavior::Clamp,
             reveal_selected: true,
             rows_area: Rect::new(0, 0, 0, 0),
+            pointer: TerminalPointerState::new(),
         }
     }
 
@@ -268,6 +280,33 @@ impl RowNavigationState {
     #[must_use]
     pub const fn rows_area(&self) -> Rect {
         self.rows_area
+    }
+
+    #[must_use]
+    pub const fn pointer(&self) -> TerminalPointerState {
+        self.pointer
+    }
+
+    pub const fn set_pointer(&mut self, pointer: TerminalPointerState) {
+        self.pointer = pointer;
+    }
+
+    /// Feeds renderer-local pointer state shared by List, Tree, and Explorer.
+    pub fn track_mouse(&mut self, event: &MouseEvent) -> bool {
+        self.pointer.track(event)
+    }
+
+    #[must_use]
+    pub fn pointer_phase_at(&self, index: usize) -> TerminalPointerPhase {
+        self.row_area(index)
+            .map_or(TerminalPointerPhase::Idle, |area| self.pointer.phase(area))
+    }
+
+    #[must_use]
+    pub fn hovered_item(&self, item_count: usize) -> Option<usize> {
+        self.pointer
+            .position()
+            .and_then(|position| self.item_at(position, item_count))
     }
 
     pub const fn set_navigation(
@@ -454,6 +493,20 @@ impl RowNavigationState {
             .offset
             .saturating_add(usize::from(position.y.saturating_sub(self.rows_area.y)));
         (index < item_count).then_some(index)
+    }
+
+    #[must_use]
+    fn row_area(&self, index: usize) -> Option<Rect> {
+        let slot = index.checked_sub(self.offset)?;
+        let row = u16::try_from(slot).ok()?;
+        (row < self.rows_area.height).then(|| {
+            Rect::new(
+                self.rows_area.x,
+                self.rows_area.y.saturating_add(row),
+                self.rows_area.width,
+                1,
+            )
+        })
     }
 }
 

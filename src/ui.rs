@@ -1041,6 +1041,30 @@ impl UiNode {
     ) -> Option<&crate::FooterAction> {
         self.footer()?.action_for_key(key)
     }
+
+    /// Resolves the same published footer action from terminal hit geometry.
+    #[must_use]
+    pub fn footer_action_for_mouse(
+        &self,
+        event: &crossterm::event::MouseEvent,
+        area: ratatui::layout::Rect,
+    ) -> Option<&crate::FooterAction> {
+        self.footer()?.action_for_mouse(event, area)
+    }
+
+    #[must_use]
+    pub fn footer_ui_action_for_key(&self, key: &crossterm::event::KeyEvent) -> Option<UiAction> {
+        self.footer()?.ui_action_for_key(key)
+    }
+
+    #[must_use]
+    pub fn footer_ui_action_for_mouse(
+        &self,
+        event: &crossterm::event::MouseEvent,
+        area: ratatui::layout::Rect,
+    ) -> Option<UiAction> {
+        self.footer()?.ui_action_for_mouse(event, area)
+    }
 }
 
 /// Builds component-specific operations between two Markdown projections.

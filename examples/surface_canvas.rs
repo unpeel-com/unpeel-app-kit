@@ -33,7 +33,7 @@ use unpeel_app_kit::{
 };
 use unpeel_app_kit::{
     Button, ButtonRole, CanvasPage, Surface, SurfaceBackground, SurfaceInputPolicy,
-    SurfaceReference, SurfaceSpec, SurfaceView,
+    SurfaceReference, SurfaceSpec, SurfaceView, TerminalPointerState,
 };
 
 #[cfg(feature = "ui-bridge")]
@@ -172,26 +172,17 @@ fn drain_bridge(
     Ok(())
 }
 
-fn button_at(page: &CanvasPage, area: Rect, mouse: &MouseEvent) -> Option<usize> {
-    let position = Position::new(mouse.column, mouse.row);
-    page.layout(area)
-        .controls
-        .iter()
-        .position(|area| area.contains(position))
-}
-
 fn handle_mouse(
     surface: &mut Surface,
     page: &CanvasPage,
     area: Rect,
     selected: &mut usize,
+    pointer: &mut TerminalPointerState,
     mouse: MouseEvent,
 ) -> Result<(), Box<dyn Error>> {
-    if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        && let Some(index) = button_at(page, area, &mouse)
-    {
+    pointer.track(&mouse);
+    if let Some((index, button)) = page.action_for_mouse(area, &mouse) {
         *selected = index;
-        let button = page.controls[index].as_button();
         let intent =
             intent_for_button(&button.id, &button.action).expect("validated Canvas control");
         surface.event(intent.surface_event(), 0, 0)?;
@@ -268,6 +259,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
     let started = Instant::now();
     let mut selected = 0usize;
+    let mut pointer = TerminalPointerState::new();
     let mut area = Rect::new(0, 0, initial.width, initial.height);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
@@ -287,7 +279,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     terminal.draw(|frame| {
                         area = frame.area();
                         frame.render_widget(SurfaceView, area);
-                        frame.render_widget(page.widget(Some(selected)), area);
+                        frame.render_widget(page.widget(Some(selected)).pointer(pointer), area);
                         let help =
                             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
                         frame.render_widget(
@@ -339,7 +331,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }
                 }
                 Event::Mouse(mouse) => {
-                    handle_mouse(&mut surface, &page, area, &mut selected, mouse)?;
+                    handle_mouse(
+                        &mut surface,
+                        &page,
+                        area,
+                        &mut selected,
+                        &mut pointer,
+                        mouse,
+                    )?;
                 }
                 Event::Resize(columns, rows) => {
                     terminal.autoresize()?;

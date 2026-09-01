@@ -175,6 +175,20 @@ not cost terminal polish. Frozen pre-migration buffers protect existing App
 fidelity; component-level buffer tests protect the shared design language as
 it evolves.
 
+Pointer interaction is part of every Ratatui component interpretation, not an
+App-specific enhancement. `TerminalPointerState` is the one disposable
+hover/left-press tracker used by List, Tree, Explorer, Menu, MarkdownEditor,
+FooterActions, action-bearing charts/Media, and CanvasPage Button painters.
+Apps feed it every crossterm mouse event; they do not invent component hit
+geometry or pointer-only commands. `PagePointerDecision` keeps this input path
+available when `ui-bridge` is compiled out. A click on a List row or Toggle,
+Tree node/disclosure, Menu item, FooterAction, chart, Media image, or Button
+invokes the same Rust-declared primary action and typed value as Enter, Space,
+or the declared accelerator. Input and MarkdownEditor keep their established
+click/drag selection behavior. Disabled targets never activate. Hover and
+press are terminal-only visual ephemera and use the shared selection palette,
+so they may be discarded at any time without changing App or semantic state.
+
 Conformance tests therefore render the published node itself through the
 Ratatui interpreter. Testing a lookalike helper or independently rebuilding a
 second terminal tree does not satisfy the single-source-of-truth rule.
@@ -652,8 +666,11 @@ Apps do not keep a second shortcut table.
 The three interpretations are peers:
 
 - Ratatui reserves one bottom row and draws the classic compact key-hint bar,
-  such as `a alert  r refresh`; both key and pointer hit testing use that exact
-  `FooterActions` value and geometry.
+  such as `a alert  r refresh`. Every complete hint is a click target; hover
+  underlines it, a held left press uses the selected-row treatment, and click
+  fires the exact same `UiAction` as its accelerator. Disabled hints neither
+  highlight nor activate. Paint and hit testing use the same `FooterActions`
+  value and compact geometry.
 - SwiftUI renders the ordered entries as bottom-toolbar Buttons, preserving
   danger and disabled intent and attaching the declared shortcut where macOS
   can honor it.
@@ -1183,6 +1200,11 @@ the resolved point size. The web renderer uses an accessible `<img>` with CSS
 pixels and `object-fit`, and verifies resolved blobs before creating an object
 URL.
 
+An action-bearing Media is a terminal mouse target over exactly its allocated
+image rectangle. `MediaSpec::action_for_mouse` and the pointer-aware
+`MediaWidget` share that rectangle and action declaration; click therefore
+emits the same activation as native/web, with no image-specific command table.
+
 Media v1 models static images only. It has no video, playback, frame, or
 animation state. If an animated raster format reaches the terminal decoder,
 only its first decoded frame is rendered; animation support for native/web is
@@ -1243,7 +1265,8 @@ generic child array, z-index, flexbox, coordinate, or arbitrary style map.
 
 The overlay placement is part of the component contract: a toolbar across the
 top of the canvas. Ratatui paints opaque toolbar cells over the local Surface
-layer and exposes the same button rectangles for mouse hit-testing; SwiftUI
+layer and exposes the same button rectangles for mouse hit-testing, including
+shared hover/held-press treatment and click activation; SwiftUI
 uses `CanvasPageView` with native Buttons over its injected Metal presenter;
 web uses `CanvasPageRenderer` with an accessible `role=toolbar` over WebGPU.
 Unknown control kinds trigger the normal whole-pane terminal fallback instead

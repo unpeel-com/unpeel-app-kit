@@ -1,5 +1,6 @@
 //! Closed, data-first categorical BarChart component.
 
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -7,7 +8,7 @@ use ratatui::widgets::{Bar as RatatuiBar, BarChart as RatatuiBarChart, BarGroup,
 use serde::{Deserialize, Serialize};
 
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
-use crate::{ChartValue, KitTheme};
+use crate::{ChartValue, KitTheme, TerminalPointerState};
 
 /// Renderer capability for the BarChart component.
 pub const BAR_CHART_COMPONENT_CAPABILITY: &str = "barChart";
@@ -110,6 +111,21 @@ impl BarChart {
         self
     }
 
+    #[must_use]
+    pub fn action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<&str> {
+        let position = TerminalPointerState::click_position(event)?;
+        area.contains(position)
+            .then_some(self.activate.as_deref())
+            .flatten()
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<crate::UiAction> {
+        self.action_for_mouse(event, area)
+            .map(|action| crate::UiAction::activate(self.id.clone(), action.to_owned()))
+    }
+
     /// Shared zero-based normalization consumed by native and web fixtures.
     #[must_use]
     pub fn normalized_values(&self) -> Vec<f64> {
@@ -157,6 +173,7 @@ impl BarChart {
             accent_style: Style::new().fg(theme.accent),
             danger_style: Style::new().fg(theme.danger),
             value_style: Style::new().fg(theme.text),
+            pointer: TerminalPointerState::new(),
         }
     }
 }
@@ -168,6 +185,7 @@ pub struct BarChartWidget<'a> {
     accent_style: Style,
     danger_style: Style,
     value_style: Style,
+    pointer: TerminalPointerState,
 }
 
 impl BarChartWidget<'_> {
@@ -195,6 +213,12 @@ impl BarChartWidget<'_> {
         self.value_style = value_style;
         self
     }
+
+    #[must_use]
+    pub const fn pointer(mut self, pointer: TerminalPointerState) -> Self {
+        self.pointer = pointer;
+        self
+    }
 }
 
 impl Widget for BarChartWidget<'_> {
@@ -203,6 +227,9 @@ impl Widget for BarChartWidget<'_> {
             return;
         }
         let normalized = self.chart.normalized_values();
+        let interaction = self
+            .pointer
+            .interaction_style(area, self.chart.activate.is_some());
         let bars = self
             .chart
             .bars
@@ -219,8 +246,8 @@ impl Widget for BarChartWidget<'_> {
                     (normalized * TERMINAL_SCALE).round() as u64,
                 )
                 .text_value(bar.value_caption.clone().unwrap_or_default())
-                .style(style)
-                .value_style(self.value_style)
+                .style(style.patch(interaction))
+                .value_style(self.value_style.patch(interaction))
             })
             .collect::<Vec<_>>();
         let count = u16::try_from(bars.len()).unwrap_or(u16::MAX).max(1);

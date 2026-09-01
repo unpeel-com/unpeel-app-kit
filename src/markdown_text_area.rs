@@ -2,6 +2,7 @@
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
+use crossterm::event::MouseEvent;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -18,7 +19,7 @@ use crate::{
     TextSelection, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent,
     UiEventKind, UiEventValue, UiNode,
 };
-use crate::{MarkdownCommandHint, VerticalScrollbar};
+use crate::{MarkdownCommandHint, TerminalPointerState, VerticalScrollbar};
 
 const DEFAULT_LEFT_PADDING: u16 = 1;
 const DEFAULT_TAB_LENGTH: u8 = 2;
@@ -242,6 +243,7 @@ pub struct MarkdownTextArea<'a> {
     area: Rect,
     scroll_top: (u16, u16),
     left_padding: u16,
+    pointer: TerminalPointerState,
 }
 
 /// Opinionated App Kit Markdown component.
@@ -282,6 +284,7 @@ impl<'a> MarkdownTextArea<'a> {
             area: Rect::default(),
             scroll_top: (0, 0),
             left_padding: DEFAULT_LEFT_PADDING,
+            pointer: TerminalPointerState::default(),
         }
     }
 
@@ -473,6 +476,17 @@ impl<'a> MarkdownTextArea<'a> {
         self.area.contains(position)
     }
 
+    #[must_use]
+    pub const fn pointer(&self) -> TerminalPointerState {
+        self.pointer
+    }
+
+    /// Feeds hover/press ephemera used by the component-owned footer and
+    /// leaves document selection mechanics to the existing editor handlers.
+    pub fn track_mouse(&mut self, event: &MouseEvent) -> bool {
+        self.pointer.track(event)
+    }
+
     /// The current visual-row and horizontal scroll offsets.
     #[must_use]
     pub const fn scroll_top(&self) -> (u16, u16) {
@@ -653,13 +667,21 @@ impl<'a> MarkdownTextArea<'a> {
                 footer_height,
             );
             frame.render_widget(
-                config.footer.widget().styles(
-                    self.style.status,
-                    self.style.status.add_modifier(Modifier::BOLD),
-                    self.style.status,
-                    Style::new().fg(Color::Red),
-                    self.style.status.add_modifier(Modifier::DIM),
-                ),
+                config
+                    .footer
+                    .widget()
+                    .styles(
+                        self.style.status,
+                        self.style.status.add_modifier(Modifier::BOLD),
+                        self.style.status,
+                        Style::new().fg(Color::Red),
+                        self.style.status.add_modifier(Modifier::DIM),
+                    )
+                    .pointer(self.pointer)
+                    .interaction_styles(
+                        self.style.selection.add_modifier(Modifier::DIM),
+                        self.style.selection.add_modifier(Modifier::BOLD),
+                    ),
                 footer,
             );
         }
@@ -718,13 +740,20 @@ impl<'a> MarkdownTextArea<'a> {
         }
         if footer_height > 0 {
             frame.render_widget(
-                spec.footer.widget().styles(
-                    self.style.status,
-                    self.style.status.add_modifier(Modifier::BOLD),
-                    self.style.status,
-                    Style::new().fg(Color::Red),
-                    self.style.status.add_modifier(Modifier::DIM),
-                ),
+                spec.footer
+                    .widget()
+                    .styles(
+                        self.style.status,
+                        self.style.status.add_modifier(Modifier::BOLD),
+                        self.style.status,
+                        Style::new().fg(Color::Red),
+                        self.style.status.add_modifier(Modifier::DIM),
+                    )
+                    .pointer(self.pointer)
+                    .interaction_styles(
+                        self.style.selection.add_modifier(Modifier::DIM),
+                        self.style.selection.add_modifier(Modifier::BOLD),
+                    ),
                 footer,
             );
         }

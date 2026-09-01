@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -18,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, FOOTER_ACTIONS_CAPABILITY, FooterAction,
     FooterActions, InputField, InputFieldTheme, KitTheme, ListPageBehavior, RowBoundaryBehavior,
-    RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, VerticalScrollbar,
+    RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, TerminalPointerPhase,
+    TerminalPointerState, VerticalScrollbar,
 };
 
 pub const TREE_COMPONENT_CAPABILITY: &str = "tree";
@@ -54,6 +56,16 @@ pub enum TreeChildState {
     Loaded,
     Unloaded,
     Loading,
+}
+
+/// Backend-neutral result of clicking a rendered terminal Tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TreePointerOutcome {
+    Select(String),
+    Activate(String),
+    SetExpanded { item_id: String, expanded: bool },
+    PrimaryAction,
+    FooterAction(usize),
 }
 
 /// One bounded semantic entry. Only directories may own child entries.
@@ -562,6 +574,62 @@ impl Tree {
             filter_theme: None,
         }
     }
+
+    #[must_use]
+    fn item(&self, id: &str) -> Option<&TreeItem> {
+        find_item(&self.items, id)
+    }
+
+    /// Converts a terminal Tree decision into the exact hosted action emitted
+    /// by the Swift and web interpreters.
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_pointer_outcome(
+        &self,
+        node_id: impl Into<crate::NodeId>,
+        outcome: &TreePointerOutcome,
+    ) -> Option<crate::UiAction> {
+        let node_id = node_id.into();
+        match outcome {
+            TreePointerOutcome::Select(item_id) => Some(crate::UiAction::new(
+                node_id,
+                self.actions.select.clone(),
+                crate::UiEventKind::Select,
+                crate::UiEventValue::Text(item_id.clone()),
+            )),
+            TreePointerOutcome::Activate(item_id) => {
+                let item = self.item(item_id)?;
+                if item.kind == TreeItemKind::Parent {
+                    Some(crate::UiAction::new(
+                        node_id,
+                        self.actions.parent.clone(),
+                        crate::UiEventKind::Cancel,
+                        crate::UiEventValue::None,
+                    ))
+                } else {
+                    Some(crate::UiAction::new(
+                        node_id,
+                        self.actions.open.clone(),
+                        crate::UiEventKind::Activate,
+                        crate::UiEventValue::Text(item_id.clone()),
+                    ))
+                }
+            }
+            TreePointerOutcome::SetExpanded { item_id, expanded } => Some(crate::UiAction::new(
+                node_id,
+                self.actions.set_expanded.clone()?,
+                crate::UiEventKind::Change,
+                crate::UiEventValue::TextList(vec![item_id.clone(), expanded.to_string()]),
+            )),
+            TreePointerOutcome::PrimaryAction => self
+                .primary_action
+                .as_ref()
+                .map(|action| crate::UiAction::activate(action.id.clone(), action.action.clone())),
+            TreePointerOutcome::FooterAction(index) => {
+                self.footer.actions.get(*index).map(FooterAction::ui_action)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -651,6 +719,7 @@ pub struct TreeState {
     primary_action_area: Rect,
     footer_area: Rect,
     visible_ids: Vec<String>,
+    disclosure_areas: Vec<(String, Rect)>,
 }
 
 impl Default for TreeState {
@@ -664,6 +733,7 @@ impl Default for TreeState {
             primary_action_area: Rect::default(),
             footer_area: Rect::default(),
             visible_ids: Vec::new(),
+            disclosure_areas: Vec::new(),
         }
     }
 }
@@ -715,6 +785,82 @@ impl TreeState {
     }
 
     #[must_use]
+    pub const fn pointer(&self) -> TerminalPointerState {
+        self.navigation.pointer()
+    }
+
+    pub const fn set_pointer(&mut self, pointer: TerminalPointerState) {
+        self.navigation.set_pointer(pointer);
+    }
+
+    pub fn track_mouse(&mut self, event: &MouseEvent) -> bool {
+        self.navigation.track_mouse(event)
+    }
+
+    /// Resolves all Tree terminal hit regions from the most recent render.
+    /// Single click selects, double click invokes the same action as Enter,
+    /// and an outline disclosure changes only the expanded state.
+    pub fn pointer_decision(
+        &mut self,
+        tree: &Tree,
+        event: &MouseEvent,
+        clicks: &mut crate::DoubleClickTracker<String>,
+    ) -> Option<TreePointerOutcome> {
+        self.track_mouse(event);
+        let position = TerminalPointerState::click_position(event)?;
+        if self.primary_action_at(position) && tree.primary_action.is_some() {
+            clicks.reset();
+            return Some(TreePointerOutcome::PrimaryAction);
+        }
+        if let Some(action) = self.footer_action_at(tree, position) {
+            clicks.reset();
+            return tree
+                .footer
+                .actions
+                .iter()
+                .position(|candidate| candidate.id == action.id)
+                .map(TreePointerOutcome::FooterAction);
+        }
+        if let Some((item_id, _)) = self
+            .disclosure_areas
+            .iter()
+            .find(|(_, area)| area.contains(position))
+            && let Some(item) = tree.item(item_id)
+        {
+            clicks.reset();
+            return Some(TreePointerOutcome::SetExpanded {
+                item_id: item_id.clone(),
+                expanded: !item.expanded,
+            });
+        }
+        let Some(index) = self.navigation.item_at(position, self.visible_ids.len()) else {
+            clicks.reset();
+            return None;
+        };
+        let item_id = self.visible_ids[index].clone();
+        if clicks.click(item_id.clone()) {
+            self.navigation.select(Some(index), self.visible_ids.len());
+            Some(TreePointerOutcome::Activate(item_id))
+        } else if self.navigation.select(Some(index), self.visible_ids.len()) {
+            Some(TreePointerOutcome::Select(item_id))
+        } else {
+            None
+        }
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    pub fn ui_action_for_mouse(
+        &mut self,
+        tree: &Tree,
+        node_id: impl Into<crate::NodeId>,
+        event: &MouseEvent,
+        clicks: &mut crate::DoubleClickTracker<String>,
+    ) -> Option<crate::UiAction> {
+        let outcome = self.pointer_decision(tree, event, clicks)?;
+        tree.ui_action_for_pointer_outcome(node_id, &outcome)
+    }
+
+    #[must_use]
     pub const fn offset(&self) -> usize {
         self.navigation.offset()
     }
@@ -756,6 +902,7 @@ impl Widget for TreeWidget<'_> {
             self.state.primary_action_area = Rect::default();
             self.state.footer_area = Rect::default();
             self.state.visible_ids.clear();
+            self.state.disclosure_areas.clear();
             return;
         }
         let filter_height = u16::from(self.tree.filter.is_some() && area.height > 0);
@@ -810,6 +957,7 @@ impl Widget for TreeWidget<'_> {
         let mut visible = Vec::new();
         flatten_visible(&self.tree.items, 0, self.tree.presentation, &mut visible);
         self.state.visible_ids = visible.iter().map(|(item, _)| item.id.clone()).collect();
+        self.state.disclosure_areas.clear();
         let rows_y = area
             .y
             .saturating_add(filter_height)
@@ -843,10 +991,23 @@ impl Widget for TreeWidget<'_> {
                 area.width,
                 action_height,
             );
-            let style = match action.role {
+            let mut style = match action.role {
                 ButtonRole::Default => self.theme.directory,
                 ButtonRole::Primary => self.theme.directory.bold(),
                 ButtonRole::Destructive => Style::new().fg(Color::Red).bold(),
+            };
+            style = match self.state.pointer().phase(action_area) {
+                TerminalPointerPhase::Idle => style,
+                TerminalPointerPhase::Hovered => style.patch(
+                    self.theme
+                        .selected
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                ),
+                TerminalPointerPhase::Pressed => style.patch(
+                    self.theme
+                        .selected
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                ),
             };
             Line::styled(
                 format!(
@@ -877,6 +1038,15 @@ impl Widget for TreeWidget<'_> {
                     self.theme.filter,
                     Style::new().fg(Color::Red),
                     self.theme.empty,
+                )
+                .pointer(self.state.pointer())
+                .interaction_styles(
+                    self.theme
+                        .selected
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                    self.theme
+                        .selected
+                        .add_modifier(ratatui::style::Modifier::BOLD),
                 )
                 .render(footer_area, buffer);
             footer_area
@@ -911,6 +1081,8 @@ impl Widget for TreeWidget<'_> {
                 1,
             );
             let selected = self.state.navigation.selected() == Some(index);
+            let pointer_phase = self.state.navigation.pointer_phase_at(index);
+            let highlighted = selected || pointer_phase != TerminalPointerPhase::Idle;
             let mut inactive = match item.kind {
                 TreeItemKind::Parent => self.theme.parent,
                 TreeItemKind::Directory => self.theme.directory,
@@ -919,8 +1091,21 @@ impl Widget for TreeWidget<'_> {
             if item.symlink {
                 inactive = self.theme.symlink;
             }
-            let active = inactive.patch(self.theme.selected);
-            let content = SelectableRow::new(selected, active)
+            let active = inactive.patch(match pointer_phase {
+                TerminalPointerPhase::Idle | TerminalPointerPhase::Hovered if selected => {
+                    self.theme.selected
+                }
+                TerminalPointerPhase::Idle => self.theme.selected,
+                TerminalPointerPhase::Hovered => self
+                    .theme
+                    .selected
+                    .add_modifier(ratatui::style::Modifier::DIM),
+                TerminalPointerPhase::Pressed => self
+                    .theme
+                    .selected
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            });
+            let content = SelectableRow::new(highlighted, active)
                 .inactive_style(inactive)
                 .left_padding(self.theme.left_padding)
                 .right_padding(0)
@@ -930,6 +1115,20 @@ impl Widget for TreeWidget<'_> {
             } else {
                 String::new()
             };
+            if self.tree.presentation == TreePresentation::Outline
+                && item.kind == TreeItemKind::Directory
+            {
+                let indent_width = u16::try_from(depth.saturating_mul(2)).unwrap_or(u16::MAX);
+                self.state.disclosure_areas.push((
+                    item.id.clone(),
+                    Rect::new(
+                        content.x.saturating_add(indent_width),
+                        content.y,
+                        2.min(content.width.saturating_sub(indent_width)),
+                        1,
+                    ),
+                ));
+            }
             let marker = match item.kind {
                 TreeItemKind::Parent => "../".to_owned(),
                 TreeItemKind::Directory => {
@@ -944,7 +1143,7 @@ impl Widget for TreeWidget<'_> {
             };
             Line::styled(
                 format!("{indent}{marker}"),
-                if selected { active } else { inactive },
+                if highlighted { active } else { inactive },
             )
             .render(content, buffer);
         }
@@ -1086,6 +1285,18 @@ fn find_item_mut<'a>(items: &'a mut [TreeItem], id: &str) -> Option<&'a mut Tree
     None
 }
 
+fn find_item<'a>(items: &'a [TreeItem], id: &str) -> Option<&'a TreeItem> {
+    for item in items {
+        if item.id == id {
+            return Some(item);
+        }
+        if let Some(found) = find_item(&item.children, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn flatten_visible<'a>(
     items: &'a [TreeItem],
     depth: usize,
@@ -1102,6 +1313,7 @@ fn flatten_visible<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1146,6 +1358,69 @@ mod tests {
         assert_eq!(state.selected_id(), Some("today"));
         let rendered = terminal.backend().buffer();
         assert!(rendered.content.iter().any(|cell| cell.symbol() == "▾"));
+    }
+
+    #[test]
+    fn tree_pointer_uses_selection_double_activation_and_disclosure_actions() {
+        let tree = fixture();
+        let mut state = TreeState::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(tree.widget(&mut state), frame.area()))
+            .unwrap();
+        let mut clicks = crate::DoubleClickTracker::new();
+        let parent = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: state.rows_area().x + 3,
+            row: state.rows_area().y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let selected = state.pointer_decision(&tree, &parent, &mut clicks).unwrap();
+        assert_eq!(selected, TreePointerOutcome::Select("parent".to_owned()));
+        #[cfg(feature = "ui-bridge")]
+        {
+            let selected_action = tree
+                .ui_action_for_pointer_outcome("tree", &selected)
+                .unwrap();
+            assert_eq!(selected_action.kind, crate::UiEventKind::Select);
+        }
+
+        let activated = state.pointer_decision(&tree, &parent, &mut clicks).unwrap();
+        assert_eq!(activated, TreePointerOutcome::Activate("parent".to_owned()));
+        #[cfg(feature = "ui-bridge")]
+        {
+            let activated_action = tree
+                .ui_action_for_pointer_outcome("tree", &activated)
+                .unwrap();
+            assert_eq!(activated_action.kind, crate::UiEventKind::Cancel);
+        }
+
+        let disclosure = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: state.rows_area().x + 2,
+            row: state.rows_area().y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let expanded = state
+            .pointer_decision(&tree, &disclosure, &mut clicks)
+            .unwrap();
+        assert_eq!(
+            expanded,
+            TreePointerOutcome::SetExpanded {
+                item_id: "projects".to_owned(),
+                expanded: false,
+            }
+        );
+        #[cfg(feature = "ui-bridge")]
+        {
+            let expanded_action = tree
+                .ui_action_for_pointer_outcome("tree", &expanded)
+                .unwrap();
+            assert_eq!(
+                expanded_action.value,
+                crate::UiEventValue::TextList(vec!["projects".to_owned(), "false".to_owned()])
+            );
+        }
     }
 
     #[test]

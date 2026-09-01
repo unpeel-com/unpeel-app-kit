@@ -1,10 +1,11 @@
+use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{ColorScheme, KitTheme, VerticalScrollbar};
+use crate::{ColorScheme, KitTheme, TerminalPointerPhase, TerminalPointerState, VerticalScrollbar};
 
 /// Semantic color treatment for one popup-menu item.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -148,6 +149,7 @@ pub struct PopupMenu<T> {
     items_area: Rect,
     scroll: usize,
     theme: MenuTheme,
+    pointer: TerminalPointerState,
 }
 
 impl<T> PopupMenu<T> {
@@ -162,6 +164,7 @@ impl<T> PopupMenu<T> {
             items_area: Rect::default(),
             scroll: 0,
             theme: MenuTheme::default(),
+            pointer: TerminalPointerState::default(),
         }
     }
 
@@ -212,6 +215,38 @@ impl<T> PopupMenu<T> {
 
     pub const fn set_anchor(&mut self, anchor: Position) {
         self.anchor = anchor;
+    }
+
+    #[must_use]
+    pub const fn pointer(&self) -> TerminalPointerState {
+        self.pointer
+    }
+
+    /// Tracks hover/press and makes an enabled row under the pointer the same
+    /// active row that Up/Down and Enter use.
+    pub fn track_mouse(&mut self, event: &MouseEvent) -> bool {
+        let mut changed = self.pointer.track(event);
+        if matches!(
+            event.kind,
+            MouseEventKind::Moved
+                | MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+                | MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        ) {
+            changed |= self.select_at(Position::new(event.column, event.row));
+        }
+        changed
+    }
+
+    /// Returns the enabled menu row activated by a left click. Keyboard Enter
+    /// reads the same selected index, so both input paths are identical.
+    pub fn action_index_for_mouse(&mut self, event: &MouseEvent) -> Option<usize> {
+        self.track_mouse(event);
+        let position = TerminalPointerState::click_position(event)?;
+        let index = self.item_index_at(position)?;
+        self.items
+            .get(index)
+            .is_some_and(MenuItem::is_enabled)
+            .then_some(index)
     }
 
     /// Moves to the next enabled item, wrapping at both ends.
@@ -270,6 +305,7 @@ impl<T> PopupMenu<T> {
 
     /// Updates the full-row hover selection. Disabled items do not activate.
     pub fn select_at(&mut self, position: Position) -> bool {
+        self.pointer.move_to(position);
         self.item_index_at(position)
             .is_some_and(|index| self.set_selected_index(index))
     }
@@ -355,8 +391,23 @@ impl<T> PopupMenu<T> {
                     MenuItemTone::Danger => self.theme.danger,
                 }
             };
-            if self.selected == Some(index) {
-                style = style.patch(self.theme.selected);
+            let phase = if item.enabled {
+                self.pointer.phase(row)
+            } else {
+                TerminalPointerPhase::Idle
+            };
+            if self.selected == Some(index) || phase != TerminalPointerPhase::Idle {
+                style = style.patch(match phase {
+                    TerminalPointerPhase::Idle => self.theme.selected,
+                    TerminalPointerPhase::Hovered => self
+                        .theme
+                        .selected
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                    TerminalPointerPhase::Pressed => self
+                        .theme
+                        .selected
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                });
             }
             frame.render_widget(
                 Paragraph::new(format!(
@@ -401,6 +452,7 @@ impl<T> PopupMenu<T> {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -450,6 +502,20 @@ mod tests {
         assert_eq!(
             terminal.backend().buffer()[(items.right() - 1, items.y + 1)].bg,
             Color::Rgb(63, 63, 70)
+        );
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: items.x,
+            row: items.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(menu.action_index_for_mouse(&click), Some(1));
+        terminal.draw(|frame| menu.render(frame)).unwrap();
+        assert!(
+            terminal.backend().buffer()[(items.x, items.y + 1)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
         );
     }
 

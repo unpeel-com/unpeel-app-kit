@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -11,7 +12,7 @@ use ratatui::widgets::{Axis, Chart as RatatuiChart, Dataset, GraphType, Widget};
 use serde::{Deserialize, Serialize};
 
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
-use crate::{ChartValue, ColorScheme, KitTheme};
+use crate::{ChartValue, ColorScheme, KitTheme, TerminalPointerState};
 
 /// Renderer capability for the LineChart component.
 pub const LINE_CHART_COMPONENT_CAPABILITY: &str = "lineChart";
@@ -153,6 +154,21 @@ impl LineChart {
     pub fn activate(mut self, action: impl Into<String>) -> Self {
         self.activate = Some(action.into());
         self
+    }
+
+    #[must_use]
+    pub fn action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<&str> {
+        let position = TerminalPointerState::click_position(event)?;
+        area.contains(position)
+            .then_some(self.activate.as_deref())
+            .flatten()
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_action_for_mouse(&self, event: &MouseEvent, area: Rect) -> Option<crate::UiAction> {
+        self.action_for_mouse(event, area)
+            .map(|action| crate::UiAction::activate(self.id.clone(), action.to_owned()))
     }
 
     #[must_use]
@@ -304,6 +320,7 @@ impl LineChart {
             chart: self,
             axis_style: Style::new().fg(theme.subtle),
             series_styles: terminal_series_styles(theme),
+            pointer: TerminalPointerState::new(),
         }
     }
 }
@@ -313,6 +330,7 @@ pub struct LineChartWidget<'a> {
     chart: &'a LineChart,
     axis_style: Style,
     series_styles: [Style; 6],
+    pointer: TerminalPointerState,
 }
 
 impl LineChartWidget<'_> {
@@ -334,6 +352,12 @@ impl LineChartWidget<'_> {
     #[must_use]
     pub const fn axis_style(mut self, style: Style) -> Self {
         self.axis_style = style;
+        self
+    }
+
+    #[must_use]
+    pub const fn pointer(mut self, pointer: TerminalPointerState) -> Self {
+        self.pointer = pointer;
         self
     }
 }
@@ -358,6 +382,9 @@ impl Widget for LineChartWidget<'_> {
         if area.is_empty() || self.chart.series.is_empty() {
             return;
         }
+        let interaction = self
+            .pointer
+            .interaction_style(area, self.chart.activate.is_some());
         let point_sets = self
             .chart
             .series
@@ -381,7 +408,7 @@ impl Widget for LineChartWidget<'_> {
                     .name(series.name.clone())
                     .marker(symbols::Marker::Braille)
                     .graph_type(GraphType::Line)
-                    .style(self.series_styles[index % self.series_styles.len()])
+                    .style(self.series_styles[index % self.series_styles.len()].patch(interaction))
                     .data(points)
             })
             .collect::<Vec<_>>();
@@ -390,14 +417,14 @@ impl Widget for LineChartWidget<'_> {
         let mut x_axis = Axis::default()
             .bounds([x_bounds.0, x_bounds.1])
             .labels(axis_labels(x_bounds))
-            .style(self.axis_style);
+            .style(self.axis_style.patch(interaction));
         if let Some(label) = &self.chart.x_axis.label {
             x_axis = x_axis.title(label.clone());
         }
         let mut y_axis = Axis::default()
             .bounds([y_bounds.0, y_bounds.1])
             .labels(axis_labels(y_bounds))
-            .style(self.axis_style);
+            .style(self.axis_style.patch(interaction));
         if let Some(label) = &self.chart.y_axis.label {
             y_axis = y_axis.title(label.clone());
         }
