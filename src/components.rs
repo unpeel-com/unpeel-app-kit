@@ -20,7 +20,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     Content, ContentState, InputField, KitTheme, ListPageBehavior, ListState, RowPrimaryRole,
-    SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, VerticalScrollbar,
+    SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, Sparkline, VerticalScrollbar,
 };
 
 /// Renderer capability for the v1 Page container.
@@ -341,6 +341,7 @@ pub enum ListItemSlot {
     Toggle(Toggle),
     Status(StatusSymbol),
     Badge(Badge),
+    Sparkline(Sparkline),
     Disclosure,
     Checkmark(Checkmark),
 }
@@ -361,6 +362,13 @@ impl ListItemSlot {
         Self::Badge(badge)
     }
 
+    /// Read-only history data. Sparkline is deliberately trailing-only so a
+    /// row remains semantically closed rather than becoming a chart container.
+    #[must_use]
+    pub const fn sparkline(sparkline: Sparkline) -> Self {
+        Self::Sparkline(sparkline)
+    }
+
     /// UITableViewCell-style navigation affordance. The row's `activate`
     /// action remains the authoritative App/router transition.
     #[must_use]
@@ -378,6 +386,7 @@ impl ListItemSlot {
         match self {
             Self::Toggle(toggle) => Some(toggle.id.as_str()),
             Self::Checkmark(checkmark) => Some(checkmark.id.as_str()),
+            Self::Sparkline(sparkline) => Some(sparkline.id.as_str()),
             Self::Status(_) | Self::Badge(_) | Self::Disclosure => None,
         }
     }
@@ -387,6 +396,7 @@ impl ListItemSlot {
             Self::Toggle(toggle) => toggle.validate(path),
             Self::Status(status) => status.validate(path),
             Self::Badge(badge) => badge.validate(path),
+            Self::Sparkline(sparkline) => sparkline.validate(path),
             Self::Disclosure => Ok(()),
             Self::Checkmark(checkmark) => checkmark.validate(path),
         }
@@ -398,6 +408,7 @@ impl ListItemSlot {
             Self::Toggle(_)
             | Self::Status(_)
             | Self::Badge(_)
+            | Self::Sparkline(_)
             | Self::Disclosure
             | Self::Checkmark(_) => None,
         }
@@ -406,7 +417,11 @@ impl ListItemSlot {
     fn as_toggle(&self) -> Option<&Toggle> {
         match self {
             Self::Toggle(toggle) => Some(toggle),
-            Self::Status(_) | Self::Badge(_) | Self::Disclosure | Self::Checkmark(_) => None,
+            Self::Status(_)
+            | Self::Badge(_)
+            | Self::Sparkline(_)
+            | Self::Disclosure
+            | Self::Checkmark(_) => None,
         }
     }
 
@@ -416,6 +431,7 @@ impl ListItemSlot {
             Self::Toggle(_)
             | Self::Status(_)
             | Self::Badge(_)
+            | Self::Sparkline(_)
             | Self::Disclosure
             | Self::Checkmark(_) => None,
         }
@@ -424,7 +440,22 @@ impl ListItemSlot {
     fn as_checkmark(&self) -> Option<&Checkmark> {
         match self {
             Self::Checkmark(checkmark) => Some(checkmark),
-            Self::Toggle(_) | Self::Status(_) | Self::Badge(_) | Self::Disclosure => None,
+            Self::Toggle(_)
+            | Self::Status(_)
+            | Self::Badge(_)
+            | Self::Sparkline(_)
+            | Self::Disclosure => None,
+        }
+    }
+
+    fn as_sparkline(&self) -> Option<&Sparkline> {
+        match self {
+            Self::Sparkline(sparkline) => Some(sparkline),
+            Self::Toggle(_)
+            | Self::Status(_)
+            | Self::Badge(_)
+            | Self::Disclosure
+            | Self::Checkmark(_) => None,
         }
     }
 }
@@ -699,6 +730,19 @@ impl ListItem {
             return Err(ComponentValidationError::new(
                 format!("{path}.accessory"),
                 "Disclosure is accepted only in the accessory slot",
+            ));
+        }
+        let sparklines = self
+            .slots()
+            .filter_map(ListItemSlot::as_sparkline)
+            .collect::<Vec<_>>();
+        if sparklines.len() > 1
+            || (!sparklines.is_empty()
+                && !matches!(self.trailing, Some(ListItemSlot::Sparkline(_))))
+        {
+            return Err(ComponentValidationError::new(
+                format!("{path}.trailing"),
+                "Sparkline is accepted only once in the trailing slot",
             ));
         }
         let independent_roles = usize::from(!toggles.is_empty())
@@ -1277,6 +1321,12 @@ impl Page {
         }) {
             capabilities.push(BADGE_COMPONENT_CAPABILITY);
         }
+        if list.items.iter().any(|item| {
+            item.slots()
+                .any(|slot| matches!(slot, ListItemSlot::Sparkline(_)))
+        }) {
+            capabilities.push(crate::SPARKLINE_COMPONENT_CAPABILITY);
+        }
         if list.selected_id.is_some()
             || list.select.is_some()
             || list.scroll_padding != 0
@@ -1450,6 +1500,32 @@ impl Page {
         Err(ComponentValidationError::new(
             "delta.nodeId",
             format!("Checkmark {checkmark_id:?} is not present"),
+        ))
+    }
+
+    pub(crate) fn set_sparkline_data(
+        &mut self,
+        replacement: Sparkline,
+    ) -> Result<(), ComponentValidationError> {
+        let Some(list) = self.body.as_list_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                "Page body is not a List",
+            ));
+        };
+        for item in &mut list.items {
+            for slot in item.slots_mut() {
+                if let ListItemSlot::Sparkline(sparkline) = slot
+                    && sparkline.id == replacement.id
+                {
+                    *sparkline = replacement;
+                    return Ok(());
+                }
+            }
+        }
+        Err(ComponentValidationError::new(
+            "delta.nodeId",
+            format!("Sparkline {:?} is not present", replacement.id),
         ))
     }
 
@@ -1876,7 +1952,10 @@ fn render_list_item(
     }
 
     let mut suffix = Vec::new();
-    if let Some(slot) = &item.trailing {
+    let sparkline = item.trailing.as_ref().and_then(ListItemSlot::as_sparkline);
+    if let Some(slot) = &item.trailing
+        && !matches!(slot, ListItemSlot::Sparkline(_))
+    {
         append_trailing_slot(&mut suffix, slot, selected, theme);
     }
     if let Some(slot) = &item.accessory
@@ -1928,10 +2007,26 @@ fn render_list_item(
         }
         right.extend(suffix);
     }
-    let right_width = Line::from(right.clone())
+    let text_right_width = Line::from(right.clone())
         .width()
         .min(usize::from(content.width));
-    let right_columns = u16::try_from(right_width).unwrap_or(content.width);
+    let text_right_columns = u16::try_from(text_right_width).unwrap_or(content.width);
+    let sparkline_columns = sparkline.map_or(0, |sparkline| {
+        u16::try_from(sparkline.series.len())
+            .unwrap_or(u16::MAX)
+            .min(
+                content
+                    .width
+                    .saturating_sub(18)
+                    .saturating_sub(text_right_columns)
+                    .saturating_sub(u16::from(text_right_columns > 0)),
+            )
+    });
+    let chart_gap = u16::from(text_right_columns > 0 && sparkline_columns > 0);
+    let right_columns = text_right_columns
+        .saturating_add(chart_gap)
+        .saturating_add(sparkline_columns)
+        .min(content.width);
     let gap = u16::from(right_columns > 0 && right_columns < content.width);
     let [label_area, value_area] = Layout::horizontal([
         Constraint::Min(0),
@@ -1939,14 +2034,46 @@ fn render_list_item(
     ])
     .areas(content);
     Paragraph::new(Line::from(left)).render(label_area, buffer);
-    if right_columns > 0 {
+    if text_right_columns > 0 {
+        let text_area = if sparkline_columns == 0 {
+            value_area
+        } else {
+            Rect::new(
+                value_area.x.saturating_add(gap),
+                value_area.y,
+                text_right_columns.min(value_area.width.saturating_sub(gap)),
+                value_area.height,
+            )
+        };
         let mut paragraph = Paragraph::new(Line::from(right)).alignment(Alignment::Right);
         if theme.style_value_gap
             && let Some(style) = value_style
         {
             paragraph = paragraph.style(style);
         }
-        paragraph.render(value_area, buffer);
+        paragraph.render(text_area, buffer);
+    }
+    if sparkline_columns > 0
+        && let Some(sparkline) = sparkline
+    {
+        let chart_area = Rect::new(
+            value_area
+                .x
+                .saturating_add(gap)
+                .saturating_add(text_right_columns)
+                .saturating_add(chart_gap),
+            value_area.y,
+            sparkline_columns,
+            value_area.height,
+        );
+        sparkline
+            .widget()
+            .style(if selected {
+                theme.selected_value
+            } else {
+                theme.tone(item.value_tone)
+            })
+            .render(chart_area, buffer);
     }
 }
 
@@ -1989,6 +2116,7 @@ fn append_leading_slot(
                 theme.tone(badge.tone)
             },
         )),
+        ListItemSlot::Sparkline(_) => {}
         ListItemSlot::Disclosure => spans.push(Span::styled(
             "› ",
             if selected {
@@ -2039,6 +2167,7 @@ fn append_trailing_slot(
                 theme.tone(badge.tone)
             },
         )),
+        ListItemSlot::Sparkline(_) => {}
         ListItemSlot::Disclosure => spans.push(Span::styled(
             "›",
             if selected {

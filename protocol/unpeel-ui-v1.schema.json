@@ -586,6 +586,27 @@
         "tone": { "$ref": "#/$defs/listItemTone", "default": "default" }
       }
     },
+    "sparkline": {
+      "description": "Read-only numeric history. Inferred bounds include zero; all-zero domains resolve to 0...1 in every renderer.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "series", "accessibilityText"],
+      "properties": {
+        "type": { "const": "sparkline" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "items": { "type": "number" }
+        },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "caption": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+        "unit": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+        "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384 }
+      }
+    },
     "unsupportedRowSlot": {
       "description": "Opaque future row control retained so a renderer can fall back to the terminal pane.",
       "type": "object",
@@ -594,7 +615,7 @@
       "properties": { "type": { "$ref": "#/$defs/identifier" } },
       "not": {
         "required": ["type"],
-        "properties": { "type": { "enum": ["toggle", "status", "badge", "disclosure", "checkmark"] } }
+        "properties": { "type": { "enum": ["toggle", "status", "badge", "sparkline", "disclosure", "checkmark"] } }
       }
     },
     "listItemSlot": {
@@ -602,6 +623,7 @@
         { "$ref": "#/$defs/toggle" },
         { "$ref": "#/$defs/statusSymbol" },
         { "$ref": "#/$defs/badge" },
+        { "$ref": "#/$defs/sparkline" },
         { "$ref": "#/$defs/disclosure" },
         { "$ref": "#/$defs/checkmark" },
         { "$ref": "#/$defs/unsupportedRowSlot" }
@@ -1089,6 +1111,26 @@
             "op": { "const": "checkmarkSetValue" },
             "nodeId": { "$ref": "#/$defs/identifier" },
             "value": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "series", "min", "max", "caption", "unit", "accessibilityText"],
+          "properties": {
+            "op": { "const": "sparklineSetData" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "series": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100000,
+              "items": { "type": "number" }
+            },
+            "min": { "type": ["number", "null"] },
+            "max": { "type": ["number", "null"] },
+            "caption": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+            "unit": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+            "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384 }
           }
         },
         {

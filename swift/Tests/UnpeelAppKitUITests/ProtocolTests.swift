@@ -53,7 +53,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 34)
+    #expect(messages.count == 36)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -336,6 +336,33 @@ func sharedProtocolFixturesDecode() throws {
     #expect(openSlash.action.value == .text("slash"))
     #expect(updatedHintEditor.commandHint?.text == "Type '/' for blocks")
     #expect(!updatedHintEditor.commandHintVisible)
+
+    guard case let .snapshot(sparklineSnapshot) = messages[34],
+          case let .page(sparklinePage) = sparklineSnapshot.root.component,
+          case let .list(sparklineList) = sparklinePage.body,
+          case let .sparkline(sparkline)? = sparklineList.items.first?.trailing
+    else {
+        Issue.record("last fixture must carry the shared Usage Sparkline vector")
+        return
+    }
+    #expect(sparkline.series == [0, 3, 1.5, 4])
+    #expect(sparkline.resolvedBounds == 0...5)
+    #expect(sparkline.normalizedSeries == [0, 0.6, 0.3, 0.8])
+    #expect(sparklinePage.requiredCapabilities == [
+        "page", "list", "listItem", "listItemPresentation", "sparkline",
+    ])
+    guard case let .delta(sparklineDelta) = messages[35],
+          case let .page(updatedSparklinePage) = try sparklineSnapshot
+            .applying(sparklineDelta).root.component,
+          case let .list(updatedSparklineList) = updatedSparklinePage.body,
+          case let .sparkline(updatedSparkline)? = updatedSparklineList.items.first?.trailing
+    else {
+        Issue.record("final fixture must update only the keyed Sparkline data")
+        return
+    }
+    #expect(updatedSparkline.series == [1, 2, 5])
+    #expect(updatedSparkline.resolvedBounds == 0...5)
+    #expect(updatedSparkline.caption == "Latest trend")
 }
 
 @Test

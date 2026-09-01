@@ -21,6 +21,7 @@ use crate::content::{ContentLine, ContentSelection};
 use crate::markdown::MarkdownCommandHint;
 use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
 use crate::semantic_menu::SemanticMenu;
+use crate::sparkline::{Sparkline, SparklinePoint};
 use crate::surface::{CanvasPage, SurfaceReference, SurfaceSpec};
 use crate::tree::{Tree, TreeChildState, TreeItem};
 
@@ -1196,8 +1197,11 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
     }
     match (&previous_page.body, &next_page.body) {
         (PageBodySlot::List(previous_list), PageBodySlot::List(next_list)) => {
+            let Some(mut operations) = list_sparkline_delta_operations(previous_list, next_list)
+            else {
+                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+            };
             if previous_list.id != next_list.id
-                || previous_list.items != next_list.items
                 || previous_list.empty_message != next_list.empty_message
                 || previous_list.select != next_list.select
                 || previous_list.scroll_padding != next_list.scroll_padding
@@ -1209,13 +1213,12 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
                 return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
             }
             if previous_list.selected_id != next_list.selected_id {
-                vec![UiDeltaOperation::ListSetSelection {
+                operations.push(UiDeltaOperation::ListSetSelection {
                     list_id: next_list.id.clone(),
                     selected_id: next_list.selected_id.clone(),
-                }]
-            } else {
-                Vec::new()
+                });
             }
+            operations
         }
         (PageBodySlot::Content(previous_content), PageBodySlot::Content(next_content)) => {
             if previous_content.id != next_content.id
@@ -1247,6 +1250,30 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
         }
         _ => vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }],
     }
+}
+
+fn list_sparkline_delta_operations(
+    previous: &crate::List,
+    next: &crate::List,
+) -> Option<Vec<UiDeltaOperation>> {
+    if previous.items.len() != next.items.len() {
+        return None;
+    }
+    let mut comparable = previous.items.clone();
+    let mut operations = Vec::new();
+    for (candidate, next_item) in comparable.iter_mut().zip(&next.items) {
+        if let (
+            Some(crate::ListItemSlot::Sparkline(previous_sparkline)),
+            Some(crate::ListItemSlot::Sparkline(next_sparkline)),
+        ) = (&candidate.trailing, &next_item.trailing)
+            && previous_sparkline.id == next_sparkline.id
+            && previous_sparkline != next_sparkline
+        {
+            operations.push(UiDeltaOperation::sparkline_set_data(next_sparkline));
+            candidate.trailing = next_item.trailing.clone();
+        }
+    }
+    (comparable == next.items).then_some(operations)
 }
 
 fn contiguous_text_edit(previous: &str, next: &str) -> TextEdit {
@@ -1429,6 +1456,16 @@ pub enum UiDeltaOperation {
         node_id: String,
         value: bool,
     },
+    /// Replaces one keyed Sparkline's complete read-only data contract.
+    SparklineSetData {
+        node_id: String,
+        series: Vec<SparklinePoint>,
+        min: Option<SparklinePoint>,
+        max: Option<SparklinePoint>,
+        caption: Option<String>,
+        unit: Option<String>,
+        accessibility_text: String,
+    },
     InputSetValue {
         node_id: String,
         value: String,
@@ -1544,6 +1581,19 @@ impl UiDeltaOperation {
     }
 
     #[must_use]
+    pub fn sparkline_set_data(sparkline: &Sparkline) -> Self {
+        Self::SparklineSetData {
+            node_id: sparkline.id.clone(),
+            series: sparkline.series.clone(),
+            min: sparkline.min,
+            max: sparkline.max,
+            caption: sparkline.caption.clone(),
+            unit: sparkline.unit.clone(),
+            accessibility_text: sparkline.accessibility_text.clone(),
+        }
+    }
+
+    #[must_use]
     pub fn input_set_value(node_id: impl Into<String>, value: impl Into<String>) -> Self {
         Self::InputSetValue {
             node_id: node_id.into(),
@@ -1650,6 +1700,27 @@ impl UiDeltaOperation {
                 validate_identifier(node_id, &format!("{path}.nodeId"))
                     .map_err(UiProtocolError::InvalidView)
             }
+            Self::SparklineSetData {
+                node_id,
+                series,
+                min,
+                max,
+                caption,
+                unit,
+                accessibility_text,
+            } => Sparkline {
+                id: node_id.clone(),
+                series: series.clone(),
+                min: *min,
+                max: *max,
+                caption: caption.clone(),
+                unit: unit.clone(),
+                accessibility_text: accessibility_text.clone(),
+            }
+            .validate(path)
+            .map_err(|error| {
+                UiProtocolError::InvalidView(UiValidationError::new(error.path, error.message))
+            }),
             Self::ListInsertItem {
                 list_id,
                 index,
@@ -1893,6 +1964,27 @@ impl UiNode {
                 UiDeltaOperation::CheckmarkSetValue { node_id, value } => {
                     self.page_mut(index)?
                         .set_checkmark_value(node_id, *value)
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::SparklineSetData {
+                    node_id,
+                    series,
+                    min,
+                    max,
+                    caption,
+                    unit,
+                    accessibility_text,
+                } => {
+                    self.page_mut(index)?
+                        .set_sparkline_data(Sparkline {
+                            id: node_id.clone(),
+                            series: series.clone(),
+                            min: *min,
+                            max: *max,
+                            caption: caption.clone(),
+                            unit: unit.clone(),
+                            accessibility_text: accessibility_text.clone(),
+                        })
                         .map_err(|error| component_delta_error(index, error))?;
                 }
                 UiDeltaOperation::InputSetValue { node_id, value } => {
@@ -3461,6 +3553,45 @@ mod tests {
         assert_eq!(page.list().items.len(), 1);
         assert_eq!(page.list().items[0].id, "todo-2");
         assert_eq!(page.list().selected_id.as_deref(), Some("todo-2"));
+    }
+
+    #[test]
+    fn page_diff_updates_sparkline_data_without_replacing_the_root() {
+        let page = |sparkline: Sparkline| {
+            UiNode::page(
+                "usage-page",
+                Page::new(
+                    "Usage",
+                    List::new(
+                        "usage-metrics",
+                        vec![
+                            ListItem::new("trend", "Usage Trend")
+                                .trailing(ListItemSlot::sparkline(sparkline)),
+                        ],
+                    ),
+                ),
+            )
+        };
+        let previous = page(Sparkline::new(
+            "trend-series",
+            [0.0, 2.0, 1.0],
+            "Usage history: 0, 2, 1",
+        ));
+        let next = page(
+            Sparkline::new("trend-series", [1.0, 3.0, 5.0], "Usage history: 1, 3, 5")
+                .caption("Latest trend")
+                .unit("tokens"),
+        );
+
+        let operations = page_delta_operations(&previous, &next);
+        assert!(matches!(
+            operations.as_slice(),
+            [UiDeltaOperation::SparklineSetData { node_id, .. }]
+                if node_id == "trend-series"
+        ));
+        let mut applied = previous;
+        applied.apply_delta_operations(&operations).unwrap();
+        assert_eq!(applied, next);
     }
 
     #[test]

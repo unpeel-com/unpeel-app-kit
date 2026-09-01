@@ -18,6 +18,7 @@ export const UI_LIST_ITEM_ROLE_CAPABILITY = "listItemRole" as const;
 export const UI_LIST_SELECTION_CAPABILITY = "listSelection" as const;
 export const UI_STATUS_SYMBOL_CAPABILITY = "statusSymbol" as const;
 export const UI_BADGE_CAPABILITY = "badge" as const;
+export const UI_SPARKLINE_CAPABILITY = "sparkline" as const;
 export const UI_TOGGLE_CAPABILITY = "toggle" as const;
 export const UI_INPUT_CAPABILITY = "input" as const;
 export const UI_BUTTON_CAPABILITY = "button" as const;
@@ -47,6 +48,7 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_LIST_SELECTION_CAPABILITY,
   UI_STATUS_SYMBOL_CAPABILITY,
   UI_BADGE_CAPABILITY,
+  UI_SPARKLINE_CAPABILITY,
   UI_TOGGLE_CAPABILITY,
   UI_INPUT_CAPABILITY,
   UI_BUTTON_CAPABILITY,
@@ -362,12 +364,23 @@ export interface BadgeSpec {
   tone?: ListItemTone;
 }
 
+export interface SparklineSpec {
+  type: "sparkline";
+  id: string;
+  series: number[];
+  min?: number;
+  max?: number;
+  caption?: string;
+  unit?: string;
+  accessibilityText: string;
+}
+
 export interface UnsupportedComponentSlot {
   type: string;
   [field: string]: unknown;
 }
 
-export type ListItemSlot = ToggleSpec | StatusSymbolSpec | BadgeSpec | DisclosureSpec
+export type ListItemSlot = ToggleSpec | StatusSymbolSpec | BadgeSpec | SparklineSpec | DisclosureSpec
   | CheckmarkSpec | UnsupportedComponentSlot;
 
 export interface ListItemSpec {
@@ -609,6 +622,10 @@ export function isBadgeSlot(slot: ListItemSlot): slot is BadgeSpec {
   return slot.type === "badge";
 }
 
+export function isSparklineSlot(slot: ListItemSlot): slot is SparklineSpec {
+  return slot.type === "sparkline";
+}
+
 export function isDisclosureSlot(slot: ListItemSlot): slot is DisclosureSpec {
   return slot.type === "disclosure";
 }
@@ -619,9 +636,30 @@ export function isCheckmarkSlot(slot: ListItemSlot): slot is CheckmarkSpec {
 
 export function isKnownListItemSlot(
   slot: ListItemSlot,
-): slot is ToggleSpec | StatusSymbolSpec | BadgeSpec | DisclosureSpec | CheckmarkSpec {
+): slot is ToggleSpec | StatusSymbolSpec | BadgeSpec | SparklineSpec | DisclosureSpec
+  | CheckmarkSpec {
   return isToggleSlot(slot) || isStatusSlot(slot) || isBadgeSlot(slot)
-    || isDisclosureSlot(slot) || isCheckmarkSlot(slot);
+    || isSparklineSlot(slot) || isDisclosureSlot(slot) || isCheckmarkSlot(slot);
+}
+
+/** Authoritative cross-renderer domain: inferred bounds include zero. */
+export function resolvedSparklineBounds(sparkline: SparklineSpec): [number, number] {
+  let seriesMinimum = Number.POSITIVE_INFINITY;
+  let seriesMaximum = Number.NEGATIVE_INFINITY;
+  for (const value of sparkline.series) {
+    seriesMinimum = Math.min(seriesMinimum, value);
+    seriesMaximum = Math.max(seriesMaximum, value);
+  }
+  const lower = sparkline.min ?? Math.min(seriesMinimum, 0);
+  let upper = sparkline.max ?? Math.max(seriesMaximum, 0);
+  if (lower === upper) upper = lower + 1;
+  return [lower, upper];
+}
+
+export function normalizedSparklineSeries(sparkline: SparklineSpec): number[] {
+  const [lower, upper] = resolvedSparklineBounds(sparkline);
+  const range = upper - lower;
+  return sparkline.series.map((value) => Math.min(Math.max((value - lower) / range, 0), 1));
 }
 
 export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
@@ -774,6 +812,10 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
     .some((slot) => slot?.type === "badge"))) {
     capabilities.push(UI_BADGE_CAPABILITY);
   }
+  if (node.body.items.some((item) => [item.leading, item.trailing, item.accessory]
+    .some((slot) => slot?.type === "sparkline"))) {
+    capabilities.push(UI_SPARKLINE_CAPABILITY);
+  }
   if (node.body.selectedId !== undefined || node.body.select !== undefined
     || (node.body.scrollPadding ?? 0) !== 0 || (node.body.pageOverlap ?? 1) !== 1
     || (node.body.pageBehavior ?? "selection") !== "selection"
@@ -888,6 +930,16 @@ export type UiDeltaOperation =
   | { op: "surfaceSetReference"; nodeId: string; reference: SurfaceReference }
   | { op: "toggleSetValue"; nodeId: string; value: boolean }
   | { op: "checkmarkSetValue"; nodeId: string; value: boolean }
+  | {
+    op: "sparklineSetData";
+    nodeId: string;
+    series: number[];
+    min: number | null;
+    max: number | null;
+    caption: string | null;
+    unit: string | null;
+    accessibilityText: string;
+  }
   | { op: "inputSetValue"; nodeId: string; value: string }
   | { op: "listInsertItem"; listId: string; index: number; item: ListItemSpec }
   | { op: "listSetSelection"; listId: string; selectedId: string | null }
@@ -1295,6 +1347,28 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       };
     });
     if (!matched) throw new Error("Delta targets an unavailable Checkmark");
+    return { ...page, body: { ...page.body, items } };
+  }
+  if (operation.op === "sparklineSetData") {
+    const page = requireListPage(root);
+    const sparkline: SparklineSpec = {
+      type: "sparkline",
+      id: operation.nodeId,
+      series: operation.series,
+      accessibilityText: operation.accessibilityText,
+      ...(operation.min === null ? {} : { min: operation.min }),
+      ...(operation.max === null ? {} : { max: operation.max }),
+      ...(operation.caption === null ? {} : { caption: operation.caption }),
+      ...(operation.unit === null ? {} : { unit: operation.unit }),
+    };
+    let matched = false;
+    const items = page.body.items.map((item) => {
+      if (item.trailing === undefined || !isSparklineSlot(item.trailing)
+        || item.trailing.id !== operation.nodeId) return item;
+      matched = true;
+      return { ...item, trailing: sparkline };
+    });
+    if (!matched) throw new Error("Delta targets an unavailable Sparkline");
     return { ...page, body: { ...page.body, items } };
   }
   if (operation.op === "inputSetValue") {
@@ -2041,6 +2115,7 @@ function validateListItem(
   const toggleValues: boolean[] = [];
   let checkmarkCount = 0;
   let disclosureCount = 0;
+  let sparklineCount = 0;
   if (item.delete !== undefined) requireIdentifier(item.delete, `${path}.delete`);
   if (item.activate !== undefined) requireIdentifier(item.activate, `${path}.activate`);
   if (item.actionRole !== undefined
@@ -2070,6 +2145,14 @@ function validateListItem(
       requireString(slot.text, `${path}.${name}.text`, true);
       requireSingleLine(slot.text, `${path}.${name}.text`);
       validateOptionalListItemTone(slot.tone, `${path}.${name}.tone`);
+      continue;
+    }
+    if (slot.type === "sparkline") {
+      validateSparkline(slot, `${path}.${name}`, register);
+      sparklineCount += 1;
+      if (name !== "trailing") {
+        throw new Error(`${path}.${name} Sparkline is accepted only in the trailing slot`);
+      }
       continue;
     }
     if (slot.type === "toggle") {
@@ -2109,6 +2192,7 @@ function validateListItem(
   if (checkmarkCount > 1 || disclosureCount > 1) {
     throw new Error(`${path} accepts at most one Checkmark or Disclosure`);
   }
+  if (sparklineCount > 1) throw new Error(`${path} accepts at most one Sparkline`);
   if (disclosureCount > 0 && item.activate === undefined) {
     throw new Error(`${path}.activate is required by Disclosure`);
   }
@@ -2120,6 +2204,47 @@ function validateListItem(
   if (item.actionRole === "destructive"
     && (item.activate === undefined || disclosureCount > 0)) {
     throw new Error(`${path}.actionRole destructive requires a plain command row`);
+  }
+}
+
+function validateSparkline(
+  value: unknown,
+  path: string,
+  register: (value: unknown, valuePath: string) => void,
+): void {
+  const sparkline = record(value, path);
+  register(sparkline.id, `${path}.id`);
+  if (!Array.isArray(sparkline.series)
+    || sparkline.series.length === 0
+    || sparkline.series.length > 100_000
+    || !sparkline.series.every((point) => typeof point === "number" && Number.isFinite(point))) {
+    throw new Error(`${path}.series must contain 1...100000 finite numbers`);
+  }
+  for (const name of ["min", "max"] as const) {
+    if (sparkline[name] !== undefined
+      && (typeof sparkline[name] !== "number" || !Number.isFinite(sparkline[name]))) {
+      throw new Error(`${path}.${name} must be finite`);
+    }
+  }
+  const minimum = sparkline.min as number | undefined;
+  const maximum = sparkline.max as number | undefined;
+  if (minimum !== undefined && maximum !== undefined && minimum >= maximum) {
+    throw new Error(`${path}.min must be less than max`);
+  }
+  const series = sparkline.series as number[];
+  if (minimum !== undefined && series.some((point) => point < minimum)
+    || maximum !== undefined && series.some((point) => point > maximum)) {
+    throw new Error(`${path} bounds must contain every series point`);
+  }
+  for (const name of ["caption", "unit"] as const) {
+    if (sparkline[name] !== undefined) {
+      requireString(sparkline[name], `${path}.${name}`, true);
+      requireSingleLine(sparkline[name], `${path}.${name}`);
+    }
+  }
+  requireString(sparkline.accessibilityText, `${path}.accessibilityText`);
+  if ((sparkline.accessibilityText as string).trim().length === 0) {
+    throw new Error(`${path}.accessibilityText must not be empty`);
   }
 }
 
@@ -2387,6 +2512,19 @@ function validateDeltaOperation(value: unknown, path: string): void {
     case "checkmarkSetValue":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       if (typeof operation.value !== "boolean") throw new Error(`${path}.value must be boolean`);
+      return;
+    case "sparklineSetData":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateSparkline({
+        type: "sparkline",
+        id: operation.nodeId,
+        series: operation.series,
+        min: operation.min ?? undefined,
+        max: operation.max ?? undefined,
+        caption: operation.caption ?? undefined,
+        unit: operation.unit ?? undefined,
+        accessibilityText: operation.accessibilityText,
+      }, path, requireIdentifier);
       return;
     case "inputSetValue":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);

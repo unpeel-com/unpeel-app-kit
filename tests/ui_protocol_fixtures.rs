@@ -18,7 +18,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 34);
+    assert_eq!(messages.len(), 36);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -412,4 +412,48 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         Some("Type '/' for blocks")
     );
     assert!(!editor.command_hint_visible());
+
+    let UiMessage::Snapshot(sparkline_snapshot) = &messages[34] else {
+        panic!("last fixture must contain the shared Sparkline vector");
+    };
+    let UiComponent::Page(page) = &sparkline_snapshot.root.element else {
+        panic!("Sparkline fixture must remain a Page");
+    };
+    let Some(ListItemSlot::Sparkline(sparkline)) = page.list().items[0].trailing.as_ref() else {
+        panic!("Usage Trend must carry a trailing Sparkline");
+    };
+    assert_eq!(
+        sparkline.values().collect::<Vec<_>>(),
+        vec![0.0, 3.0, 1.5, 4.0]
+    );
+    assert_eq!(sparkline.resolved_bounds(), Some((0.0, 5.0)));
+    assert_eq!(sparkline.normalized_values(), vec![0.0, 0.6, 0.3, 0.8]);
+    assert_eq!(
+        sparkline_snapshot.root.required_capabilities(),
+        vec![
+            "page",
+            "list",
+            "listItem",
+            "listItemPresentation",
+            "sparkline"
+        ]
+    );
+    let UiMessage::Delta(sparkline_delta) = &messages[35] else {
+        panic!("last fixture must update only the keyed Sparkline data");
+    };
+    assert!(matches!(
+        sparkline_delta.operations.as_slice(),
+        [unpeel_app_kit::UiDeltaOperation::SparklineSetData { node_id, .. }]
+            if node_id == "usage-trend-series"
+    ));
+    let updated = sparkline_snapshot.applying(sparkline_delta).unwrap();
+    let UiComponent::Page(page) = updated.root.element else {
+        panic!("Sparkline delta must preserve Page");
+    };
+    let Some(ListItemSlot::Sparkline(sparkline)) = page.list().items[0].trailing.as_ref() else {
+        panic!("Sparkline delta must preserve the trailing slot");
+    };
+    assert_eq!(sparkline.values().collect::<Vec<_>>(), vec![1.0, 2.0, 5.0]);
+    assert_eq!(sparkline.resolved_bounds(), Some((0.0, 5.0)));
+    assert_eq!(sparkline.caption.as_deref(), Some("Latest trend"));
 }

@@ -18,6 +18,7 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case surfaceSetReference(nodeID: String, reference: SurfaceReference)
     case toggleSetValue(nodeID: String, value: Bool)
     case checkmarkSetValue(nodeID: String, value: Bool)
+    case sparklineSetData(UISparklineSpec)
     case inputSetValue(nodeID: String, value: String)
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
     case listSetSelection(listID: String, selectedID: String?)
@@ -63,6 +64,12 @@ extension UIDeltaOperation: Codable {
         case intrinsic
         case reference
         case value
+        case series
+        case min
+        case max
+        case caption
+        case unit
+        case accessibilityText
         case listID = "listId"
         case contentID = "contentId"
         case index
@@ -96,6 +103,7 @@ extension UIDeltaOperation: Codable {
         case surfaceSetReference
         case toggleSetValue
         case checkmarkSetValue
+        case sparklineSetData
         case inputSetValue
         case listInsertItem
         case listSetSelection
@@ -198,6 +206,24 @@ extension UIDeltaOperation: Codable {
                 nodeID: try container.decode(String.self, forKey: .nodeID),
                 value: try container.decode(Bool.self, forKey: .value)
             )
+        case .sparklineSetData:
+            let sparkline = UISparklineSpec(
+                id: try container.decode(String.self, forKey: .nodeID),
+                series: try container.decode([Double].self, forKey: .series),
+                min: try container.decodeIfPresent(Double.self, forKey: .min),
+                max: try container.decodeIfPresent(Double.self, forKey: .max),
+                caption: try container.decodeIfPresent(String.self, forKey: .caption),
+                unit: try container.decodeIfPresent(String.self, forKey: .unit),
+                accessibilityText: try container.decode(String.self, forKey: .accessibilityText)
+            )
+            guard sparkline.isValid else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .series,
+                    in: container,
+                    debugDescription: "Sparkline delta data is invalid"
+                )
+            }
+            self = .sparklineSetData(sparkline)
         case .inputSetValue:
             self = .inputSetValue(
                 nodeID: try container.decode(String.self, forKey: .nodeID),
@@ -351,6 +377,19 @@ extension UIDeltaOperation: Codable {
             try container.encode(Operation.checkmarkSetValue, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
             try container.encode(value, forKey: .value)
+        case let .sparklineSetData(sparkline):
+            try container.encode(Operation.sparklineSetData, forKey: .op)
+            try container.encode(sparkline.id, forKey: .nodeID)
+            try container.encode(sparkline.series, forKey: .series)
+            try container.encodeIfPresent(sparkline.min, forKey: .min)
+            if sparkline.min == nil { try container.encodeNil(forKey: .min) }
+            try container.encodeIfPresent(sparkline.max, forKey: .max)
+            if sparkline.max == nil { try container.encodeNil(forKey: .max) }
+            try container.encodeIfPresent(sparkline.caption, forKey: .caption)
+            if sparkline.caption == nil { try container.encodeNil(forKey: .caption) }
+            try container.encodeIfPresent(sparkline.unit, forKey: .unit)
+            if sparkline.unit == nil { try container.encodeNil(forKey: .unit) }
+            try container.encode(sparkline.accessibilityText, forKey: .accessibilityText)
         case let .inputSetValue(nodeID, value):
             try container.encode(Operation.inputSetValue, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
@@ -665,6 +704,28 @@ private extension UINode {
             }
             guard found else {
                 throw UIDeltaApplicationError("Delta targets an unavailable Checkmark")
+            }
+            page.body = .list(list)
+            return UINode(id: id, component: .page(page))
+        case let .sparklineSetData(sparkline):
+            var page = try page()
+            guard case var .list(list) = page.body else {
+                throw UIDeltaApplicationError("Delta targets an unavailable List")
+            }
+            var found = false
+            for index in list.items.indices {
+                var item = list.items[index]
+                if case let .sparkline(current)? = item.trailing,
+                   current.id == sparkline.id
+                {
+                    item.trailing = .sparkline(sparkline)
+                    list.items[index] = item
+                    found = true
+                    break
+                }
+            }
+            guard found else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Sparkline")
             }
             page.body = .list(list)
             return UINode(id: id, component: .page(page))

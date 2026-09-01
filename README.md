@@ -201,6 +201,7 @@ The standalone component layer currently provides:
 | `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
 | `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
+| `Sparkline` / `SparklineWidget` | Closed numeric history series with shared bounds/accessibility semantics and a Ratatui newest-points viewport |
 | `Button` | Closed semantic action control with default/primary/destructive native intent rather than arbitrary styling |
 | `CanvasPage` | Exactly one Surface slot plus a bounded fixed top Button toolbar, with Ratatui layout/hit boxes and no generic child tree |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
@@ -243,6 +244,7 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
 | Page semantic projection | Closed Page/List/ListItem/Toggle/Input or read-only Content trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
 | Content semantic projection | Keyed styled lines, wrap/monospace intent, inclusive line-range selection, bounded context menus, and line-splice/selection deltas for native detail views |
+| Sparkline semantic projection | Data-first numeric history rendered through Ratatui Sparkline, Swift Charts, or dependency-free inline SVG with one shared domain contract |
 | Tree semantic projection | Closed Explorer/Tree hierarchy preserving filter focus, wrap/page navigation, the synthetic parent action, opaque path-free ids, compact keyed deltas, and SwiftUI/ARIA-tree wrappers |
 | Menu semantic projection | Root or Markdown-nested action menus with disabled/danger roles, renderer-local anchors, keyboard navigation, native `NSMenu`/popover and web menu interpretations |
 | Surface semantic projection | Opaque session/stream reference, sizing, background, and input policy only; Swift/web wrappers inject existing USRF local-GPU presenters and never consume frames |
@@ -293,14 +295,14 @@ Kit. Its standalone invariant is strict: every App must remain fully
 functional through its TUI, and semantic rendering is only an optional
 presentation path over that fallback.
 
-`MarkdownEditor`, static `Media`, the Todo-driven Page family, Tree, and Menu
-are complete vertical slices. Media travels as a local path, a bounded 256 KiB
+`MarkdownEditor`, static `Media`, the Todo-driven Page family, Tree, Menu, and
+Sparkline are complete vertical slices. Media travels as a local path, a bounded 256 KiB
 inline image, or a content-addressed blob reference—never as an unbounded JSON
 payload. `Tabs` and later richer components such as `DataGrid` can join the
 same closed, versioned vocabulary. Containment is slot-based:
 `List` accepts only `ListItem` values, and row slots accept only explicitly
-enumerated Toggle, status-symbol, and Badge values rather than arbitrary child
-nodes. See [the component
+enumerated Toggle, status-symbol, Badge, and read-only Sparkline values rather
+than arbitrary child nodes. See [the component
 architecture](docs/ui-components.md), the trusted [`unpeel.ui/1`
 schema](protocol/unpeel-ui-v1.schema.json), and the separate
 [browser-to-workspace schema](protocol/unpeel-workspace-ui-v1.schema.json).
@@ -309,10 +311,10 @@ The renderer packages live with the component definitions so the contract
 cannot drift:
 
 - `swift/` — `UnpeelAppKitUI`, including native Page/List/Toggle/Input,
-  Tree, Menu, Markdown, and asynchronous `NSImage` Media views plus a
+  Swift Charts Sparkline, Tree, Menu, Markdown, and asynchronous `NSImage` Media views plus a
   reconnecting trusted Unix client;
 - `web/` — `@unpeel/app-kit-ui`, including native DOM Page/List controls,
-  ARIA Tree/Menu, Markdown, and accessible `<img>` Media renderers plus
+  inline-SVG Sparkline, ARIA Tree/Menu, Markdown, and accessible `<img>` Media renderers plus
   `WorkspaceUiSession` for the existing Host's `/mobile` extension; and
 - `protocol/` — validated, forward-compatible schemas and shared fixtures
   consumed by Rust, Swift, and web tests.

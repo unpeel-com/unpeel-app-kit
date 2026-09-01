@@ -1,4 +1,5 @@
 import AppKit
+import Charts
 import SwiftUI
 
 /// Native SwiftUI interpretation of the closed Page component family.
@@ -360,7 +361,7 @@ private struct PageContent: View {
                     .controlSize(.small)
                     .accessibilityLabel("Loading")
             }
-            slot(item.leading, itemID: item.id, list: list)
+            slot(item.leading, itemID: item.id, list: list, valueTone: item.valueTone)
             if item.primaryRole == .static {
                 itemLabel(item)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -382,8 +383,8 @@ private struct PageContent: View {
                     .multilineTextAlignment(.trailing)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            slot(item.trailing, itemID: item.id, list: list)
-            slot(item.accessory, itemID: item.id, list: list)
+            slot(item.trailing, itemID: item.id, list: list, valueTone: item.valueTone)
+            slot(item.accessory, itemID: item.id, list: list, valueTone: item.valueTone)
             if let action = item.delete {
                 Button {
                     selectLocally(item.id, in: list)
@@ -424,7 +425,8 @@ private struct PageContent: View {
     private func slot(
         _ slot: UIListItemSlot?,
         itemID: String,
-        list: UIListSpec
+        list: UIListSpec,
+        valueTone: UIListItemTone
     ) -> some View {
         switch slot {
         case let .toggle(toggle):
@@ -460,6 +462,8 @@ private struct PageContent: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(.quaternary, in: Capsule())
+        case let .sparkline(sparkline):
+            NativeSparkline(spec: sparkline, color: color(for: valueTone))
         case .disclosure:
             Image(systemName: "chevron.right")
                 .foregroundStyle(.tertiary)
@@ -473,6 +477,55 @@ private struct PageContent: View {
         case .unsupported, .none:
             EmptyView()
         }
+    }
+}
+
+@MainActor
+private struct NativeSparkline: View {
+    let spec: UISparklineSpec
+    let color: Color
+
+    private struct Sample: Identifiable {
+        let id: Int
+        let value: Double
+    }
+
+    private var samples: [Sample] {
+        spec.series.enumerated().map { Sample(id: $0.offset, value: $0.element) }
+    }
+
+    private var helpText: String {
+        [spec.caption, spec.unit].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    var body: some View {
+        Chart(samples) { sample in
+            LineMark(
+                x: .value("Point", sample.id),
+                y: .value(spec.unit ?? "Value", sample.value)
+            )
+            .foregroundStyle(color)
+            .interpolationMethod(.linear)
+            if samples.count == 1 {
+                PointMark(
+                    x: .value("Point", sample.id),
+                    y: .value(spec.unit ?? "Value", sample.value)
+                )
+                .foregroundStyle(color)
+                .symbolSize(12)
+            }
+        }
+        .chartXScale(domain: 0...Swift.max(spec.series.count - 1, 1))
+        .chartYScale(domain: spec.resolvedBounds)
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .frame(
+            width: Swift.min(Swift.max(CGFloat(spec.series.count) * 4, 64), 180),
+            height: 24
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spec.accessibilityText)
+        .help(helpText)
     }
 }
 

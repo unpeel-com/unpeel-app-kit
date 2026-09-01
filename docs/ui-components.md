@@ -88,8 +88,8 @@ parameters or prerequisites for terminal input and rendering.
 ## Optional hosted presentation layer
 
 When Unpeel hosts the App, it may opt into a component-first semantic model—
-`MarkdownEditor`, static `Media`, Page, List, ListItem, Toggle, Input, Button,
-CanvasPage, and other
+`MarkdownEditor`, static `Media`, Page, List, ListItem, Toggle, Input,
+Sparkline, Button, CanvasPage, and other
 deliberate primitives—not a serialization of terminal cells or a
 portable clone of every Ratatui widget. The Rust terminal process remains the
 App and owns the model, reducer, validation, persistence, and commands.
@@ -474,7 +474,7 @@ web, and agent participants:
   such as `leading`, `trailing`, and `accessory`;
 - each slot accepts only the schema-enumerated controls allowed in that role;
   v1 has completion `Toggle`, selection `Checkmark`, navigation `Disclosure`,
-  static status-symbol, and `Badge` values; and
+  static status-symbol, `Badge`, and read-only trailing `Sparkline` values; and
 - `Page` and later containers expose named, purpose-specific regions only when
   their cross-platform semantics are defined.
 
@@ -785,6 +785,52 @@ only when the exact projection uses them. A renderer missing any required
 capability keeps the connection and shows the complete terminal pane. The
 shared NDJSON fixtures cover a styled diff Page and both Content delta forms
 in Rust, Swift, and web.
+
+## Sparkline v1
+
+`Sparkline` is the deliberately narrow history visualization required by the
+Usage App. It is not a generic chart grammar. A ListItem accepts it only once
+in its `trailing` slot, which keeps the row vocabulary closed and gives human
+and agent participants the underlying data rather than a screenshot:
+
+```rust
+ListItem::new("usage-trend", "Usage Trend")
+    .trailing(ListItemSlot::sparkline(Sparkline::new(
+        "usage-trend-series",
+        [0.0, 3.0, 1.5, 4.0],
+        "Daily token usage: 0, 3, 1.5, 4 tokens",
+    )))
+    .value_tone(ListItemTone::Info)
+```
+
+The owned Rust specification carries a non-empty finite numeric `series`,
+optional `min` / `max` bounds, optional `caption` and `unit` metadata, and
+required accessibility text. Explicit bounds must contain every point. When
+bounds are omitted, the shared domain includes zero; a degenerate all-zero
+domain expands to `0...1`. Rust, Swift, and web fixture tests assert the same
+resolved bounds and normalized values. The optional caption and unit remain
+in the semantic tree for agents and enrich native/web accessibility help; in
+the compact one-line ListItem form the row label is the visible caption, so
+they do not consume extra terminal cells.
+
+The terminal interpretation delegates to Ratatui `Sparkline`, colored through
+the row's semantic `valueTone`. A narrow terminal allocation is explicitly a
+newest-points viewport. With no explicit bounds it infers that viewport's
+domain, matching Ratatui's existing responsive behavior and Usage's frozen
+buffer snapshots; explicit bounds remain authoritative. Apple uses Swift
+Charts with hidden axes and the resolved domain. Web emits an accessible
+inline SVG polyline with no chart dependency. All three receive exactly the
+same numeric series—no renderer synthesizes, aggregates, or repairs points.
+
+Usage publishes its `Metric.spark` daily history through this slot. Its
+legacy detail renderer delegates to the same App Kit Ratatui widget and has a
+buffer-for-buffer parity test, while Swift and web receive the real series in
+the semantic Page. A keyed `sparklineSetData` delta replaces the series,
+bounds, caption, unit, and accessibility text together without replacing the
+Page or List; renderers apply that same complete data contract rather than
+merging chart state locally. The `sparkline` capability is required only when
+a projection actually contains one; an older renderer falls back to the
+terminal pane.
 
 ## MarkdownEditor v1
 
@@ -1211,10 +1257,13 @@ vocabulary is intentionally conventional:
 | --- | --- | --- |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
+| `BarChart` | `ratatui::widgets::BarChart` | future addition only when a concrete App needs categorical bars |
+| `LineChart` | `ratatui::widgets::Chart` | future addition only when a concrete App needs axes or multiple line series |
+| `Gauge` | `ratatui::widgets::Gauge` | future addition only when a concrete App needs a bounded progress meter |
 
 Each should be added only with all three renderer interpretations, shared
 fixtures, and cross-renderer event-sequence parity tests. Media, Page, Tree,
-and Menu exercise the required pane-level
+Menu, and Sparkline exercise the required pane-level
 terminal fallback for renderers that do not advertise or recognize a kind;
 every later component inherits that rule. This keeps App Kit opinionated and
 prevents its public API from becoming an unbounded remote widget toolkit.

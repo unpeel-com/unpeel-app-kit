@@ -9,6 +9,7 @@ import {
   type ListItemSpec,
   type ListSpec,
   type PageNode,
+  type SparklineSpec,
   type StatusSymbolSpec,
   type ToggleSpec,
   type UiAction,
@@ -20,9 +21,11 @@ import {
   isDisclosureSlot,
   isRenderablePageNode,
   isRenderableContentPageNode,
+  isSparklineSlot,
   isStatusSlot,
   isToggleSlot,
   listItemPrimaryRole,
+  normalizedSparklineSeries,
   uiAction,
 } from "./protocol";
 import { listNavigationDecision } from "./list_navigation";
@@ -327,7 +330,7 @@ export class PageRenderer {
       busy.setAttribute("aria-label", "Loading");
       row.append(busy);
     }
-    this.appendSlot(row, item.leading);
+    this.appendSlot(row, item.leading, item.valueTone ?? "muted");
     const labelContent = document.createElement("span");
     labelContent.className = "unpeel-list-item__content";
     const label = document.createElement("span");
@@ -353,8 +356,8 @@ export class PageRenderer {
       value.dataset.minColumns = String(minimum);
       row.append(value);
     }
-    this.appendSlot(row, item.trailing);
-    this.appendSlot(row, item.accessory);
+    this.appendSlot(row, item.trailing, item.valueTone ?? "muted");
+    this.appendSlot(row, item.accessory, item.valueTone ?? "muted");
     if (item.delete !== undefined) {
       const remove = document.createElement("button");
       remove.type = "button";
@@ -369,13 +372,64 @@ export class PageRenderer {
     return row;
   }
 
-  private appendSlot(row: HTMLElement, slot: ListItemSlot | undefined): void {
+  private appendSlot(
+    row: HTMLElement,
+    slot: ListItemSlot | undefined,
+    valueTone: ListItemSpec["valueTone"],
+  ): void {
     if (slot === undefined) return;
     if (isToggleSlot(slot)) row.append(this.toggle(slot));
     else if (isStatusSlot(slot)) row.append(this.status(slot));
     else if (isBadgeSlot(slot)) row.append(this.badge(slot));
+    else if (isSparklineSlot(slot)) row.append(this.sparkline(slot, valueTone ?? "muted"));
     else if (isDisclosureSlot(slot)) row.append(this.disclosure());
     else if (isCheckmarkSlot(slot)) row.append(this.checkmark(slot));
+  }
+
+  private sparkline(
+    sparkline: SparklineSpec,
+    tone: NonNullable<ListItemSpec["valueTone"]>,
+  ): SVGSVGElement {
+    const namespace = "http://www.w3.org/2000/svg";
+    const width = Math.min(Math.max(sparkline.series.length * 4, 64), 180);
+    const height = 24;
+    const element = document.createElementNS(namespace, "svg");
+    element.classList.add("unpeel-sparkline");
+    element.dataset.tone = tone;
+    element.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    element.setAttribute("width", String(width));
+    element.setAttribute("height", String(height));
+    element.setAttribute("role", "img");
+    element.setAttribute("aria-label", sparkline.accessibilityText);
+    element.style.display = "block";
+    element.style.flex = "0 0 auto";
+
+    const title = document.createElementNS(namespace, "title");
+    title.textContent = [sparkline.caption, sparkline.unit, sparkline.accessibilityText]
+      .filter((value): value is string => value !== undefined && value.length > 0)
+      .join(" · ");
+    const polyline = document.createElementNS(namespace, "polyline");
+    const normalized = normalizedSparklineSeries(sparkline);
+    polyline.setAttribute("points", normalized.map((value, index) => {
+      const x = normalized.length === 1 ? width / 2 : (index / (normalized.length - 1)) * width;
+      const y = height - 2 - value * (height - 4);
+      return `${x.toFixed(3)},${y.toFixed(3)}`;
+    }).join(" "));
+    polyline.setAttribute("fill", "none");
+    polyline.setAttribute("stroke", "currentColor");
+    polyline.setAttribute("stroke-width", "1.5");
+    polyline.setAttribute("stroke-linecap", "round");
+    polyline.setAttribute("stroke-linejoin", "round");
+    element.append(title, polyline);
+    if (normalized.length === 1) {
+      const point = document.createElementNS(namespace, "circle");
+      point.setAttribute("cx", String(width / 2));
+      point.setAttribute("cy", String(height - 2 - normalized[0]! * (height - 4)));
+      point.setAttribute("r", "2");
+      point.setAttribute("fill", "currentColor");
+      element.append(point);
+    }
+    return element;
   }
 
   private status(status: StatusSymbolSpec): HTMLSpanElement {

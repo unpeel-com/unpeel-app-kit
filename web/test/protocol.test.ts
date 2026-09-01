@@ -14,6 +14,7 @@ import {
   isRenderablePageNode,
   isRenderableContentPageNode,
   isSurfaceNode,
+  isSparklineSlot,
   isTreeNode,
   listItemPrimaryRole,
   listNavigationDecision,
@@ -21,6 +22,8 @@ import {
   applyUiDelta,
   resolveMediaPointSize,
   resolveSurfacePointSize,
+  resolvedSparklineBounds,
+  normalizedSparklineSeries,
   uiNodeCapability,
   uiNodeCapabilities,
   verifyMediaBlobBytes,
@@ -39,7 +42,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(34);
+    expect(messages).toHaveLength(36);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -286,6 +289,35 @@ describe("shared protocol", () => {
     if (!isMarkdownEditorNode(updatedHint.root)) throw new Error("expected updated Markdown hint");
     expect(updatedHint.root.commandHint?.text).toBe("Type '/' for blocks");
     expect(isMarkdownCommandHintVisible(updatedHint.root)).toBe(false);
+
+    const sparklineSnapshot = messages[34] as UiSnapshot;
+    if (!isRenderablePageNode(sparklineSnapshot.root)) {
+      throw new Error("expected shared Usage Sparkline fixture");
+    }
+    const sparklineSlot = sparklineSnapshot.root.body.items[0]?.trailing;
+    if (sparklineSlot === undefined || !isSparklineSlot(sparklineSlot)) {
+      throw new Error("expected Sparkline slot");
+    }
+    expect(sparklineSlot.series).toEqual([0, 3, 1.5, 4]);
+    expect(resolvedSparklineBounds(sparklineSlot)).toEqual([0, 5]);
+    expect(normalizedSparklineSeries(sparklineSlot)).toEqual([0, 0.6, 0.3, 0.8]);
+    expect(uiNodeCapabilities(sparklineSnapshot.root)).toEqual([
+      "page", "list", "listItem", "listItemPresentation", "sparkline",
+    ]);
+    const updatedSparklineSnapshot = applyUiDelta(
+      sparklineSnapshot,
+      messages[35] as UiDelta,
+    );
+    if (!isRenderablePageNode(updatedSparklineSnapshot.root)) {
+      throw new Error("Sparkline delta must preserve Page");
+    }
+    const updatedSparkline = updatedSparklineSnapshot.root.body.items[0]?.trailing;
+    if (updatedSparkline === undefined || !isSparklineSlot(updatedSparkline)) {
+      throw new Error("Sparkline delta must preserve its trailing slot");
+    }
+    expect(updatedSparkline.series).toEqual([1, 2, 5]);
+    expect(resolvedSparklineBounds(updatedSparkline)).toEqual([0, 5]);
+    expect(updatedSparkline.caption).toBe("Latest trend");
   });
 
   test("uses one role-aware Enter and Space decision table", () => {

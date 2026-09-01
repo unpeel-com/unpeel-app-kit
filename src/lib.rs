@@ -39,6 +39,7 @@ mod process_security;
 mod scrollbar;
 mod selectable;
 mod semantic_menu;
+mod sparkline;
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 mod surface;
 mod theme;
@@ -120,6 +121,7 @@ pub use semantic_menu::{
     MENU_ANCHOR_CAPABILITY, MENU_COMPONENT_CAPABILITY, SemanticMenu, SemanticMenuAnchor,
     SemanticMenuItem, SemanticMenuItemRole, SemanticMenuPresentation, SemanticMenuValidationError,
 };
+pub use sparkline::{SPARKLINE_COMPONENT_CAPABILITY, Sparkline, SparklinePoint, SparklineWidget};
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 pub use surface::{
     CANVAS_PAGE_COMPONENT_CAPABILITY, CanvasControl, CanvasPage, CanvasPageLayout, CanvasPageTheme,

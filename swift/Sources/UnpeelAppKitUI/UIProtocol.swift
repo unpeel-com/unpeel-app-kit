@@ -21,6 +21,7 @@ public enum UnpeelUIProtocol {
     public static let listSelectionCapability = "listSelection"
     public static let statusSymbolCapability = "statusSymbol"
     public static let badgeCapability = "badge"
+    public static let sparklineCapability = "sparkline"
     public static let toggleCapability = "toggle"
     public static let inputCapability = "input"
     public static let buttonCapability = "button"
@@ -52,6 +53,7 @@ public enum UnpeelUIProtocol {
         listSelectionCapability,
         statusSymbolCapability,
         badgeCapability,
+        sparklineCapability,
         toggleCapability,
         inputCapability,
         buttonCapability,
@@ -1449,10 +1451,94 @@ public struct UIBadgeSpec: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+/// Closed, read-only numeric history shared by terminal, Swift Charts, and web.
+public struct UISparklineSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let series: [Double]
+    public let min: Double?
+    public let max: Double?
+    public let caption: String?
+    public let unit: String?
+    public let accessibilityText: String
+
+    public init(
+        id: String,
+        series: [Double],
+        min: Double? = nil,
+        max: Double? = nil,
+        caption: String? = nil,
+        unit: String? = nil,
+        accessibilityText: String
+    ) {
+        self.id = id
+        self.series = series
+        self.min = min
+        self.max = max
+        self.caption = caption
+        self.unit = unit
+        self.accessibilityText = accessibilityText
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, series, min, max, caption, unit, accessibilityText
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        series = try container.decode([Double].self, forKey: .series)
+        min = try container.decodeIfPresent(Double.self, forKey: .min)
+        max = try container.decodeIfPresent(Double.self, forKey: .max)
+        caption = try container.decodeIfPresent(String.self, forKey: .caption)
+        unit = try container.decodeIfPresent(String.self, forKey: .unit)
+        accessibilityText = try container.decode(String.self, forKey: .accessibilityText)
+
+        guard isValid else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .series,
+                in: container,
+                debugDescription: "Sparkline needs finite data, containing bounds, and accessibility text"
+            )
+        }
+    }
+
+    var isValid: Bool {
+        (1...100_000).contains(series.count) && series.allSatisfy(\.isFinite)
+            && (min?.isFinite ?? true) && (max?.isFinite ?? true)
+            && (min.map({ lower in series.allSatisfy { $0 >= lower } }) ?? true)
+            && (max.map({ upper in series.allSatisfy { $0 <= upper } }) ?? true)
+            && (min == nil || max == nil || min! < max!)
+            && !accessibilityText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && [caption, unit].compactMap({ $0 }).allSatisfy({
+                !$0.contains("\n") && !$0.contains("\r")
+            })
+    }
+
+    /// The Rust-spec domain rule: inferred bounds include zero and an all-zero
+    /// series expands to 0...1.
+    public var resolvedBounds: ClosedRange<Double> {
+        let seriesMinimum = series.min() ?? 0
+        let seriesMaximum = series.max() ?? 0
+        let lower = min ?? Swift.min(seriesMinimum, 0)
+        var upper = max ?? Swift.max(seriesMaximum, 0)
+        if lower == upper { upper = lower + 1 }
+        return lower...upper
+    }
+
+    public var normalizedSeries: [Double] {
+        let bounds = resolvedBounds
+        let range = bounds.upperBound - bounds.lowerBound
+        return series.map { value in
+            Swift.min(Swift.max((value - bounds.lowerBound) / range, 0), 1)
+        }
+    }
+}
+
 public enum UIListItemSlot: Equatable, Hashable, Sendable {
     case toggle(UIToggleSpec)
     case status(UIStatusSymbolSpec)
     case badge(UIBadgeSpec)
+    case sparkline(UISparklineSpec)
     case disclosure
     case checkmark(UICheckmarkSpec)
     case unsupported(kind: String)
@@ -1462,6 +1548,7 @@ public enum UIListItemSlot: Equatable, Hashable, Sendable {
         case .toggle: "toggle"
         case .status: "status"
         case .badge: "badge"
+        case .sparkline: "sparkline"
         case .disclosure: "disclosure"
         case .checkmark: "checkmark"
         case let .unsupported(kind): kind
@@ -1479,6 +1566,7 @@ extension UIListItemSlot: Codable {
         case "toggle": self = .toggle(try UIToggleSpec(from: decoder))
         case "status": self = .status(try UIStatusSymbolSpec(from: decoder))
         case "badge": self = .badge(try UIBadgeSpec(from: decoder))
+        case "sparkline": self = .sparkline(try UISparklineSpec(from: decoder))
         case "disclosure": self = .disclosure
         case "checkmark": self = .checkmark(try UICheckmarkSpec(from: decoder))
         default: self = .unsupported(kind: kind)
@@ -1497,6 +1585,9 @@ extension UIListItemSlot: Codable {
         case let .badge(badge):
             try container.encode("badge", forKey: .type)
             try badge.encode(to: encoder)
+        case let .sparkline(sparkline):
+            try container.encode("sparkline", forKey: .type)
+            try sparkline.encode(to: encoder)
         case .disclosure:
             try container.encode("disclosure", forKey: .type)
         case let .checkmark(checkmark):
@@ -1623,6 +1714,10 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
             guard case .disclosure = slot else { return false }
             return true
         }
+        let sparklines = [leading, trailing, accessory].compactMap { slot -> UISparklineSpec? in
+            guard case let .sparkline(sparkline) = slot else { return nil }
+            return sparkline
+        }
         guard checkmarks.count <= 1, disclosures.count <= 1 else {
             throw DecodingError.dataCorruptedError(
                 forKey: .accessory,
@@ -1645,6 +1740,15 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
                     forKey: .accessory,
                     in: container,
                     debugDescription: "Disclosure accessory requires activate"
+                )
+            }
+        }
+        if !sparklines.isEmpty {
+            guard sparklines.count == 1, case .sparkline? = trailing else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .trailing,
+                    in: container,
+                    debugDescription: "Sparkline is accepted only once in the trailing slot"
                 )
             }
         }
@@ -2097,12 +2201,14 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
         var hasToggle = false
         var hasStatus = false
         var hasBadge = false
+        var hasSparkline = false
         for item in list.items {
             for slot in [item.leading, item.trailing, item.accessory].compactMap({ $0 }) {
                 switch slot {
                 case .toggle: hasToggle = true
                 case .status: hasStatus = true
                 case .badge: hasBadge = true
+                case .sparkline: hasSparkline = true
                 case .disclosure, .checkmark: break
                 case .unsupported: return nil
                 }
@@ -2120,6 +2226,7 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
         }
         if hasStatus { capabilities.append(UnpeelUIProtocol.statusSymbolCapability) }
         if hasBadge { capabilities.append(UnpeelUIProtocol.badgeCapability) }
+        if hasSparkline { capabilities.append(UnpeelUIProtocol.sparklineCapability) }
         if list.selectedID != nil || list.select != nil || list.scrollPadding != 0
             || list.pageOverlap != 1 || list.pageBehavior != .selection || list.spacePagesDown
         {
