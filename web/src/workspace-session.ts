@@ -126,6 +126,11 @@ export interface WorkspaceUiSessionOptions {
   webSocketFactory?: (url: string) => WorkspaceWebSocket;
 }
 
+interface PendingWorkspaceAction {
+  action: UiAction;
+  event?: WorkspaceUiAction;
+}
+
 /**
  * Reconnecting browser transport for one terminal-backed App view.
  *
@@ -149,7 +154,9 @@ export class WorkspaceUiSession {
   private semanticProjectionAvailable = false;
   private usingTerminalFallback = false;
   private rendererStateBeforeFallback: UiRendererState | undefined;
-  private readonly pendingActions = new Map<string, WorkspaceUiAction>();
+  private readonly pendingActions = new Map<string, PendingWorkspaceAction>();
+  private readonly pendingActionOrder: string[] = [];
+  private inFlightEventId: string | undefined;
 
   constructor(options: WorkspaceUiSessionOptions) {
     this.options = options;
@@ -205,28 +212,33 @@ export class WorkspaceUiSession {
   send(action: UiAction, eventId = newEventId()): string | undefined {
     const existing = this.pendingActions.get(eventId);
     if (existing) {
-      if (this.attached) this.sendJson(existing);
+      if (this.attached && existing.event && this.inFlightEventId === eventId) {
+        this.sendJson(existing.event);
+      }
       return eventId;
     }
     const snapshot = this.latestSnapshot;
     const appInstanceId = this.appInstanceId;
     if (!snapshot || !appInstanceId || !this.semanticProjectionAvailable) return undefined;
 
-    const event: WorkspaceUiAction = {
-      type: "action",
-      protocol: WORKSPACE_UI_PROTOCOL_NAME,
-      protocolVersion: WORKSPACE_UI_PROTOCOL_VERSION,
-      appSessionId: this.options.appSessionId,
-      appInstanceId,
-      clientId: this.options.clientId,
-      rendererId: this.options.rendererId,
-      viewId: this.options.viewId,
-      eventId,
-      baseRevision: snapshot.revision,
-      ...action,
-    };
-    this.pendingActions.set(eventId, event);
-    if (this.attached) this.sendJson(event);
+    if (canCoalesce(action)) {
+      let queuedId: string | undefined;
+      for (let index = this.pendingActionOrder.length - 1; index >= 0; index -= 1) {
+        const candidate = this.pendingActionOrder[index]!;
+        const pending = this.pendingActions.get(candidate);
+        if (pending?.event === undefined && actionsCoalesce(pending?.action, action)) {
+          queuedId = candidate;
+          break;
+        }
+      }
+      if (queuedId) {
+        this.pendingActions.set(queuedId, { action });
+        return queuedId;
+      }
+    }
+    this.pendingActions.set(eventId, { action });
+    this.pendingActionOrder.push(eventId);
+    this.dispatchNextAction();
     return eventId;
   }
 
@@ -395,6 +407,12 @@ export class WorkspaceUiSession {
         if (!this.matchesRenderer(message)) return;
         if (message.status !== "pending") {
           this.pendingActions.delete(message.eventId);
+          const index = this.pendingActionOrder.indexOf(message.eventId);
+          if (index >= 0) this.pendingActionOrder.splice(index, 1);
+          if (this.inFlightEventId === message.eventId) {
+            this.inFlightEventId = undefined;
+          }
+          if (message.status !== "stale") this.dispatchNextAction();
         }
         if (message.status === "stale") this.requestSnapshot();
         this.options.onAck?.(message);
@@ -437,6 +455,8 @@ export class WorkspaceUiSession {
       || this.appInstanceId === attached.appInstanceId;
     if (!sameInstance) {
       this.pendingActions.clear();
+      this.pendingActionOrder.length = 0;
+      this.inFlightEventId = undefined;
       this.latestSnapshot = undefined;
       this.semanticProjectionAvailable = false;
     }
@@ -450,10 +470,9 @@ export class WorkspaceUiSession {
     });
     this.options.onAttached?.(attached);
 
-    if (sameInstance && attached.resumed) {
-      for (const event of this.pendingActions.values()) {
-        this.sendJson(event);
-      }
+    if (sameInstance && this.inFlightEventId) {
+      const event = this.pendingActions.get(this.inFlightEventId)?.event;
+      if (event) this.sendJson(event);
     }
   }
 
@@ -471,6 +490,7 @@ export class WorkspaceUiSession {
       && capabilities.every((capability) => this.supportedComponentCapabilities.has(capability))
       && isBrowserSafeUiNode(snapshot.root)) {
       this.semanticProjectionAvailable = true;
+      this.dispatchNextAction();
       if (this.usingTerminalFallback) {
         const restoredState = this.rendererStateBeforeFallback ?? {
           rendererVisible: true,
@@ -504,6 +524,32 @@ export class WorkspaceUiSession {
       && message.viewId === this.options.viewId;
   }
 
+  private dispatchNextAction(): void {
+    if (!this.attached || !this.semanticProjectionAvailable || this.inFlightEventId) return;
+    const eventId = this.pendingActionOrder[0];
+    const snapshot = this.latestSnapshot;
+    const appInstanceId = this.appInstanceId;
+    if (!eventId || !snapshot || !appInstanceId) return;
+    const pending = this.pendingActions.get(eventId);
+    if (!pending) return;
+    const event: WorkspaceUiAction = {
+      type: "action",
+      protocol: WORKSPACE_UI_PROTOCOL_NAME,
+      protocolVersion: WORKSPACE_UI_PROTOCOL_VERSION,
+      appSessionId: this.options.appSessionId,
+      appInstanceId,
+      clientId: this.options.clientId,
+      rendererId: this.options.rendererId,
+      viewId: this.options.viewId,
+      eventId,
+      baseRevision: snapshot.revision,
+      ...pending.action,
+    };
+    pending.event = event;
+    this.inFlightEventId = eventId;
+    this.sendJson(event);
+  }
+
   private sendJson(message: WorkspaceUiClientMessage): void {
     const socket = this.socket;
     if (!socket || socket.readyState !== 1) return;
@@ -535,6 +581,17 @@ export class WorkspaceUiSession {
 function rendererStatesEqual(left: UiRendererState, right: UiRendererState): boolean {
   return left.rendererVisible === right.rendererVisible
     && left.terminalVisible === right.terminalVisible;
+}
+
+function canCoalesce(action: UiAction): boolean {
+  return action.kind === "change" || action.kind === "select";
+}
+
+function actionsCoalesce(left: UiAction | undefined, right: UiAction): boolean {
+  return left !== undefined
+    && left.nodeId === right.nodeId
+    && left.action === right.action
+    && left.kind === right.kind;
 }
 
 function asError(value: unknown): Error {

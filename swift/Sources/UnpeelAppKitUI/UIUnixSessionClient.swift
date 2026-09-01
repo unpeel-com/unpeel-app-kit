@@ -11,6 +11,15 @@ public enum UIProjectionDelivery: Equatable, Sendable {
     case delta(baseRevision: Int, revision: Int, operationCount: Int)
 }
 
+private extension Optional where Wrapped == UIAction {
+    func isSomeCoalescingPeer(of other: UIAction) -> Bool {
+        guard let action = self else { return false }
+        return action.nodeID == other.nodeID
+            && action.action == other.action
+            && action.kind == other.kind
+    }
+}
+
 /// Reconnecting native client for an App-owned `unpeel.ui/1` Unix socket.
 ///
 /// This class belongs in the trusted native Host. Never instantiate it in web
@@ -86,8 +95,10 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     private var semanticProjectionAvailable = false
     private var usingTerminalFallback = false
     private var rendererStateBeforeFallback: UIRendererState?
+    private var pendingActions: [String: UIAction] = [:]
     private var pendingEvents: [String: UIEvent] = [:]
     private var pendingEventOrder: [String] = []
+    private var inFlightEventID: String?
 
     public init(
         configuration: Configuration,
@@ -130,27 +141,26 @@ public final class UIUnixSessionClient: @unchecked Sendable {
     /// Wraps a renderer-local action in authenticated session identity.
     public func send(_ action: UIAction, eventID: String = UUID().uuidString.lowercased()) {
         queue.async { [weak self] in
-            guard let self, semanticProjectionAvailable,
-                  let snapshot = latestSnapshot, let participantID
-            else { return }
-            let event = UIEvent(
-                snapshot: snapshot,
-                participantID: participantID,
-                rendererID: configuration.renderer.id,
-                eventID: eventID,
-                action: action
-            )
+            guard let self, semanticProjectionAvailable else { return }
             if let existing = pendingEvents[eventID] {
-                if ready {
+                if ready, inFlightEventID == eventID {
                     sendMessage(.event(existing))
                 }
                 return
             }
-            pendingEvents[eventID] = event
-            pendingEventOrder.append(eventID)
-            if ready {
-                sendMessage(.event(event))
+            if pendingActions[eventID] != nil { return }
+            if Self.canCoalesce(action),
+               let queuedID = pendingEventOrder.reversed().first(where: { candidate in
+                   pendingEvents[candidate] == nil
+                       && pendingActions[candidate].isSomeCoalescingPeer(of: action)
+               })
+            {
+                pendingActions[queuedID] = action
+                return
             }
+            pendingActions[eventID] = action
+            pendingEventOrder.append(eventID)
+            dispatchNextAction()
         }
     }
 
@@ -315,8 +325,10 @@ public final class UIUnixSessionClient: @unchecked Sendable {
             let sameInstance = appInstanceID == nil || appInstanceID == attached.appInstanceID
             let sameParticipant = participantID == nil || participantID == attached.participantID
             if !sameInstance || !sameParticipant {
+                pendingActions.removeAll()
                 pendingEvents.removeAll()
                 pendingEventOrder.removeAll()
+                inFlightEventID = nil
                 latestSnapshot = nil
                 semanticProjectionAvailable = false
             }
@@ -328,11 +340,13 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                 appInstanceID: attached.appInstanceID,
                 resumed: attached.resumed
             ))
-            if attached.resumed {
-                for eventID in pendingEventOrder {
-                    guard let event = pendingEvents[eventID] else { continue }
-                    sendMessage(.event(event))
-                }
+            if let eventID = inFlightEventID,
+               let event = pendingEvents[eventID]
+            {
+                // Replay exactly the already-sent envelope. The App's event-id
+                // cache makes this safe whether the previous ack or action was
+                // the frame lost during reconnect.
+                sendMessage(.event(event))
             }
         case let .snapshot(snapshot):
             guard snapshot.protocolVersion == negotiatedProtocolVersion,
@@ -368,8 +382,17 @@ public final class UIUnixSessionClient: @unchecked Sendable {
                   ack.rendererID == configuration.renderer.id
             else { return }
             if ack.status != .pending {
+                pendingActions.removeValue(forKey: ack.eventID)
                 pendingEvents.removeValue(forKey: ack.eventID)
                 pendingEventOrder.removeAll { $0 == ack.eventID }
+                if inFlightEventID == ack.eventID {
+                    inFlightEventID = nil
+                }
+                if ack.status == .stale {
+                    requestSnapshot()
+                } else {
+                    dispatchNextAction()
+                }
             }
         case .error:
             break
@@ -394,6 +417,7 @@ public final class UIUnixSessionClient: @unchecked Sendable {
            capabilities.allSatisfy(configuration.supportedComponentCapabilities.contains)
         {
             semanticProjectionAvailable = true
+            dispatchNextAction()
             if usingTerminalFallback {
                 let restoredState = rendererStateBeforeFallback ?? .component
                 usingTerminalFallback = false
@@ -429,6 +453,29 @@ public final class UIUnixSessionClient: @unchecked Sendable {
         }
         onTerminalFallback(component.kind)
         return false
+    }
+
+    private func dispatchNextAction() {
+        guard ready, semanticProjectionAvailable, inFlightEventID == nil,
+              let eventID = pendingEventOrder.first,
+              let action = pendingActions[eventID],
+              let snapshot = latestSnapshot,
+              let participantID
+        else { return }
+        let event = UIEvent(
+            snapshot: snapshot,
+            participantID: participantID,
+            rendererID: configuration.renderer.id,
+            eventID: eventID,
+            action: action
+        )
+        pendingEvents[eventID] = event
+        inFlightEventID = eventID
+        sendMessage(.event(event))
+    }
+
+    private static func canCoalesce(_ action: UIAction) -> Bool {
+        action.kind == .change || action.kind == .select
     }
 
     private func sendMessage(_ message: UIMessage) {

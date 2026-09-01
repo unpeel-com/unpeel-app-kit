@@ -595,6 +595,73 @@ describe("WorkspaceUiSession", () => {
     session.stop();
   });
 
+  test("serializes actions by revision and coalesces unsent input changes", () => {
+    const socket = new FakeSocket();
+    const session = new WorkspaceUiSession({
+      url: "wss://workspace.example/apps/terminal-9/ui",
+      appSessionId: "terminal-9",
+      clientId: "client-alice-web",
+      rendererId: "renderer-alice-web",
+      viewId: "main",
+      onSnapshot: () => {},
+      webSocketFactory: () => socket,
+    });
+    session.start();
+    socket.open();
+    socket.message(attachedFrame());
+    socket.message(snapshotFrame());
+
+    expect(session.send(
+      uiAction("field", "set-value", "change", { type: "text", value: "a" }),
+      "event-input-1",
+    )).toBe("event-input-1");
+    expect(session.send(
+      uiAction("field", "set-value", "change", { type: "text", value: "ab" }),
+      "event-input-2",
+    )).toBe("event-input-2");
+    expect(session.send(
+      uiAction("field", "set-value", "change", { type: "text", value: "abc" }),
+      "event-input-3",
+    )).toBe("event-input-2");
+    expect(session.pendingEventCount).toBe(2);
+    expect(socket.sent.map((frame) => JSON.parse(frame) as { type: string })
+      .filter((frame) => frame.type === "action")).toHaveLength(1);
+
+    socket.message({
+      type: "delta",
+      protocol: "unpeel.ui",
+      protocolVersion: 1,
+      appInstanceId: "app-fixture",
+      clientId: "client-alice-web",
+      viewId: "main",
+      baseRevision: 7,
+      revision: 8,
+      operations: [{ op: "markdownSetTitle", nodeId: "editor", title: "Revision 8" }],
+    });
+    socket.message({
+      type: "ack",
+      protocol: "unpeel.ui",
+      protocolVersion: 1,
+      appInstanceId: "app-fixture",
+      clientId: "client-alice-web",
+      rendererId: "renderer-alice-web",
+      viewId: "main",
+      eventId: "event-input-1",
+      status: "applied",
+      revision: 8,
+    });
+    const actions = socket.sent
+      .map((frame) => JSON.parse(frame) as Record<string, unknown>)
+      .filter((frame) => frame.type === "action");
+    expect(actions).toHaveLength(2);
+    expect(actions[1]).toMatchObject({
+      eventId: "event-input-2",
+      baseRevision: 8,
+      value: { type: "text", value: "abc" },
+    });
+    session.stop();
+  });
+
   test("falls back the pane without closing an unsupported component attachment", () => {
     const socket = new FakeSocket();
     const snapshots: UiSnapshot[] = [];
