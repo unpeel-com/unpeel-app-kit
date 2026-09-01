@@ -1449,15 +1449,18 @@ fn render_list_item(
                     .unwrap_or_else(|| u16::try_from(default_min).unwrap_or(u16::MAX)),
             )
     });
+    let value_style = value.map(|_| {
+        if selected {
+            theme.selected_value
+        } else {
+            theme.tone(item.value_tone)
+        }
+    });
     let mut right = Vec::new();
     if let Some(value) = value {
         right.push(Span::styled(
             value.to_owned(),
-            if selected {
-                theme.selected_value
-            } else {
-                theme.tone(item.value_tone)
-            },
+            value_style.unwrap_or_default(),
         ));
     }
     if !suffix.is_empty() {
@@ -1478,9 +1481,11 @@ fn render_list_item(
     .areas(content);
     Paragraph::new(Line::from(left)).render(label_area, buffer);
     if right_columns > 0 {
-        Paragraph::new(Line::from(right))
-            .alignment(Alignment::Right)
-            .render(value_area, buffer);
+        let mut paragraph = Paragraph::new(Line::from(right)).alignment(Alignment::Right);
+        if let Some(style) = value_style {
+            paragraph = paragraph.style(style);
+        }
+        paragraph.render(value_area, buffer);
     }
 }
 
