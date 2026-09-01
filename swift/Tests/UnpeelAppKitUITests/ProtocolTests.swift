@@ -53,7 +53,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 36)
+    #expect(messages.count == 42)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -349,7 +349,7 @@ func sharedProtocolFixturesDecode() throws {
     #expect(sparkline.resolvedBounds == 0...5)
     #expect(sparkline.normalizedSeries == [0, 0.6, 0.3, 0.8])
     #expect(sparklinePage.requiredCapabilities == [
-        "page", "list", "listItem", "listItemPresentation", "sparkline",
+        "page", "list", "listItem", "listItemRole", "listItemPresentation", "sparkline",
     ])
     guard case let .delta(sparklineDelta) = messages[35],
           case let .page(updatedSparklinePage) = try sparklineSnapshot
@@ -363,6 +363,60 @@ func sharedProtocolFixturesDecode() throws {
     #expect(updatedSparkline.series == [1, 2, 5])
     #expect(updatedSparkline.resolvedBounds == 0...5)
     #expect(updatedSparkline.caption == "Latest trend")
+    #expect(updatedSparkline.activate == "open-trend")
+
+    guard case let .snapshot(barSnapshot) = messages[36],
+          case let .page(barPage) = barSnapshot.root.component,
+          case let .barChart(barChart) = barPage.body,
+          case let .delta(barDelta) = messages[37],
+          case let .page(updatedBarPage) = try barSnapshot.applying(barDelta).root.component,
+          case let .barChart(updatedBarChart) = updatedBarPage.body
+    else {
+        Issue.record("BarChart fixture and keyed delta must decode")
+        return
+    }
+    #expect(barChart.normalizedValues == [12.0 / 18.0, 1, 7.0 / 18.0])
+    #expect(barPage.requiredCapabilities == ["page", "barChart"])
+    #expect(updatedBarChart.bars[1].value == 20)
+    #expect(updatedBarChart.activate == "next-chart")
+
+    guard case let .snapshot(lineSnapshot) = messages[38],
+          case let .page(linePage) = lineSnapshot.root.component,
+          case let .lineChart(lineChart) = linePage.body,
+          case let .delta(lineDelta) = messages[39],
+          case let .page(updatedLinePage) = try lineSnapshot.applying(lineDelta).root.component,
+          case let .lineChart(updatedLineChart) = updatedLinePage.body
+    else {
+        Issue.record("LineChart fixture and keyed delta must decode")
+        return
+    }
+    #expect(lineChart.resolvedXBounds == 0...2)
+    #expect(lineChart.resolvedYBounds == 0...8)
+    #expect(linePage.requiredCapabilities == ["page", "lineChart"])
+    #expect(updatedLineChart.series[0].points[2].y == 7)
+    #expect(updatedLineChart.activate == "next-chart")
+
+    guard case let .snapshot(gaugeSnapshot) = messages[40],
+          case let .page(gaugePage) = gaugeSnapshot.root.component,
+          case let .gauge(gauge) = gaugePage.body,
+          case let .delta(gaugeDelta) = messages[41],
+          case let .page(updatedGaugePage) = try gaugeSnapshot.applying(gaugeDelta).root.component,
+          case let .gauge(updatedGauge) = updatedGaugePage.body
+    else {
+        Issue.record("Gauge fixture and keyed delta must decode")
+        return
+    }
+    #expect(gauge.ratio == 0.64)
+    #expect(gauge.percentageLabel == "Deployment  64%")
+    #expect(UIGaugeSpec(
+        id: "rounding-gauge",
+        ratio: 0.625,
+        label: "Build",
+        accessibilityText: "Build is 62.5 percent complete"
+    ).percentageLabel == "Build  63%")
+    #expect(gaugePage.requiredCapabilities == ["page", "gauge"])
+    #expect(updatedGauge.ratio == 0.82)
+    #expect(updatedGauge.activate == "next-chart")
 }
 
 @Test

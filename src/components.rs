@@ -19,8 +19,9 @@ use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    Content, ContentState, InputField, KitTheme, ListPageBehavior, ListState, RowPrimaryRole,
-    SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, Sparkline, VerticalScrollbar,
+    BarChart, Content, ContentState, Gauge, InputField, KitTheme, LineChart, ListPageBehavior,
+    ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, Sparkline,
+    VerticalScrollbar,
 };
 
 /// Renderer capability for the v1 Page container.
@@ -655,6 +656,12 @@ impl ListItem {
             .any(|slot| matches!(slot, ListItemSlot::Disclosure))
         {
             RowPrimaryRole::Disclosure
+        } else if self
+            .slots()
+            .filter_map(ListItemSlot::as_sparkline)
+            .any(|sparkline| sparkline.activate.is_some())
+        {
+            RowPrimaryRole::Command
         } else if self.activate.is_some() {
             match self.action_role {
                 ListItemActionRole::Default => RowPrimaryRole::Command,
@@ -748,6 +755,11 @@ impl ListItem {
         let independent_roles = usize::from(!toggles.is_empty())
             + usize::from(!checkmarks.is_empty())
             + usize::from(disclosures > 0)
+            + usize::from(
+                sparklines
+                    .iter()
+                    .any(|sparkline| sparkline.activate.is_some()),
+            )
             + usize::from(self.activate.is_some() && disclosures == 0);
         if independent_roles > 1 {
             return Err(ComponentValidationError::new(
@@ -1129,6 +1141,10 @@ impl PageHeaderSlot {
 pub enum PageBodySlot {
     List(List),
     Content(Content),
+    Sparkline(Sparkline),
+    BarChart(BarChart),
+    LineChart(LineChart),
+    Gauge(Gauge),
 }
 
 impl PageBodySlot {
@@ -1143,17 +1159,45 @@ impl PageBodySlot {
     }
 
     #[must_use]
+    pub const fn sparkline(sparkline: Sparkline) -> Self {
+        Self::Sparkline(sparkline)
+    }
+
+    #[must_use]
+    pub const fn bar_chart(chart: BarChart) -> Self {
+        Self::BarChart(chart)
+    }
+
+    #[must_use]
+    pub const fn line_chart(chart: LineChart) -> Self {
+        Self::LineChart(chart)
+    }
+
+    #[must_use]
+    pub const fn gauge(gauge: Gauge) -> Self {
+        Self::Gauge(gauge)
+    }
+
+    #[must_use]
     pub const fn as_list(&self) -> &List {
         match self {
             Self::List(list) => list,
-            Self::Content(_) => panic!("Page body is Content, not List"),
+            Self::Content(_)
+            | Self::Sparkline(_)
+            | Self::BarChart(_)
+            | Self::LineChart(_)
+            | Self::Gauge(_) => panic!("Page body is not List"),
         }
     }
 
     fn as_list_mut(&mut self) -> Option<&mut List> {
         match self {
             Self::List(list) => Some(list),
-            Self::Content(_) => None,
+            Self::Content(_)
+            | Self::Sparkline(_)
+            | Self::BarChart(_)
+            | Self::LineChart(_)
+            | Self::Gauge(_) => None,
         }
     }
 
@@ -1161,14 +1205,22 @@ impl PageBodySlot {
     pub const fn as_content(&self) -> Option<&Content> {
         match self {
             Self::Content(content) => Some(content),
-            Self::List(_) => None,
+            Self::List(_)
+            | Self::Sparkline(_)
+            | Self::BarChart(_)
+            | Self::LineChart(_)
+            | Self::Gauge(_) => None,
         }
     }
 
     fn as_content_mut(&mut self) -> Option<&mut Content> {
         match self {
             Self::Content(content) => Some(content),
-            Self::List(_) => None,
+            Self::List(_)
+            | Self::Sparkline(_)
+            | Self::BarChart(_)
+            | Self::LineChart(_)
+            | Self::Gauge(_) => None,
         }
     }
 
@@ -1176,6 +1228,10 @@ impl PageBodySlot {
         match self {
             Self::List(list) => list.validate(path),
             Self::Content(content) => content.validate(path),
+            Self::Sparkline(sparkline) => sparkline.validate(path),
+            Self::BarChart(chart) => chart.validate(path),
+            Self::LineChart(chart) => chart.validate(path),
+            Self::Gauge(gauge) => gauge.validate(path),
         }
     }
 }
@@ -1215,6 +1271,46 @@ impl Page {
     }
 
     #[must_use]
+    pub fn with_sparkline(title: impl Into<String>, sparkline: Sparkline) -> Self {
+        Self {
+            title: title.into(),
+            back: None,
+            header: None,
+            body: PageBodySlot::Sparkline(sparkline),
+        }
+    }
+
+    #[must_use]
+    pub fn with_bar_chart(title: impl Into<String>, chart: BarChart) -> Self {
+        Self {
+            title: title.into(),
+            back: None,
+            header: None,
+            body: PageBodySlot::BarChart(chart),
+        }
+    }
+
+    #[must_use]
+    pub fn with_line_chart(title: impl Into<String>, chart: LineChart) -> Self {
+        Self {
+            title: title.into(),
+            back: None,
+            header: None,
+            body: PageBodySlot::LineChart(chart),
+        }
+    }
+
+    #[must_use]
+    pub fn with_gauge(title: impl Into<String>, gauge: Gauge) -> Self {
+        Self {
+            title: title.into(),
+            back: None,
+            header: None,
+            body: PageBodySlot::Gauge(gauge),
+        }
+    }
+
+    #[must_use]
     pub fn input(mut self, input: Input) -> Self {
         self.header = Some(PageHeaderSlot::Input(input));
         self
@@ -1238,6 +1334,17 @@ impl Page {
     }
 
     #[must_use]
+    pub const fn chart_id(&self) -> Option<&str> {
+        match &self.body {
+            PageBodySlot::Sparkline(chart) => Some(chart.id.as_str()),
+            PageBodySlot::BarChart(chart) => Some(chart.id.as_str()),
+            PageBodySlot::LineChart(chart) => Some(chart.id.as_str()),
+            PageBodySlot::Gauge(chart) => Some(chart.id.as_str()),
+            PageBodySlot::List(_) | PageBodySlot::Content(_) => None,
+        }
+    }
+
+    #[must_use]
     pub fn input_spec(&self) -> Option<&Input> {
         self.header.as_ref().map(PageHeaderSlot::as_input)
     }
@@ -1246,6 +1353,23 @@ impl Page {
     #[must_use]
     pub fn required_capabilities(&self) -> Vec<&'static str> {
         let mut capabilities = vec![PAGE_COMPONENT_CAPABILITY];
+        let chart_capability = match &self.body {
+            PageBodySlot::Sparkline(_) => Some(crate::SPARKLINE_COMPONENT_CAPABILITY),
+            PageBodySlot::BarChart(_) => Some(crate::BAR_CHART_COMPONENT_CAPABILITY),
+            PageBodySlot::LineChart(_) => Some(crate::LINE_CHART_COMPONENT_CAPABILITY),
+            PageBodySlot::Gauge(_) => Some(crate::GAUGE_COMPONENT_CAPABILITY),
+            PageBodySlot::List(_) | PageBodySlot::Content(_) => None,
+        };
+        if let Some(capability) = chart_capability {
+            capabilities.push(capability);
+            if self.header.is_some() {
+                capabilities.push(INPUT_COMPONENT_CAPABILITY);
+            }
+            if self.back.is_some() {
+                capabilities.push(PAGE_BACK_CAPABILITY);
+            }
+            return capabilities;
+        }
         let PageBodySlot::List(list) = &self.body else {
             capabilities.push(crate::CONTENT_COMPONENT_CAPABILITY);
             if self.header.is_some() {
@@ -1382,6 +1506,18 @@ impl Page {
                     register_unique(&mut ids, &line.id, &format!("page.body.lines[{index}].id"))?;
                 }
             }
+            PageBodySlot::Sparkline(chart) => {
+                register_unique(&mut ids, &chart.id, "page.body.id")?;
+            }
+            PageBodySlot::BarChart(chart) => {
+                register_unique(&mut ids, &chart.id, "page.body.id")?;
+            }
+            PageBodySlot::LineChart(chart) => {
+                register_unique(&mut ids, &chart.id, "page.body.id")?;
+            }
+            PageBodySlot::Gauge(chart) => {
+                register_unique(&mut ids, &chart.id, "page.body.id")?;
+            }
         }
         Ok(())
     }
@@ -1507,6 +1643,12 @@ impl Page {
         &mut self,
         replacement: Sparkline,
     ) -> Result<(), ComponentValidationError> {
+        if let PageBodySlot::Sparkline(sparkline) = &mut self.body
+            && sparkline.id == replacement.id
+        {
+            sparkline.replace_data_from(replacement);
+            return Ok(());
+        }
         let Some(list) = self.body.as_list_mut() else {
             return Err(ComponentValidationError::new(
                 "delta.nodeId",
@@ -1518,7 +1660,7 @@ impl Page {
                 if let ListItemSlot::Sparkline(sparkline) = slot
                     && sparkline.id == replacement.id
                 {
-                    *sparkline = replacement;
+                    sparkline.replace_data_from(replacement);
                     return Ok(());
                 }
             }
@@ -1527,6 +1669,66 @@ impl Page {
             "delta.nodeId",
             format!("Sparkline {:?} is not present", replacement.id),
         ))
+    }
+
+    pub(crate) fn set_bar_chart_data(
+        &mut self,
+        replacement: BarChart,
+    ) -> Result<(), ComponentValidationError> {
+        let PageBodySlot::BarChart(chart) = &mut self.body else {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                "Page body is not BarChart",
+            ));
+        };
+        if chart.id != replacement.id {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                format!("BarChart {:?} is not present", replacement.id),
+            ));
+        }
+        chart.replace_data_from(replacement);
+        Ok(())
+    }
+
+    pub(crate) fn set_line_chart_data(
+        &mut self,
+        replacement: LineChart,
+    ) -> Result<(), ComponentValidationError> {
+        let PageBodySlot::LineChart(chart) = &mut self.body else {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                "Page body is not LineChart",
+            ));
+        };
+        if chart.id != replacement.id {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                format!("LineChart {:?} is not present", replacement.id),
+            ));
+        }
+        chart.replace_data_from(replacement);
+        Ok(())
+    }
+
+    pub(crate) fn set_gauge_data(
+        &mut self,
+        replacement: Gauge,
+    ) -> Result<(), ComponentValidationError> {
+        let PageBodySlot::Gauge(gauge) = &mut self.body else {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                "Page body is not Gauge",
+            ));
+        };
+        if gauge.id != replacement.id {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                format!("Gauge {:?} is not present", replacement.id),
+            ));
+        }
+        gauge.replace_data_from(replacement);
+        Ok(())
     }
 
     pub(crate) fn insert_list_item(
@@ -2240,6 +2442,47 @@ impl Widget for PageWidget<'_> {
                 content
                     .widget(&mut self.content_state)
                     .render(layout.list, buffer);
+            }
+            PageBodySlot::Sparkline(sparkline) => {
+                let metadata = [sparkline.caption.as_deref(), sparkline.unit.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let chart_slot = if metadata.is_empty() {
+                    layout.list
+                } else {
+                    let label = Rect::new(layout.list.x, layout.list.y, layout.list.width, 1);
+                    Paragraph::new(metadata)
+                        .style(self.theme.value)
+                        .render(label, buffer);
+                    Rect::new(
+                        layout.list.x,
+                        layout.list.y.saturating_add(1),
+                        layout.list.width,
+                        layout.list.height.saturating_sub(1),
+                    )
+                };
+                let height = chart_slot.height.clamp(1, 3);
+                let area = Rect::new(
+                    chart_slot.x,
+                    chart_slot.y + chart_slot.height.saturating_sub(height) / 2,
+                    chart_slot.width,
+                    height,
+                );
+                sparkline.widget().render(area, buffer);
+            }
+            PageBodySlot::BarChart(chart) => chart.widget().render(layout.list, buffer),
+            PageBodySlot::LineChart(chart) => chart.widget().render(layout.list, buffer),
+            PageBodySlot::Gauge(gauge) => {
+                let height = layout.list.height.clamp(1, 3);
+                let area = Rect::new(
+                    layout.list.x,
+                    layout.list.y + layout.list.height.saturating_sub(height) / 2,
+                    layout.list.width,
+                    height,
+                );
+                gauge.widget().render(area, buffer);
             }
         }
     }

@@ -22,6 +22,9 @@ public enum UnpeelUIProtocol {
     public static let statusSymbolCapability = "statusSymbol"
     public static let badgeCapability = "badge"
     public static let sparklineCapability = "sparkline"
+    public static let barChartCapability = "barChart"
+    public static let lineChartCapability = "lineChart"
+    public static let gaugeCapability = "gauge"
     public static let toggleCapability = "toggle"
     public static let inputCapability = "input"
     public static let buttonCapability = "button"
@@ -54,6 +57,9 @@ public enum UnpeelUIProtocol {
         statusSymbolCapability,
         badgeCapability,
         sparklineCapability,
+        barChartCapability,
+        lineChartCapability,
+        gaugeCapability,
         toggleCapability,
         inputCapability,
         buttonCapability,
@@ -1460,6 +1466,7 @@ public struct UISparklineSpec: Codable, Equatable, Hashable, Sendable {
     public let caption: String?
     public let unit: String?
     public let accessibilityText: String
+    public let activate: String?
 
     public init(
         id: String,
@@ -1468,7 +1475,8 @@ public struct UISparklineSpec: Codable, Equatable, Hashable, Sendable {
         max: Double? = nil,
         caption: String? = nil,
         unit: String? = nil,
-        accessibilityText: String
+        accessibilityText: String,
+        activate: String? = nil
     ) {
         self.id = id
         self.series = series
@@ -1477,10 +1485,11 @@ public struct UISparklineSpec: Codable, Equatable, Hashable, Sendable {
         self.caption = caption
         self.unit = unit
         self.accessibilityText = accessibilityText
+        self.activate = activate
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, series, min, max, caption, unit, accessibilityText
+        case id, series, min, max, caption, unit, accessibilityText, activate
     }
 
     public init(from decoder: Decoder) throws {
@@ -1492,6 +1501,7 @@ public struct UISparklineSpec: Codable, Equatable, Hashable, Sendable {
         caption = try container.decodeIfPresent(String.self, forKey: .caption)
         unit = try container.decodeIfPresent(String.self, forKey: .unit)
         accessibilityText = try container.decode(String.self, forKey: .accessibilityText)
+        activate = try container.decodeIfPresent(String.self, forKey: .activate)
 
         guard isValid else {
             throw DecodingError.dataCorruptedError(
@@ -1508,10 +1518,12 @@ public struct UISparklineSpec: Codable, Equatable, Hashable, Sendable {
             && (min.map({ lower in series.allSatisfy { $0 >= lower } }) ?? true)
             && (max.map({ upper in series.allSatisfy { $0 <= upper } }) ?? true)
             && (min == nil || max == nil || min! < max!)
-            && !accessibilityText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && [caption, unit].compactMap({ $0 }).allSatisfy({
-                !$0.contains("\n") && !$0.contains("\r")
-            })
+            && chartAccessibilityIsValid(accessibilityText)
+            && [caption, unit].compactMap({ $0 }).allSatisfy {
+                chartSingleLineIsValid($0, allowEmpty: true)
+            }
+            && chartIdentifierIsValid(id)
+            && (activate.map(chartIdentifierIsValid) ?? true)
     }
 
     /// The Rust-spec domain rule: inferred bounds include zero and an all-zero
@@ -1532,6 +1544,314 @@ public struct UISparklineSpec: Codable, Equatable, Hashable, Sendable {
             Swift.min(Swift.max((value - bounds.lowerBound) / range, 0), 1)
         }
     }
+}
+
+public enum UIBarChartEmphasis: String, Codable, Equatable, Hashable, Sendable {
+    case standard = "default"
+    case accent
+    case danger
+}
+
+public struct UIBarChartBar: Codable, Equatable, Hashable, Sendable {
+    public let label: String
+    public let value: Double
+    public let valueCaption: String?
+    public let emphasis: UIBarChartEmphasis
+
+    public init(
+        label: String,
+        value: Double,
+        valueCaption: String? = nil,
+        emphasis: UIBarChartEmphasis = .standard
+    ) {
+        self.label = label
+        self.value = value
+        self.valueCaption = valueCaption
+        self.emphasis = emphasis
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case label, value, valueCaption, emphasis
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decode(String.self, forKey: .label)
+        value = try container.decode(Double.self, forKey: .value)
+        valueCaption = try container.decodeIfPresent(String.self, forKey: .valueCaption)
+        emphasis = try container.decodeIfPresent(
+            UIBarChartEmphasis.self,
+            forKey: .emphasis
+        ) ?? .standard
+    }
+
+    var isValid: Bool {
+        chartSingleLineIsValid(label, allowEmpty: false)
+            && value.isFinite && value >= 0
+            && (valueCaption.map { chartSingleLineIsValid($0, allowEmpty: true) } ?? true)
+    }
+}
+
+public struct UIBarChartSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let bars: [UIBarChartBar]
+    public let accessibilityText: String
+    public let activate: String?
+
+    public init(
+        id: String,
+        bars: [UIBarChartBar],
+        accessibilityText: String,
+        activate: String? = nil
+    ) {
+        self.id = id
+        self.bars = bars
+        self.accessibilityText = accessibilityText
+        self.activate = activate
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, bars, accessibilityText, activate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        bars = try container.decode([UIBarChartBar].self, forKey: .bars)
+        accessibilityText = try container.decode(String.self, forKey: .accessibilityText)
+        activate = try container.decodeIfPresent(String.self, forKey: .activate)
+        guard isValid else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .bars,
+                in: container,
+                debugDescription: "BarChart needs labeled non-negative bars and accessibility text"
+            )
+        }
+    }
+
+    var isValid: Bool {
+        chartIdentifierIsValid(id)
+            && (1...1_000).contains(bars.count)
+            && bars.allSatisfy(\.isValid)
+            && chartAccessibilityIsValid(accessibilityText)
+            && (activate.map(chartIdentifierIsValid) ?? true)
+    }
+
+    public var normalizedValues: [Double] {
+        let maximum = max(bars.map(\.value).max() ?? 0, 1)
+        return bars.map { min(max($0.value / maximum, 0), 1) }
+    }
+}
+
+public struct UILineChartPoint: Codable, Equatable, Hashable, Sendable {
+    public let x: Double
+    public let y: Double
+
+    public init(x: Double, y: Double) {
+        self.x = x
+        self.y = y
+    }
+}
+
+public struct UILineChartSeries: Codable, Equatable, Hashable, Sendable {
+    public let name: String
+    public let points: [UILineChartPoint]
+
+    public init(name: String, points: [UILineChartPoint]) {
+        self.name = name
+        self.points = points
+    }
+}
+
+public struct UILineChartBounds: Codable, Equatable, Hashable, Sendable {
+    public let min: Double
+    public let max: Double
+
+    public init(min: Double, max: Double) {
+        self.min = min
+        self.max = max
+    }
+
+    var isValid: Bool {
+        min.isFinite && max.isFinite && min < max
+    }
+}
+
+public struct UILineChartAxis: Codable, Equatable, Hashable, Sendable {
+    public let bounds: UILineChartBounds?
+    public let label: String?
+
+    public init(bounds: UILineChartBounds? = nil, label: String? = nil) {
+        self.bounds = bounds
+        self.label = label
+    }
+}
+
+public struct UILineChartSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let series: [UILineChartSeries]
+    public let xAxis: UILineChartAxis
+    public let yAxis: UILineChartAxis
+    public let accessibilityText: String
+    public let activate: String?
+
+    public init(
+        id: String,
+        series: [UILineChartSeries],
+        xAxis: UILineChartAxis = .init(),
+        yAxis: UILineChartAxis = .init(),
+        accessibilityText: String,
+        activate: String? = nil
+    ) {
+        self.id = id
+        self.series = series
+        self.xAxis = xAxis
+        self.yAxis = yAxis
+        self.accessibilityText = accessibilityText
+        self.activate = activate
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, series, xAxis, yAxis, accessibilityText, activate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        series = try container.decode([UILineChartSeries].self, forKey: .series)
+        xAxis = try container.decodeIfPresent(UILineChartAxis.self, forKey: .xAxis) ?? .init()
+        yAxis = try container.decodeIfPresent(UILineChartAxis.self, forKey: .yAxis) ?? .init()
+        accessibilityText = try container.decode(String.self, forKey: .accessibilityText)
+        activate = try container.decodeIfPresent(String.self, forKey: .activate)
+        guard isValid else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .series,
+                in: container,
+                debugDescription: "LineChart needs finite named series, containing axes, and accessibility text"
+            )
+        }
+    }
+
+    var isValid: Bool {
+        let names = Set(series.map(\.name))
+        let points = series.flatMap(\.points)
+        return chartIdentifierIsValid(id)
+            && (1...16).contains(series.count)
+            && names.count == series.count
+            && series.allSatisfy {
+                chartSingleLineIsValid($0.name, allowEmpty: false) && !$0.points.isEmpty
+                    && $0.points.allSatisfy { $0.x.isFinite && $0.y.isFinite }
+            }
+            && points.count <= 100_000
+            && axisIsValid(xAxis, values: points.map(\.x))
+            && axisIsValid(yAxis, values: points.map(\.y))
+            && chartAccessibilityIsValid(accessibilityText)
+            && (activate.map(chartIdentifierIsValid) ?? true)
+    }
+
+    public var resolvedXBounds: ClosedRange<Double> {
+        resolvedBounds(axis: xAxis, values: series.flatMap { $0.points.map(\.x) })
+    }
+
+    public var resolvedYBounds: ClosedRange<Double> {
+        resolvedBounds(axis: yAxis, values: series.flatMap { $0.points.map(\.y) })
+    }
+
+    private func axisIsValid(_ axis: UILineChartAxis, values: [Double]) -> Bool {
+        guard axis.label.map({ chartSingleLineIsValid($0, allowEmpty: true) }) ?? true,
+              axis.bounds?.isValid ?? true
+        else { return false }
+        guard let bounds = axis.bounds else { return true }
+        return values.allSatisfy { (bounds.min...bounds.max).contains($0) }
+    }
+
+    private func resolvedBounds(
+        axis: UILineChartAxis,
+        values: [Double]
+    ) -> ClosedRange<Double> {
+        if let bounds = axis.bounds { return bounds.min...bounds.max }
+        let lower = values.min() ?? 0
+        var upper = values.max() ?? 0
+        if lower == upper { upper = lower + 1 }
+        return lower...upper
+    }
+}
+
+public struct UIGaugeSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let ratio: Double
+    public let label: String
+    public let accessibilityText: String
+    public let activate: String?
+
+    public init(
+        id: String,
+        ratio: Double,
+        label: String,
+        accessibilityText: String,
+        activate: String? = nil
+    ) {
+        self.id = id
+        self.ratio = ratio
+        self.label = label
+        self.accessibilityText = accessibilityText
+        self.activate = activate
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, ratio, label, accessibilityText, activate
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        ratio = try container.decode(Double.self, forKey: .ratio)
+        label = try container.decode(String.self, forKey: .label)
+        accessibilityText = try container.decode(String.self, forKey: .accessibilityText)
+        activate = try container.decodeIfPresent(String.self, forKey: .activate)
+        guard isValid else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .ratio,
+                in: container,
+                debugDescription: "Gauge ratio must be 0...1 with label and accessibility text"
+            )
+        }
+    }
+
+    var isValid: Bool {
+        chartIdentifierIsValid(id)
+            && ratio.isFinite && (0...1).contains(ratio)
+            && chartSingleLineIsValid(label, allowEmpty: false)
+            && chartAccessibilityIsValid(accessibilityText)
+            && (activate.map(chartIdentifierIsValid) ?? true)
+    }
+
+    public var percentageLabel: String {
+        "\(label)  \(percentageValueLabel)"
+    }
+
+    public var percentageValueLabel: String {
+        "\(Int((ratio * 100).rounded()))%"
+    }
+}
+
+private func chartIdentifierIsValid(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.count <= 256 && value.utf8.allSatisfy {
+        ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122)
+            || [46, 95, 58, 47, 45].contains($0)
+    }
+}
+
+private func chartSingleLineIsValid(_ value: String, allowEmpty: Bool) -> Bool {
+    value.utf8.count <= 4_096 && !value.contains("\n") && !value.contains("\r")
+        && !value.contains("\0")
+        && (allowEmpty || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+}
+
+private func chartAccessibilityIsValid(_ value: String) -> Bool {
+    value.utf8.count <= 16_384
+        && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        && !value.contains("\r") && !value.contains("\0")
 }
 
 public enum UIListItemSlot: Equatable, Hashable, Sendable {
@@ -1755,6 +2075,7 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         let independentRoles = (toggles.isEmpty ? 0 : 1)
             + (checkmarks.isEmpty ? 0 : 1)
             + (disclosures.isEmpty ? 0 : 1)
+            + (sparklines.contains(where: { $0.activate != nil }) ? 1 : 0)
             + (activate != nil && disclosures.isEmpty ? 1 : 0)
         guard independentRoles <= 1 else {
             throw DecodingError.dataCorruptedError(
@@ -1785,6 +2106,7 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
             guard case .disclosure? = $0 else { return false }
             return true
         }) { return .disclosure }
+        if primarySparkline?.activate != nil { return .command }
         if activate != nil {
             return actionRole == .destructive ? .destructive : .command
         }
@@ -1801,6 +2123,13 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     public var primaryCheckmark: UICheckmarkSpec? {
         for slot in [leading, trailing, accessory] {
             if case let .checkmark(checkmark)? = slot { return checkmark }
+        }
+        return nil
+    }
+
+    public var primarySparkline: UISparklineSpec? {
+        for slot in [leading, trailing, accessory] {
+            if case let .sparkline(sparkline)? = slot { return sparkline }
         }
         return nil
     }
@@ -2110,6 +2439,10 @@ extension UIPageHeaderSlot: Codable {
 public enum UIPageBodySlot: Equatable, Hashable, Sendable {
     case list(UIListSpec)
     case content(UIContentSpec)
+    case sparkline(UISparklineSpec)
+    case barChart(UIBarChartSpec)
+    case lineChart(UILineChartSpec)
+    case gauge(UIGaugeSpec)
     case unsupported(kind: String)
 }
 
@@ -2122,6 +2455,10 @@ extension UIPageBodySlot: Codable {
         switch kind {
         case "list": self = .list(try UIListSpec(from: decoder))
         case "content": self = .content(try UIContentSpec(from: decoder))
+        case "sparkline": self = .sparkline(try UISparklineSpec(from: decoder))
+        case "barChart": self = .barChart(try UIBarChartSpec(from: decoder))
+        case "lineChart": self = .lineChart(try UILineChartSpec(from: decoder))
+        case "gauge": self = .gauge(try UIGaugeSpec(from: decoder))
         default: self = .unsupported(kind: kind)
         }
     }
@@ -2135,6 +2472,18 @@ extension UIPageBodySlot: Codable {
         case let .content(content):
             try container.encode("content", forKey: .type)
             try content.encode(to: encoder)
+        case let .sparkline(sparkline):
+            try container.encode("sparkline", forKey: .type)
+            try sparkline.encode(to: encoder)
+        case let .barChart(chart):
+            try container.encode("barChart", forKey: .type)
+            try chart.encode(to: encoder)
+        case let .lineChart(chart):
+            try container.encode("lineChart", forKey: .type)
+            try chart.encode(to: encoder)
+        case let .gauge(gauge):
+            try container.encode("gauge", forKey: .type)
+            try gauge.encode(to: encoder)
         case let .unsupported(kind):
             try container.encode(kind, forKey: .type)
         }
@@ -2161,6 +2510,22 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
 
     public var requiredCapabilities: [String]? {
         var capabilities = [UnpeelUIProtocol.pageCapability]
+        let chartCapability: String? = switch body {
+        case .sparkline: UnpeelUIProtocol.sparklineCapability
+        case .barChart: UnpeelUIProtocol.barChartCapability
+        case .lineChart: UnpeelUIProtocol.lineChartCapability
+        case .gauge: UnpeelUIProtocol.gaugeCapability
+        case .list, .content, .unsupported: nil
+        }
+        if let chartCapability {
+            capabilities.append(chartCapability)
+            if let header {
+                guard case .input = header else { return nil }
+                capabilities.append(UnpeelUIProtocol.inputCapability)
+            }
+            if back != nil { capabilities.append(UnpeelUIProtocol.pageBackCapability) }
+            return capabilities
+        }
         if case let .content(content) = body {
             capabilities.append(UnpeelUIProtocol.contentCapability)
             if let header {

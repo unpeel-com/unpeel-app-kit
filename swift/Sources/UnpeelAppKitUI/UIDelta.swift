@@ -19,6 +19,9 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case toggleSetValue(nodeID: String, value: Bool)
     case checkmarkSetValue(nodeID: String, value: Bool)
     case sparklineSetData(UISparklineSpec)
+    case barChartSetData(UIBarChartSpec)
+    case lineChartSetData(UILineChartSpec)
+    case gaugeSetData(UIGaugeSpec)
     case inputSetValue(nodeID: String, value: String)
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
     case listSetSelection(listID: String, selectedID: String?)
@@ -70,6 +73,11 @@ extension UIDeltaOperation: Codable {
         case caption
         case unit
         case accessibilityText
+        case bars
+        case xAxis
+        case yAxis
+        case ratio
+        case label
         case listID = "listId"
         case contentID = "contentId"
         case index
@@ -104,6 +112,9 @@ extension UIDeltaOperation: Codable {
         case toggleSetValue
         case checkmarkSetValue
         case sparklineSetData
+        case barChartSetData
+        case lineChartSetData
+        case gaugeSetData
         case inputSetValue
         case listInsertItem
         case listSetSelection
@@ -224,6 +235,51 @@ extension UIDeltaOperation: Codable {
                 )
             }
             self = .sparklineSetData(sparkline)
+        case .barChartSetData:
+            let chart = UIBarChartSpec(
+                id: try container.decode(String.self, forKey: .nodeID),
+                bars: try container.decode([UIBarChartBar].self, forKey: .bars),
+                accessibilityText: try container.decode(String.self, forKey: .accessibilityText)
+            )
+            guard chart.isValid else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .bars,
+                    in: container,
+                    debugDescription: "BarChart delta data is invalid"
+                )
+            }
+            self = .barChartSetData(chart)
+        case .lineChartSetData:
+            let chart = UILineChartSpec(
+                id: try container.decode(String.self, forKey: .nodeID),
+                series: try container.decode([UILineChartSeries].self, forKey: .series),
+                xAxis: try container.decode(UILineChartAxis.self, forKey: .xAxis),
+                yAxis: try container.decode(UILineChartAxis.self, forKey: .yAxis),
+                accessibilityText: try container.decode(String.self, forKey: .accessibilityText)
+            )
+            guard chart.isValid else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .series,
+                    in: container,
+                    debugDescription: "LineChart delta data is invalid"
+                )
+            }
+            self = .lineChartSetData(chart)
+        case .gaugeSetData:
+            let gauge = UIGaugeSpec(
+                id: try container.decode(String.self, forKey: .nodeID),
+                ratio: try container.decode(Double.self, forKey: .ratio),
+                label: try container.decode(String.self, forKey: .label),
+                accessibilityText: try container.decode(String.self, forKey: .accessibilityText)
+            )
+            guard gauge.isValid else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .ratio,
+                    in: container,
+                    debugDescription: "Gauge delta data is invalid"
+                )
+            }
+            self = .gaugeSetData(gauge)
         case .inputSetValue:
             self = .inputSetValue(
                 nodeID: try container.decode(String.self, forKey: .nodeID),
@@ -390,6 +446,24 @@ extension UIDeltaOperation: Codable {
             try container.encodeIfPresent(sparkline.unit, forKey: .unit)
             if sparkline.unit == nil { try container.encodeNil(forKey: .unit) }
             try container.encode(sparkline.accessibilityText, forKey: .accessibilityText)
+        case let .barChartSetData(chart):
+            try container.encode(Operation.barChartSetData, forKey: .op)
+            try container.encode(chart.id, forKey: .nodeID)
+            try container.encode(chart.bars, forKey: .bars)
+            try container.encode(chart.accessibilityText, forKey: .accessibilityText)
+        case let .lineChartSetData(chart):
+            try container.encode(Operation.lineChartSetData, forKey: .op)
+            try container.encode(chart.id, forKey: .nodeID)
+            try container.encode(chart.series, forKey: .series)
+            try container.encode(chart.xAxis, forKey: .xAxis)
+            try container.encode(chart.yAxis, forKey: .yAxis)
+            try container.encode(chart.accessibilityText, forKey: .accessibilityText)
+        case let .gaugeSetData(gauge):
+            try container.encode(Operation.gaugeSetData, forKey: .op)
+            try container.encode(gauge.id, forKey: .nodeID)
+            try container.encode(gauge.ratio, forKey: .ratio)
+            try container.encode(gauge.label, forKey: .label)
+            try container.encode(gauge.accessibilityText, forKey: .accessibilityText)
         case let .inputSetValue(nodeID, value):
             try container.encode(Operation.inputSetValue, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
@@ -709,6 +783,19 @@ private extension UINode {
             return UINode(id: id, component: .page(page))
         case let .sparklineSetData(sparkline):
             var page = try page()
+            if case let .sparkline(current) = page.body, current.id == sparkline.id {
+                page.body = .sparkline(UISparklineSpec(
+                    id: sparkline.id,
+                    series: sparkline.series,
+                    min: sparkline.min,
+                    max: sparkline.max,
+                    caption: sparkline.caption,
+                    unit: sparkline.unit,
+                    accessibilityText: sparkline.accessibilityText,
+                    activate: current.activate
+                ))
+                return UINode(id: id, component: .page(page))
+            }
             guard case var .list(list) = page.body else {
                 throw UIDeltaApplicationError("Delta targets an unavailable List")
             }
@@ -718,7 +805,16 @@ private extension UINode {
                 if case let .sparkline(current)? = item.trailing,
                    current.id == sparkline.id
                 {
-                    item.trailing = .sparkline(sparkline)
+                    item.trailing = .sparkline(UISparklineSpec(
+                        id: sparkline.id,
+                        series: sparkline.series,
+                        min: sparkline.min,
+                        max: sparkline.max,
+                        caption: sparkline.caption,
+                        unit: sparkline.unit,
+                        accessibilityText: sparkline.accessibilityText,
+                        activate: current.activate
+                    ))
                     list.items[index] = item
                     found = true
                     break
@@ -728,6 +824,45 @@ private extension UINode {
                 throw UIDeltaApplicationError("Delta targets an unavailable Sparkline")
             }
             page.body = .list(list)
+            return UINode(id: id, component: .page(page))
+        case let .barChartSetData(chart):
+            var page = try page()
+            guard case let .barChart(current) = page.body, current.id == chart.id else {
+                throw UIDeltaApplicationError("Delta targets an unavailable BarChart")
+            }
+            page.body = .barChart(UIBarChartSpec(
+                id: chart.id,
+                bars: chart.bars,
+                accessibilityText: chart.accessibilityText,
+                activate: current.activate
+            ))
+            return UINode(id: id, component: .page(page))
+        case let .lineChartSetData(chart):
+            var page = try page()
+            guard case let .lineChart(current) = page.body, current.id == chart.id else {
+                throw UIDeltaApplicationError("Delta targets an unavailable LineChart")
+            }
+            page.body = .lineChart(UILineChartSpec(
+                id: chart.id,
+                series: chart.series,
+                xAxis: chart.xAxis,
+                yAxis: chart.yAxis,
+                accessibilityText: chart.accessibilityText,
+                activate: current.activate
+            ))
+            return UINode(id: id, component: .page(page))
+        case let .gaugeSetData(gauge):
+            var page = try page()
+            guard case let .gauge(current) = page.body, current.id == gauge.id else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Gauge")
+            }
+            page.body = .gauge(UIGaugeSpec(
+                id: gauge.id,
+                ratio: gauge.ratio,
+                label: gauge.label,
+                accessibilityText: gauge.accessibilityText,
+                activate: current.activate
+            ))
             return UINode(id: id, component: .page(page))
         case let .inputSetValue(nodeID, value):
             var page = try page()

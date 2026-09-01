@@ -17,7 +17,7 @@ extension DemoKind {
             ]
         case .filetreeApp:
             ["Root tree", "Nested tree"]
-        case .todo, .markdown, .media, .surface, .canvas:
+        case .charts, .todo, .markdown, .media, .surface, .canvas:
             []
         }
     }
@@ -147,7 +147,7 @@ extension HostedAppSession {
             return markdownAction(step: step, snapshot: snapshot)
         case .filetreeApp:
             return fileTreeAction(step: step, snapshot: snapshot)
-        case .todo, .markdown, .media, .surface, .canvas:
+        case .charts, .todo, .markdown, .media, .surface, .canvas:
             return nil
         }
     }

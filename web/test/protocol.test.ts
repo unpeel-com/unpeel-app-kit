@@ -7,12 +7,16 @@ import {
   markdownMenuTriggerForTextInput,
   markdownTaskToggleAtOffset,
   isMarkdownEditorNode,
+  isBarChartSpec,
   isCanvasPageNode,
+  isGaugeSpec,
+  isLineChartSpec,
   isMediaNode,
   isMenuNode,
   isPageNode,
   isRenderablePageNode,
   isRenderableContentPageNode,
+  isRenderableChartPageNode,
   isSurfaceNode,
   isSparklineSlot,
   isTreeNode,
@@ -24,6 +28,9 @@ import {
   resolveSurfacePointSize,
   resolvedSparklineBounds,
   normalizedSparklineSeries,
+  normalizedBarChartValues,
+  resolvedLineChartBounds,
+  gaugePercentageLabel,
   uiNodeCapability,
   uiNodeCapabilities,
   verifyMediaBlobBytes,
@@ -42,7 +49,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(36);
+    expect(messages).toHaveLength(42);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -302,7 +309,7 @@ describe("shared protocol", () => {
     expect(resolvedSparklineBounds(sparklineSlot)).toEqual([0, 5]);
     expect(normalizedSparklineSeries(sparklineSlot)).toEqual([0, 0.6, 0.3, 0.8]);
     expect(uiNodeCapabilities(sparklineSnapshot.root)).toEqual([
-      "page", "list", "listItem", "listItemPresentation", "sparkline",
+      "page", "list", "listItem", "listItemRole", "listItemPresentation", "sparkline",
     ]);
     const updatedSparklineSnapshot = applyUiDelta(
       sparklineSnapshot,
@@ -318,6 +325,56 @@ describe("shared protocol", () => {
     expect(updatedSparkline.series).toEqual([1, 2, 5]);
     expect(resolvedSparklineBounds(updatedSparkline)).toEqual([0, 5]);
     expect(updatedSparkline.caption).toBe("Latest trend");
+    expect(updatedSparkline.activate).toBe("open-trend");
+
+    const barSnapshot = messages[36] as UiSnapshot;
+    if (!isRenderableChartPageNode(barSnapshot.root)
+      || !isBarChartSpec(barSnapshot.root.body)) {
+      throw new Error("expected shared BarChart fixture");
+    }
+    expect(normalizedBarChartValues(barSnapshot.root.body)).toEqual([
+      12 / 18, 1, 7 / 18,
+    ]);
+    expect(uiNodeCapabilities(barSnapshot.root)).toEqual(["page", "barChart"]);
+    const updatedBars = applyUiDelta(barSnapshot, messages[37] as UiDelta);
+    if (!isRenderableChartPageNode(updatedBars.root)
+      || !isBarChartSpec(updatedBars.root.body)) throw new Error("expected updated BarChart");
+    expect(updatedBars.root.body.bars.map((bar) => bar.value)).toEqual([14, 20, 6]);
+    expect(updatedBars.root.body.activate).toBe("next-chart");
+
+    const lineSnapshot = messages[38] as UiSnapshot;
+    if (!isRenderableChartPageNode(lineSnapshot.root)
+      || !isLineChartSpec(lineSnapshot.root.body)) {
+      throw new Error("expected shared LineChart fixture");
+    }
+    expect(resolvedLineChartBounds(lineSnapshot.root.body, "x")).toEqual([0, 2]);
+    expect(resolvedLineChartBounds(lineSnapshot.root.body, "y")).toEqual([0, 8]);
+    expect(uiNodeCapabilities(lineSnapshot.root)).toEqual(["page", "lineChart"]);
+    const updatedLines = applyUiDelta(lineSnapshot, messages[39] as UiDelta);
+    if (!isRenderableChartPageNode(updatedLines.root)
+      || !isLineChartSpec(updatedLines.root.body)) throw new Error("expected updated LineChart");
+    expect(updatedLines.root.body.series[0]?.points[2]?.y).toBe(7);
+    expect(updatedLines.root.body.activate).toBe("next-chart");
+
+    const gaugeSnapshot = messages[40] as UiSnapshot;
+    if (!isRenderableChartPageNode(gaugeSnapshot.root)
+      || !isGaugeSpec(gaugeSnapshot.root.body)) {
+      throw new Error("expected shared Gauge fixture");
+    }
+    expect(gaugePercentageLabel(gaugeSnapshot.root.body)).toBe("Deployment  64%");
+    expect(gaugePercentageLabel({
+      type: "gauge",
+      id: "rounding-gauge",
+      ratio: 0.625,
+      label: "Build",
+      accessibilityText: "Build is 62.5 percent complete",
+    })).toBe("Build  63%");
+    expect(uiNodeCapabilities(gaugeSnapshot.root)).toEqual(["page", "gauge"]);
+    const updatedGauge = applyUiDelta(gaugeSnapshot, messages[41] as UiDelta);
+    if (!isRenderableChartPageNode(updatedGauge.root)
+      || !isGaugeSpec(updatedGauge.root.body)) throw new Error("expected updated Gauge");
+    expect(updatedGauge.root.body.ratio).toBe(0.82);
+    expect(updatedGauge.root.body.activate).toBe("next-chart");
   });
 
   test("uses one role-aware Enter and Space decision table", () => {

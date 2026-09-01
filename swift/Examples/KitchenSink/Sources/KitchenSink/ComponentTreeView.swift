@@ -32,7 +32,8 @@ private struct ComponentTreeNode: Identifiable {
             let priority = [
                 "type", "id", "title", "label", "value", "done", "presentation",
                 "readOnly", "dirty", "header", "body", "items", "leading", "trailing",
-                "accessory", "actionRole", "actions", "delete", "activate", "setValue", "submit",
+                "accessory", "bars", "series", "points", "ratio", "accessibilityText",
+                "actionRole", "actions", "delete", "activate", "setValue", "submit",
             ]
             let keys = dictionary.keys.sorted { lhs, rhs in
                 let left = priority.firstIndex(of: lhs) ?? priority.count

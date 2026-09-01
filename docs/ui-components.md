@@ -18,8 +18,15 @@ contains the optional hosted projection; without injected Host variables it is
 equally inert. Todo constructs Page, List, ListItem, Toggle, and Input values
 without passing a bridge into any component API.
 
-On macOS, the independent Kitchen Sink package exercises that same binary,
-the component examples, and the five sibling Apps (Usage, Diffs, GitHub
+The chart showcase proves the same invariant for every visualization:
+
+```sh
+cargo run --example charts
+cargo run --example charts --no-default-features
+```
+
+On macOS, the independent Kitchen Sink package exercises those binaries,
+the Charts and other component examples, and the five sibling Apps (Usage, Diffs, GitHub
 Issues, Markdown, and File Tree) through real libghostty PTYs, the native
 SwiftUI renderer, and the actual TypeScript DOM renderers inside `WKWebView`,
 without Unpeel installed:
@@ -474,9 +481,9 @@ web, and agent participants:
   such as `leading`, `trailing`, and `accessory`;
 - each slot accepts only the schema-enumerated controls allowed in that role;
   v1 has completion `Toggle`, selection `Checkmark`, navigation `Disclosure`,
-  static status-symbol, `Badge`, and read-only trailing `Sparkline` values; and
-- `Page` and later containers expose named, purpose-specific regions only when
-  their cross-platform semantics are defined.
+  static status-symbol, `Badge`, and read-only-data trailing `Sparkline` values; and
+- `Page` exposes one closed body slot: List, Content, Sparkline, BarChart,
+  LineChart, or Gauge; it never accepts arbitrary children.
 
 The current master/detail extension stays inside those named semantics:
 `ListItem.detail` is secondary copy, `ListItem.value` is a trailing read-only
@@ -520,7 +527,7 @@ text input. No renderer scrapes terminal output.
 
 Containment is deliberately closed:
 
-- Page's v1 header accepts Input and its body accepts List;
+- the Todo Page's header accepts Input and its body uses the List alternative;
 - List accepts only ListItem rows; and
 - ListItem's `leading`, `trailing`, and `accessory` slots accept only Toggle,
   Checkmark, Disclosure, status-symbol, or Badge values, never an arbitrary
@@ -786,10 +793,31 @@ capability keeps the connection and shows the complete terminal pane. The
 shared NDJSON fixtures cover a styled diff Page and both Content delta forms
 in Rust, Swift, and web.
 
-## Sparkline v1
+## Charts v1
+
+The chart family is four concrete, closed components—not a generic marks,
+layout, or styling grammar. [`examples/charts.rs`](../examples/charts.rs)
+cycles through all four as an ordinary standalone Ratatui App and publishes
+the same Page values when hosted.
+
+| Component | Rust / terminal interpretation | Apple interpretation | Web interpretation |
+| --- | --- | --- | --- |
+| `Sparkline` | numeric series through Ratatui `Sparkline` | Swift Charts `LineMark` with hidden axes | accessible dependency-free inline SVG polyline |
+| `BarChart` | labeled bars through Ratatui `BarChart` | Swift Charts `BarMark` | accessible dependency-free inline SVG bars |
+| `LineChart` | named x/y series through Ratatui `Chart` | Swift Charts `LineMark` series | accessible dependency-free inline SVG polylines and axes |
+| `Gauge` | Ratatui `Gauge` or one-row `LineGauge` | SwiftUI `Gauge` | accessible dependency-free inline SVG meter |
+
+Each specification owns its stable id, actual numeric data, required
+accessibility text, and at most one optional idempotent `activate` action.
+Charts contain no arbitrary children and expose no renderer-owned zoom,
+tooltip, selection, or rich-legend state. A Page may choose exactly one chart
+as its body. Apps that need freeform plotting, GPU effects, or richer
+interaction use the canvas-only Surface embed instead.
+
+### Sparkline
 
 `Sparkline` is the deliberately narrow history visualization required by the
-Usage App. It is not a generic chart grammar. A ListItem accepts it only once
+Usage App. A ListItem accepts it only once
 in its `trailing` slot, which keeps the row vocabulary closed and gives human
 and agent participants the underlying data rather than a screenshot:
 
@@ -831,6 +859,53 @@ Page or List; renderers apply that same complete data contract rather than
 merging chart state locally. The `sparkline` capability is required only when
 a projection actually contains one; an older renderer falls back to the
 terminal pane.
+
+Sparkline may also occupy the complete Page body. In that form its optional
+caption and unit are visible presentation metadata; the compact ListItem form
+keeps the row label as its visible caption. When a trailing Sparkline declares
+`activate`, it becomes that row's command primary role: Enter or a direct
+chart click emits the Sparkline id/action, while Space retains command-row
+PageDown behavior. Validation rejects combining it with another row role.
+
+### BarChart
+
+`BarChart` carries 1–1000 labeled, finite, non-negative numeric bars. Each bar
+may add one display caption for its value and exactly one closed emphasis:
+`default`, `accent`, or `danger`. The numeric `value` always remains in the
+tree even when a caption such as `18k` is shown, so an agent never has to
+reverse-engineer pixels or formatted copy. Ratatui's integer BarChart receives
+a shared zero-based normalization while optional captions remain verbatim;
+Swift Charts and SVG plot the same values directly. With no caption, all three
+renderers omit the visual value copy while retaining the numeric field.
+
+### LineChart
+
+`LineChart` carries 1–16 uniquely named series and at most 100,000 total finite
+`{x, y}` points. Each axis may declare a single-line label and explicit finite
+`min < max` bounds; explicit bounds must contain every point. Missing bounds
+resolve to the data minimum/maximum, and a degenerate domain expands its upper
+edge by one. Series names are the complete v1 legend vocabulary. Ratatui
+`Chart`, Swift Charts, and SVG all consume the same resolved domains and point
+sets without smoothing or presenter-side aggregation.
+
+### Gauge
+
+`Gauge` owns one finite ratio in `0...1`, one non-empty label, and accessibility
+text. Its shared percentage copy rounds to the nearest whole percent with
+positive half values rounding upward. Ratatui selects `LineGauge` for a
+one-cell allocation and `Gauge` otherwise; Apple maps it to SwiftUI `Gauge`,
+and web maps it to an SVG track/fill meter.
+
+### Shared chart deltas and parity
+
+`sparklineSetData`, `barChartSetData`, `lineChartSetData`, and `gaugeSetData`
+replace the complete data contract of one stable chart while preserving its
+declared activation action. An id or action change replaces the Page instead
+of mutating identity locally. The shared NDJSON corpus contains a snapshot
+and keyed delta for every chart; Rust, Swift, and web tests apply the same
+vectors and assert bounds/normalization, resulting values, capabilities, and
+action preservation. A renderer missing any exact chart capability keeps the
+attachment alive and falls back to the complete terminal pane.
 
 ## MarkdownEditor v1
 
@@ -970,8 +1045,8 @@ Unsupported renderers still receive the complete TUI.
 
 ### Five-App cross-platform audit
 
-Kitchen Sink now builds and spawns Usage, Diffs, GitHub Issues, Markdown, and
-File Tree against isolated deterministic fixtures. Its screen walker drives
+Kitchen Sink now builds and spawns the Charts showcase plus Usage, Diffs,
+GitHub Issues, Markdown, and File Tree against isolated deterministic fixtures. Its screen walker drives
 the live App reducers over `ui.sock`; it does not substitute fixture snapshots
 for the Apps. The current verified inventory is:
 
@@ -1250,20 +1325,17 @@ component version.
 
 ## Next components
 
-Tree and Menu now ship with all three interpretations. The remaining useful
-vocabulary is intentionally conventional:
+Tree, Menu, and the four concrete charts now ship with all three
+interpretations. The remaining useful vocabulary is intentionally conventional:
 
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
-| `BarChart` | `ratatui::widgets::BarChart` | future addition only when a concrete App needs categorical bars |
-| `LineChart` | `ratatui::widgets::Chart` | future addition only when a concrete App needs axes or multiple line series |
-| `Gauge` | `ratatui::widgets::Gauge` | future addition only when a concrete App needs a bounded progress meter |
 
 Each should be added only with all three renderer interpretations, shared
 fixtures, and cross-renderer event-sequence parity tests. Media, Page, Tree,
-Menu, and Sparkline exercise the required pane-level
+Menu, and the chart family exercise the required pane-level
 terminal fallback for renderers that do not advertise or recognize a kind;
 every later component inherits that rule. This keeps App Kit opinionated and
 prevents its public API from becoming an unbounded remote widget toolkit.

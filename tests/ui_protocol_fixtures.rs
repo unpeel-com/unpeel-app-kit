@@ -4,8 +4,8 @@ use std::io::{BufReader, Cursor};
 
 use unpeel_app_kit::{
     ButtonRole, CanvasControl, ListItemActionRole, ListItemSlot, MarkdownMenuTrigger, MediaSource,
-    RowPrimaryRole, SurfaceInputPolicy, UiComponent, UiEventKind, UiEventValue, UiMessage,
-    read_ui_message,
+    PageBodySlot, RowPrimaryRole, SurfaceInputPolicy, UiComponent, UiEventKind, UiEventValue,
+    UiMessage, read_ui_message,
 };
 
 const STREAM: &str = include_str!("../protocol/unpeel-ui-v1.ndjson");
@@ -18,7 +18,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 36);
+    assert_eq!(messages.len(), 42);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -434,6 +434,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
             "page",
             "list",
             "listItem",
+            "listItemRole",
             "listItemPresentation",
             "sparkline"
         ]
@@ -456,4 +457,92 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(sparkline.values().collect::<Vec<_>>(), vec![1.0, 2.0, 5.0]);
     assert_eq!(sparkline.resolved_bounds(), Some((0.0, 5.0)));
     assert_eq!(sparkline.caption.as_deref(), Some("Latest trend"));
+    assert_eq!(sparkline.activate.as_deref(), Some("open-trend"));
+
+    let UiMessage::Snapshot(bar_snapshot) = &messages[36] else {
+        panic!("BarChart fixture must be a snapshot");
+    };
+    let UiComponent::Page(page) = &bar_snapshot.root.element else {
+        panic!("BarChart fixture must remain a Page");
+    };
+    let PageBodySlot::BarChart(chart) = &page.body else {
+        panic!("Page body must carry BarChart");
+    };
+    assert_eq!(
+        chart.normalized_values(),
+        vec![12.0 / 18.0, 1.0, 7.0 / 18.0]
+    );
+    assert_eq!(
+        bar_snapshot.root.required_capabilities(),
+        vec!["page", "barChart"]
+    );
+    let UiMessage::Delta(bar_delta) = &messages[37] else {
+        panic!("BarChart fixture must have a compact delta");
+    };
+    let updated = bar_snapshot.applying(bar_delta).unwrap();
+    let UiComponent::Page(page) = updated.root.element else {
+        panic!("BarChart delta must preserve Page");
+    };
+    let PageBodySlot::BarChart(chart) = page.body else {
+        panic!("BarChart delta must preserve its slot");
+    };
+    assert_eq!(chart.bars[1].value.value(), 20.0);
+    assert_eq!(chart.activate.as_deref(), Some("next-chart"));
+
+    let UiMessage::Snapshot(line_snapshot) = &messages[38] else {
+        panic!("LineChart fixture must be a snapshot");
+    };
+    let UiComponent::Page(page) = &line_snapshot.root.element else {
+        panic!("LineChart fixture must remain a Page");
+    };
+    let PageBodySlot::LineChart(chart) = &page.body else {
+        panic!("Page body must carry LineChart");
+    };
+    assert_eq!(chart.resolved_x_bounds(), (0.0, 2.0));
+    assert_eq!(chart.resolved_y_bounds(), (0.0, 8.0));
+    assert_eq!(chart.series[1].name, "Forecast");
+    assert_eq!(
+        line_snapshot.root.required_capabilities(),
+        vec!["page", "lineChart"]
+    );
+    let UiMessage::Delta(line_delta) = &messages[39] else {
+        panic!("LineChart fixture must have a compact delta");
+    };
+    let updated = line_snapshot.applying(line_delta).unwrap();
+    let UiComponent::Page(page) = updated.root.element else {
+        panic!("LineChart delta must preserve Page");
+    };
+    let PageBodySlot::LineChart(chart) = page.body else {
+        panic!("LineChart delta must preserve its slot");
+    };
+    assert_eq!(chart.series[0].points[2].y.value(), 7.0);
+    assert_eq!(chart.activate.as_deref(), Some("next-chart"));
+
+    let UiMessage::Snapshot(gauge_snapshot) = &messages[40] else {
+        panic!("Gauge fixture must be a snapshot");
+    };
+    let UiComponent::Page(page) = &gauge_snapshot.root.element else {
+        panic!("Gauge fixture must remain a Page");
+    };
+    let PageBodySlot::Gauge(gauge) = &page.body else {
+        panic!("Page body must carry Gauge");
+    };
+    assert_eq!(gauge.ratio.value(), 0.64);
+    assert_eq!(gauge.percentage_label(), "Deployment  64%");
+    assert_eq!(
+        gauge_snapshot.root.required_capabilities(),
+        vec!["page", "gauge"]
+    );
+    let UiMessage::Delta(gauge_delta) = &messages[41] else {
+        panic!("Gauge fixture must have a compact delta");
+    };
+    let updated = gauge_snapshot.applying(gauge_delta).unwrap();
+    let UiComponent::Page(page) = updated.root.element else {
+        panic!("Gauge delta must preserve Page");
+    };
+    let PageBodySlot::Gauge(gauge) = page.body else {
+        panic!("Gauge delta must preserve its slot");
+    };
+    assert_eq!(gauge.ratio.value(), 0.82);
+    assert_eq!(gauge.activate.as_deref(), Some("next-chart"));
 }

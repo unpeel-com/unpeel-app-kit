@@ -30,7 +30,7 @@ extension DemoKind {
                     root
                     .appendingPathComponent("config/unpeel-apps", isDirectory: true).path
             ]
-        case .diffsApp, .filetreeApp, .todo, .markdown, .media, .surface, .canvas:
+        case .diffsApp, .filetreeApp, .charts, .todo, .markdown, .media, .surface, .canvas:
             return [:]
         }
     }
@@ -55,7 +55,7 @@ extension DemoKind {
             try prepareMarkdownFixture(workspace: workspace)
         case .filetreeApp:
             try prepareFileTreeFixture(workspace: workspace)
-        case .todo, .markdown, .media, .surface, .canvas:
+        case .charts, .todo, .markdown, .media, .surface, .canvas:
             break
         }
     }

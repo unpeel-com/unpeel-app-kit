@@ -16,8 +16,13 @@ use std::io::{self, BufRead, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+use crate::bar_chart::{BarChart, BarChartBar};
 use crate::components::{ListItem, Page, PageBodySlot};
 use crate::content::{ContentLine, ContentSelection};
+use crate::gauge::Gauge;
+#[cfg(test)]
+use crate::line_chart::LineChartPoint;
+use crate::line_chart::{LineChart, LineChartAxis, LineChartSeries};
 use crate::markdown::MarkdownCommandHint;
 use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
 use crate::semantic_menu::SemanticMenu;
@@ -1248,6 +1253,47 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
             }
             operations
         }
+        (PageBodySlot::Sparkline(previous_sparkline), PageBodySlot::Sparkline(next_sparkline)) => {
+            if previous_sparkline.id != next_sparkline.id
+                || previous_sparkline.activate != next_sparkline.activate
+            {
+                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+            }
+            (previous_sparkline != next_sparkline)
+                .then(|| UiDeltaOperation::sparkline_set_data(next_sparkline))
+                .into_iter()
+                .collect()
+        }
+        (PageBodySlot::BarChart(previous_chart), PageBodySlot::BarChart(next_chart)) => {
+            if previous_chart.id != next_chart.id || previous_chart.activate != next_chart.activate
+            {
+                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+            }
+            (previous_chart != next_chart)
+                .then(|| UiDeltaOperation::bar_chart_set_data(next_chart))
+                .into_iter()
+                .collect()
+        }
+        (PageBodySlot::LineChart(previous_chart), PageBodySlot::LineChart(next_chart)) => {
+            if previous_chart.id != next_chart.id || previous_chart.activate != next_chart.activate
+            {
+                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+            }
+            (previous_chart != next_chart)
+                .then(|| UiDeltaOperation::line_chart_set_data(next_chart))
+                .into_iter()
+                .collect()
+        }
+        (PageBodySlot::Gauge(previous_gauge), PageBodySlot::Gauge(next_gauge)) => {
+            if previous_gauge.id != next_gauge.id || previous_gauge.activate != next_gauge.activate
+            {
+                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+            }
+            (previous_gauge != next_gauge)
+                .then(|| UiDeltaOperation::gauge_set_data(next_gauge))
+                .into_iter()
+                .collect()
+        }
         _ => vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }],
     }
 }
@@ -1267,6 +1313,7 @@ fn list_sparkline_delta_operations(
             Some(crate::ListItemSlot::Sparkline(next_sparkline)),
         ) = (&candidate.trailing, &next_item.trailing)
             && previous_sparkline.id == next_sparkline.id
+            && previous_sparkline.activate == next_sparkline.activate
             && previous_sparkline != next_sparkline
         {
             operations.push(UiDeltaOperation::sparkline_set_data(next_sparkline));
@@ -1466,6 +1513,27 @@ pub enum UiDeltaOperation {
         unit: Option<String>,
         accessibility_text: String,
     },
+    /// Replaces one keyed BarChart's bars and accessibility description.
+    BarChartSetData {
+        node_id: String,
+        bars: Vec<BarChartBar>,
+        accessibility_text: String,
+    },
+    /// Replaces one keyed LineChart's complete series and axis data.
+    LineChartSetData {
+        node_id: String,
+        series: Vec<LineChartSeries>,
+        x_axis: LineChartAxis,
+        y_axis: LineChartAxis,
+        accessibility_text: String,
+    },
+    /// Replaces one keyed Gauge's ratio, label, and accessibility description.
+    GaugeSetData {
+        node_id: String,
+        ratio: SparklinePoint,
+        label: String,
+        accessibility_text: String,
+    },
     InputSetValue {
         node_id: String,
         value: String,
@@ -1594,6 +1662,36 @@ impl UiDeltaOperation {
     }
 
     #[must_use]
+    pub fn bar_chart_set_data(chart: &BarChart) -> Self {
+        Self::BarChartSetData {
+            node_id: chart.id.clone(),
+            bars: chart.bars.clone(),
+            accessibility_text: chart.accessibility_text.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn line_chart_set_data(chart: &LineChart) -> Self {
+        Self::LineChartSetData {
+            node_id: chart.id.clone(),
+            series: chart.series.clone(),
+            x_axis: chart.x_axis.clone(),
+            y_axis: chart.y_axis.clone(),
+            accessibility_text: chart.accessibility_text.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn gauge_set_data(gauge: &Gauge) -> Self {
+        Self::GaugeSetData {
+            node_id: gauge.id.clone(),
+            ratio: gauge.ratio,
+            label: gauge.label.clone(),
+            accessibility_text: gauge.accessibility_text.clone(),
+        }
+    }
+
+    #[must_use]
     pub fn input_set_value(node_id: impl Into<String>, value: impl Into<String>) -> Self {
         Self::InputSetValue {
             node_id: node_id.into(),
@@ -1716,6 +1814,55 @@ impl UiDeltaOperation {
                 caption: caption.clone(),
                 unit: unit.clone(),
                 accessibility_text: accessibility_text.clone(),
+                activate: None,
+            }
+            .validate(path)
+            .map_err(|error| {
+                UiProtocolError::InvalidView(UiValidationError::new(error.path, error.message))
+            }),
+            Self::BarChartSetData {
+                node_id,
+                bars,
+                accessibility_text,
+            } => BarChart {
+                id: node_id.clone(),
+                bars: bars.clone(),
+                accessibility_text: accessibility_text.clone(),
+                activate: None,
+            }
+            .validate(path)
+            .map_err(|error| {
+                UiProtocolError::InvalidView(UiValidationError::new(error.path, error.message))
+            }),
+            Self::LineChartSetData {
+                node_id,
+                series,
+                x_axis,
+                y_axis,
+                accessibility_text,
+            } => LineChart {
+                id: node_id.clone(),
+                series: series.clone(),
+                x_axis: x_axis.clone(),
+                y_axis: y_axis.clone(),
+                accessibility_text: accessibility_text.clone(),
+                activate: None,
+            }
+            .validate(path)
+            .map_err(|error| {
+                UiProtocolError::InvalidView(UiValidationError::new(error.path, error.message))
+            }),
+            Self::GaugeSetData {
+                node_id,
+                ratio,
+                label,
+                accessibility_text,
+            } => Gauge {
+                id: node_id.clone(),
+                ratio: *ratio,
+                label: label.clone(),
+                accessibility_text: accessibility_text.clone(),
+                activate: None,
             }
             .validate(path)
             .map_err(|error| {
@@ -1984,6 +2131,55 @@ impl UiNode {
                             caption: caption.clone(),
                             unit: unit.clone(),
                             accessibility_text: accessibility_text.clone(),
+                            activate: None,
+                        })
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::BarChartSetData {
+                    node_id,
+                    bars,
+                    accessibility_text,
+                } => {
+                    self.page_mut(index)?
+                        .set_bar_chart_data(BarChart {
+                            id: node_id.clone(),
+                            bars: bars.clone(),
+                            accessibility_text: accessibility_text.clone(),
+                            activate: None,
+                        })
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::LineChartSetData {
+                    node_id,
+                    series,
+                    x_axis,
+                    y_axis,
+                    accessibility_text,
+                } => {
+                    self.page_mut(index)?
+                        .set_line_chart_data(LineChart {
+                            id: node_id.clone(),
+                            series: series.clone(),
+                            x_axis: x_axis.clone(),
+                            y_axis: y_axis.clone(),
+                            accessibility_text: accessibility_text.clone(),
+                            activate: None,
+                        })
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::GaugeSetData {
+                    node_id,
+                    ratio,
+                    label,
+                    accessibility_text,
+                } => {
+                    self.page_mut(index)?
+                        .set_gauge_data(Gauge {
+                            id: node_id.clone(),
+                            ratio: *ratio,
+                            label: label.clone(),
+                            accessibility_text: accessibility_text.clone(),
+                            activate: None,
                         })
                         .map_err(|error| component_delta_error(index, error))?;
                 }
@@ -3592,6 +3788,98 @@ mod tests {
         let mut applied = previous;
         applied.apply_delta_operations(&operations).unwrap();
         assert_eq!(applied, next);
+    }
+
+    #[test]
+    fn page_diff_uses_keyed_data_operations_for_every_full_chart() {
+        let assert_compact =
+            |previous: UiNode, next: UiNode, expected: fn(&UiDeltaOperation) -> bool| {
+                let operations = page_delta_operations(&previous, &next);
+                assert_eq!(operations.len(), 1);
+                assert!(expected(&operations[0]));
+                let mut applied = previous;
+                applied.apply_delta_operations(&operations).unwrap();
+                assert_eq!(applied, next);
+            };
+
+        assert_compact(
+            UiNode::page(
+                "page",
+                Page::with_sparkline(
+                    "Sparkline",
+                    Sparkline::new("spark", [1.0, 2.0], "One, two").activate("open"),
+                ),
+            ),
+            UiNode::page(
+                "page",
+                Page::with_sparkline(
+                    "Sparkline",
+                    Sparkline::new("spark", [2.0, 3.0], "Two, three").activate("open"),
+                ),
+            ),
+            |operation| matches!(operation, UiDeltaOperation::SparklineSetData { .. }),
+        );
+        assert_compact(
+            UiNode::page(
+                "page",
+                Page::with_bar_chart(
+                    "Bars",
+                    BarChart::new("bars", [BarChartBar::new("A", 1.0)], "A one").activate("open"),
+                ),
+            ),
+            UiNode::page(
+                "page",
+                Page::with_bar_chart(
+                    "Bars",
+                    BarChart::new("bars", [BarChartBar::new("A", 2.0)], "A two").activate("open"),
+                ),
+            ),
+            |operation| matches!(operation, UiDeltaOperation::BarChartSetData { .. }),
+        );
+        assert_compact(
+            UiNode::page(
+                "page",
+                Page::with_line_chart(
+                    "Lines",
+                    LineChart::new(
+                        "lines",
+                        [LineChartSeries::new("A", [LineChartPoint::new(0.0, 1.0)])],
+                        "A one",
+                    )
+                    .activate("open"),
+                ),
+            ),
+            UiNode::page(
+                "page",
+                Page::with_line_chart(
+                    "Lines",
+                    LineChart::new(
+                        "lines",
+                        [LineChartSeries::new("A", [LineChartPoint::new(0.0, 2.0)])],
+                        "A two",
+                    )
+                    .activate("open"),
+                ),
+            ),
+            |operation| matches!(operation, UiDeltaOperation::LineChartSetData { .. }),
+        );
+        assert_compact(
+            UiNode::page(
+                "page",
+                Page::with_gauge(
+                    "Gauge",
+                    Gauge::new("gauge", 0.25, "Build", "Build 25 percent").activate("open"),
+                ),
+            ),
+            UiNode::page(
+                "page",
+                Page::with_gauge(
+                    "Gauge",
+                    Gauge::new("gauge", 0.75, "Build", "Build 75 percent").activate("open"),
+                ),
+            ),
+            |operation| matches!(operation, UiDeltaOperation::GaugeSetData { .. }),
+        );
     }
 
     #[test]

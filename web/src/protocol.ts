@@ -19,6 +19,9 @@ export const UI_LIST_SELECTION_CAPABILITY = "listSelection" as const;
 export const UI_STATUS_SYMBOL_CAPABILITY = "statusSymbol" as const;
 export const UI_BADGE_CAPABILITY = "badge" as const;
 export const UI_SPARKLINE_CAPABILITY = "sparkline" as const;
+export const UI_BAR_CHART_CAPABILITY = "barChart" as const;
+export const UI_LINE_CHART_CAPABILITY = "lineChart" as const;
+export const UI_GAUGE_CAPABILITY = "gauge" as const;
 export const UI_TOGGLE_CAPABILITY = "toggle" as const;
 export const UI_INPUT_CAPABILITY = "input" as const;
 export const UI_BUTTON_CAPABILITY = "button" as const;
@@ -49,6 +52,9 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_STATUS_SYMBOL_CAPABILITY,
   UI_BADGE_CAPABILITY,
   UI_SPARKLINE_CAPABILITY,
+  UI_BAR_CHART_CAPABILITY,
+  UI_LINE_CHART_CAPABILITY,
+  UI_GAUGE_CAPABILITY,
   UI_TOGGLE_CAPABILITY,
   UI_INPUT_CAPABILITY,
   UI_BUTTON_CAPABILITY,
@@ -373,6 +379,63 @@ export interface SparklineSpec {
   caption?: string;
   unit?: string;
   accessibilityText: string;
+  activate?: string;
+}
+
+export type BarChartEmphasis = "default" | "accent" | "danger";
+
+export interface BarChartBar {
+  label: string;
+  value: number;
+  valueCaption?: string;
+  emphasis?: BarChartEmphasis;
+}
+
+export interface BarChartSpec {
+  type: "barChart";
+  id: string;
+  bars: BarChartBar[];
+  accessibilityText: string;
+  activate?: string;
+}
+
+export interface LineChartPoint {
+  x: number;
+  y: number;
+}
+
+export interface LineChartSeries {
+  name: string;
+  points: LineChartPoint[];
+}
+
+export interface LineChartBounds {
+  min: number;
+  max: number;
+}
+
+export interface LineChartAxis {
+  bounds?: LineChartBounds;
+  label?: string;
+}
+
+export interface LineChartSpec {
+  type: "lineChart";
+  id: string;
+  series: LineChartSeries[];
+  xAxis?: LineChartAxis;
+  yAxis?: LineChartAxis;
+  accessibilityText: string;
+  activate?: string;
+}
+
+export interface GaugeSpec {
+  type: "gauge";
+  id: string;
+  ratio: number;
+  label: string;
+  accessibilityText: string;
+  activate?: string;
 }
 
 export interface UnsupportedComponentSlot {
@@ -462,13 +525,16 @@ export interface InputSpec {
   submit?: string;
 }
 
+export type PageBodySpec = ListSpec | ContentSpec | SparklineSpec | BarChartSpec | LineChartSpec
+  | GaugeSpec | UnsupportedComponentSlot;
+
 export interface PageNode {
   id: string;
   type: "page";
   title: string;
   back?: string;
   header?: InputSpec | UnsupportedComponentSlot;
-  body: ListSpec | ContentSpec | UnsupportedComponentSlot;
+  body: PageBodySpec;
 }
 
 export type TreePresentation = "drillDown" | "outline";
@@ -662,6 +728,56 @@ export function normalizedSparklineSeries(sparkline: SparklineSpec): number[] {
   return sparkline.series.map((value) => Math.min(Math.max((value - lower) / range, 0), 1));
 }
 
+export function isBarChartSpec(slot: PageBodySpec): slot is BarChartSpec {
+  return slot.type === "barChart" && Array.isArray((slot as Partial<BarChartSpec>).bars);
+}
+
+export function isLineChartSpec(slot: PageBodySpec): slot is LineChartSpec {
+  return slot.type === "lineChart" && Array.isArray((slot as Partial<LineChartSpec>).series);
+}
+
+export function isGaugeSpec(slot: PageBodySpec): slot is GaugeSpec {
+  return slot.type === "gauge" && typeof (slot as Partial<GaugeSpec>).ratio === "number";
+}
+
+export function isSparklineBodySpec(slot: PageBodySpec): slot is SparklineSpec {
+  return slot.type === "sparkline" && Array.isArray((slot as Partial<SparklineSpec>).series);
+}
+
+export function normalizedBarChartValues(chart: BarChartSpec): number[] {
+  let maximum = 0;
+  for (const bar of chart.bars) maximum = Math.max(maximum, bar.value);
+  maximum = Math.max(maximum, 1);
+  return chart.bars.map((bar) => Math.min(Math.max(bar.value / maximum, 0), 1));
+}
+
+export function resolvedLineChartBounds(
+  chart: LineChartSpec,
+  axis: "x" | "y",
+): [number, number] {
+  const spec = axis === "x" ? chart.xAxis : chart.yAxis;
+  if (spec?.bounds !== undefined) return [spec.bounds.min, spec.bounds.max];
+  let lower = Number.POSITIVE_INFINITY;
+  let upper = Number.NEGATIVE_INFINITY;
+  for (const series of chart.series) {
+    for (const point of series.points) {
+      const value = axis === "x" ? point.x : point.y;
+      lower = Math.min(lower, value);
+      upper = Math.max(upper, value);
+    }
+  }
+  if (lower === upper) upper = lower + 1;
+  return [lower, upper];
+}
+
+export function gaugePercentageLabel(gauge: GaugeSpec): string {
+  return gauge.label + "  " + gaugePercentageValueLabel(gauge);
+}
+
+export function gaugePercentageValueLabel(gauge: GaugeSpec): string {
+  return String(Math.round(gauge.ratio * 100)) + "%";
+}
+
 export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
   const slots = [item.leading, item.trailing, item.accessory].filter(
     (slot): slot is ListItemSlot => slot !== undefined,
@@ -669,6 +785,9 @@ export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
   if (slots.some(isToggleSlot)) return "toggle";
   if (slots.some(isCheckmarkSlot)) return "checkmark";
   if (slots.some(isDisclosureSlot)) return "disclosure";
+  if (slots.some((slot) => isSparklineSlot(slot) && slot.activate !== undefined)) {
+    return "command";
+  }
   if (item.activate !== undefined) {
     return item.actionRole === "destructive" ? "destructive" : "command";
   }
@@ -676,13 +795,13 @@ export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
 }
 
 export function isListSpec(
-  slot: ListSpec | ContentSpec | UnsupportedComponentSlot,
+  slot: PageBodySpec,
 ): slot is ListSpec {
   return slot.type === "list" && Array.isArray(slot.items);
 }
 
 export function isContentSpec(
-  slot: ListSpec | ContentSpec | UnsupportedComponentSlot,
+  slot: PageBodySpec,
 ): slot is ContentSpec {
   return slot.type === "content" && Array.isArray(slot.lines);
 }
@@ -711,6 +830,16 @@ export function isRenderableContentPageNode(node: UiNode): node is PageNode & {
     && isContentSpec(node.body)
     && (node.header === undefined || isInputSpec(node.header))
     && isValidContent(node.body);
+}
+
+export function isRenderableChartPageNode(node: UiNode): node is PageNode & {
+  header?: InputSpec;
+  body: SparklineSpec | BarChartSpec | LineChartSpec | GaugeSpec;
+} {
+  return isPageNode(node)
+    && (isSparklineBodySpec(node.body) || isBarChartSpec(node.body)
+      || isLineChartSpec(node.body) || isGaugeSpec(node.body))
+    && (node.header === undefined || isInputSpec(node.header));
 }
 
 /** Capability required for a known root, or undefined for an unknown kind. */
@@ -762,6 +891,19 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
     if (node.contextMenu !== undefined) {
       capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
     }
+    return capabilities;
+  }
+  if (isRenderableChartPageNode(node)) {
+    const capability = isSparklineBodySpec(node.body)
+      ? UI_SPARKLINE_CAPABILITY
+      : isBarChartSpec(node.body)
+        ? UI_BAR_CHART_CAPABILITY
+        : isLineChartSpec(node.body)
+          ? UI_LINE_CHART_CAPABILITY
+          : UI_GAUGE_CAPABILITY;
+    const capabilities: string[] = [UI_PAGE_CAPABILITY, capability];
+    if (node.header !== undefined) capabilities.push(UI_INPUT_CAPABILITY);
+    if (node.back !== undefined) capabilities.push(UI_PAGE_BACK_CAPABILITY);
     return capabilities;
   }
   if (!isRenderablePageNode(node) && !isRenderableContentPageNode(node)) return undefined;
@@ -938,6 +1080,27 @@ export type UiDeltaOperation =
     max: number | null;
     caption: string | null;
     unit: string | null;
+    accessibilityText: string;
+  }
+  | {
+    op: "barChartSetData";
+    nodeId: string;
+    bars: BarChartBar[];
+    accessibilityText: string;
+  }
+  | {
+    op: "lineChartSetData";
+    nodeId: string;
+    series: LineChartSeries[];
+    xAxis: LineChartAxis;
+    yAxis: LineChartAxis;
+    accessibilityText: string;
+  }
+  | {
+    op: "gaugeSetData";
+    nodeId: string;
+    ratio: number;
+    label: string;
     accessibilityText: string;
   }
   | { op: "inputSetValue"; nodeId: string; value: string }
@@ -1350,8 +1513,7 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     return { ...page, body: { ...page.body, items } };
   }
   if (operation.op === "sparklineSetData") {
-    const page = requireListPage(root);
-    const sparkline: SparklineSpec = {
+    const replace = (existing: SparklineSpec): SparklineSpec => ({
       type: "sparkline",
       id: operation.nodeId,
       series: operation.series,
@@ -1360,16 +1522,67 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       ...(operation.max === null ? {} : { max: operation.max }),
       ...(operation.caption === null ? {} : { caption: operation.caption }),
       ...(operation.unit === null ? {} : { unit: operation.unit }),
-    };
+      ...(existing.activate === undefined ? {} : { activate: existing.activate }),
+    });
+    if (isPageNode(root) && isSparklineBodySpec(root.body)
+      && root.body.id === operation.nodeId) {
+      return { ...root, body: replace(root.body) };
+    }
+    const page = requireListPage(root);
     let matched = false;
     const items = page.body.items.map((item) => {
       if (item.trailing === undefined || !isSparklineSlot(item.trailing)
         || item.trailing.id !== operation.nodeId) return item;
       matched = true;
-      return { ...item, trailing: sparkline };
+      return { ...item, trailing: replace(item.trailing) };
     });
     if (!matched) throw new Error("Delta targets an unavailable Sparkline");
     return { ...page, body: { ...page.body, items } };
+  }
+  if (operation.op === "barChartSetData") {
+    if (!isPageNode(root) || !isBarChartSpec(root.body)
+      || root.body.id !== operation.nodeId) {
+      throw new Error("Delta targets an unavailable BarChart");
+    }
+    const body: BarChartSpec = {
+      type: "barChart",
+      id: operation.nodeId,
+      bars: operation.bars,
+      accessibilityText: operation.accessibilityText,
+      ...(root.body.activate === undefined ? {} : { activate: root.body.activate }),
+    };
+    return { ...root, body };
+  }
+  if (operation.op === "lineChartSetData") {
+    if (!isPageNode(root) || !isLineChartSpec(root.body)
+      || root.body.id !== operation.nodeId) {
+      throw new Error("Delta targets an unavailable LineChart");
+    }
+    const body: LineChartSpec = {
+      type: "lineChart",
+      id: operation.nodeId,
+      series: operation.series,
+      xAxis: operation.xAxis,
+      yAxis: operation.yAxis,
+      accessibilityText: operation.accessibilityText,
+      ...(root.body.activate === undefined ? {} : { activate: root.body.activate }),
+    };
+    return { ...root, body };
+  }
+  if (operation.op === "gaugeSetData") {
+    if (!isPageNode(root) || !isGaugeSpec(root.body)
+      || root.body.id !== operation.nodeId) {
+      throw new Error("Delta targets an unavailable Gauge");
+    }
+    const body: GaugeSpec = {
+      type: "gauge",
+      id: operation.nodeId,
+      ratio: operation.ratio,
+      label: operation.label,
+      accessibilityText: operation.accessibilityText,
+      ...(root.body.activate === undefined ? {} : { activate: root.body.activate }),
+    };
+    return { ...root, body };
   }
   if (operation.op === "inputSetValue") {
     const page = requireRenderablePage(root);
@@ -1602,9 +1815,10 @@ function updateTreeItem(
 
 function requireRenderablePage(root: UiNode): PageNode & {
   header?: InputSpec;
-  body: ListSpec | ContentSpec;
+  body: ListSpec | ContentSpec | SparklineSpec | BarChartSpec | LineChartSpec | GaugeSpec;
 } {
-  if (!isRenderablePageNode(root) && !isRenderableContentPageNode(root)) {
+  if (!isRenderablePageNode(root) && !isRenderableContentPageNode(root)
+    && !isRenderableChartPageNode(root)) {
     throw new Error("Delta targets an unavailable Page");
   }
   return root;
@@ -1988,6 +2202,22 @@ function validatePageNode(root: Record<string, unknown>, path: string): void {
     validateContentSpec(body, `${path}.body`, register);
     return;
   }
+  if (body.type === "sparkline") {
+    validateSparkline(body, `${path}.body`, register);
+    return;
+  }
+  if (body.type === "barChart") {
+    validateBarChart(body, `${path}.body`, register);
+    return;
+  }
+  if (body.type === "lineChart") {
+    validateLineChart(body, `${path}.body`, register);
+    return;
+  }
+  if (body.type === "gauge") {
+    validateGauge(body, `${path}.body`, register);
+    return;
+  }
   if (body.type !== "list") return;
   register(body.id, `${path}.body.id`);
   if (body.emptyMessage !== undefined) {
@@ -2199,6 +2429,11 @@ function validateListItem(
   const independentRoles = Number(toggleValues.length > 0)
     + Number(checkmarkCount > 0)
     + Number(disclosureCount > 0)
+    + Number([item.leading, item.trailing, item.accessory].some((value) => {
+      if (value === undefined) return false;
+      const slot = record(value, `${path}.slots`);
+      return slot.type === "sparkline" && slot.activate !== undefined;
+    }))
     + Number(item.activate !== undefined && disclosureCount === 0);
   if (independentRoles > 1) throw new Error(`${path} primary role is ambiguous`);
   if (item.actionRole === "destructive"
@@ -2238,13 +2473,135 @@ function validateSparkline(
   }
   for (const name of ["caption", "unit"] as const) {
     if (sparkline[name] !== undefined) {
-      requireString(sparkline[name], `${path}.${name}`, true);
-      requireSingleLine(sparkline[name], `${path}.${name}`);
+      requireChartLabel(sparkline[name], `${path}.${name}`, true);
     }
   }
-  requireString(sparkline.accessibilityText, `${path}.accessibilityText`);
-  if ((sparkline.accessibilityText as string).trim().length === 0) {
-    throw new Error(`${path}.accessibilityText must not be empty`);
+  requireChartAccessibility(sparkline.accessibilityText, `${path}.accessibilityText`);
+  if (sparkline.activate !== undefined) {
+    requireIdentifier(sparkline.activate, `${path}.activate`);
+  }
+}
+
+function validateBarChart(
+  value: unknown,
+  path: string,
+  register: (value: unknown, valuePath: string) => void,
+): void {
+  const chart = record(value, path);
+  register(chart.id, `${path}.id`);
+  if (!Array.isArray(chart.bars) || chart.bars.length === 0 || chart.bars.length > 1_000) {
+    throw new Error(`${path}.bars must contain 1...1000 bars`);
+  }
+  for (const [index, value] of chart.bars.entries()) {
+    const barPath = `${path}.bars[${index}]`;
+    const bar = record(value, barPath);
+    requireChartLabel(bar.label, `${barPath}.label`);
+    requireFiniteNumber(bar.value, `${barPath}.value`);
+    if ((bar.value as number) < 0) throw new Error(`${barPath}.value must be non-negative`);
+    if (bar.valueCaption !== undefined) {
+      requireChartLabel(bar.valueCaption, `${barPath}.valueCaption`, true);
+    }
+    if (bar.emphasis !== undefined
+      && !["default", "accent", "danger"].includes(String(bar.emphasis))) {
+      throw new Error(`${barPath}.emphasis is unsupported`);
+    }
+  }
+  requireChartAccessibility(chart.accessibilityText, `${path}.accessibilityText`);
+  if (chart.activate !== undefined) requireIdentifier(chart.activate, `${path}.activate`);
+}
+
+function validateLineChart(
+  value: unknown,
+  path: string,
+  register: (value: unknown, valuePath: string) => void,
+): void {
+  const chart = record(value, path);
+  register(chart.id, `${path}.id`);
+  if (!Array.isArray(chart.series) || chart.series.length === 0 || chart.series.length > 16) {
+    throw new Error(`${path}.series must contain 1...16 series`);
+  }
+  const names = new Set<string>();
+  const points: Array<{ x: number; y: number }> = [];
+  for (const [seriesIndex, value] of chart.series.entries()) {
+    const seriesPath = `${path}.series[${seriesIndex}]`;
+    const series = record(value, seriesPath);
+    requireChartLabel(series.name, `${seriesPath}.name`);
+    if (names.has(series.name as string)) {
+      throw new Error(`${seriesPath}.name must be unique`);
+    }
+    names.add(series.name as string);
+    if (!Array.isArray(series.points) || series.points.length === 0) {
+      throw new Error(`${seriesPath}.points must not be empty`);
+    }
+    for (const [pointIndex, value] of series.points.entries()) {
+      const pointPath = `${seriesPath}.points[${pointIndex}]`;
+      const point = record(value, pointPath);
+      requireFiniteNumber(point.x, `${pointPath}.x`);
+      requireFiniteNumber(point.y, `${pointPath}.y`);
+      points.push({ x: point.x as number, y: point.y as number });
+      if (points.length > 100_000) {
+        throw new Error(`${path}.series must contain at most 100000 total points`);
+      }
+    }
+  }
+  validateLineChartAxis(chart.xAxis, `${path}.xAxis`, points.map((point) => point.x));
+  validateLineChartAxis(chart.yAxis, `${path}.yAxis`, points.map((point) => point.y));
+  requireChartAccessibility(chart.accessibilityText, `${path}.accessibilityText`);
+  if (chart.activate !== undefined) requireIdentifier(chart.activate, `${path}.activate`);
+}
+
+function validateLineChartAxis(value: unknown, path: string, points: readonly number[]): void {
+  if (value === undefined) return;
+  const axis = record(value, path);
+  if (axis.label !== undefined) requireChartLabel(axis.label, `${path}.label`, true);
+  if (axis.bounds === undefined) return;
+  const bounds = record(axis.bounds, `${path}.bounds`);
+  requireFiniteNumber(bounds.min, `${path}.bounds.min`);
+  requireFiniteNumber(bounds.max, `${path}.bounds.max`);
+  const minimum = bounds.min as number;
+  const maximum = bounds.max as number;
+  if (minimum >= maximum) throw new Error(`${path}.bounds.min must be less than max`);
+  if (points.some((point) => point < minimum || point > maximum)) {
+    throw new Error(`${path}.bounds must contain every series point`);
+  }
+}
+
+function validateGauge(
+  value: unknown,
+  path: string,
+  register: (value: unknown, valuePath: string) => void,
+): void {
+  const gauge = record(value, path);
+  register(gauge.id, `${path}.id`);
+  requireFiniteNumber(gauge.ratio, `${path}.ratio`);
+  if ((gauge.ratio as number) < 0 || (gauge.ratio as number) > 1) {
+    throw new Error(`${path}.ratio must be between zero and one`);
+  }
+  requireChartLabel(gauge.label, `${path}.label`);
+  requireChartAccessibility(gauge.accessibilityText, `${path}.accessibilityText`);
+  if (gauge.activate !== undefined) requireIdentifier(gauge.activate, `${path}.activate`);
+}
+
+function requireFiniteNumber(value: unknown, path: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${path} must be a finite number`);
+  }
+}
+
+function requireChartLabel(value: unknown, path: string, allowEmpty = false): void {
+  requireString(value, path, allowEmpty);
+  requireSingleLine(value, path);
+  if (value.includes("\0") || (!allowEmpty && value.trim().length === 0)
+    || new TextEncoder().encode(value).length > 4_096) {
+    throw new Error(`${path} must be ${allowEmpty ? "a" : "a non-empty"} single line of at most 4096 bytes`);
+  }
+}
+
+function requireChartAccessibility(value: unknown, path: string): void {
+  requireString(value, path);
+  if (value.includes("\0") || value.includes("\r") || value.trim().length === 0
+    || new TextEncoder().encode(value).length > 16_384) {
+    throw new Error(`${path} must contain 1...16384 non-whitespace bytes`);
   }
 }
 
@@ -2523,6 +2880,36 @@ function validateDeltaOperation(value: unknown, path: string): void {
         max: operation.max ?? undefined,
         caption: operation.caption ?? undefined,
         unit: operation.unit ?? undefined,
+        accessibilityText: operation.accessibilityText,
+      }, path, requireIdentifier);
+      return;
+    case "barChartSetData":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateBarChart({
+        type: "barChart",
+        id: operation.nodeId,
+        bars: operation.bars,
+        accessibilityText: operation.accessibilityText,
+      }, path, requireIdentifier);
+      return;
+    case "lineChartSetData":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateLineChart({
+        type: "lineChart",
+        id: operation.nodeId,
+        series: operation.series,
+        xAxis: operation.xAxis,
+        yAxis: operation.yAxis,
+        accessibilityText: operation.accessibilityText,
+      }, path, requireIdentifier);
+      return;
+    case "gaugeSetData":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateGauge({
+        type: "gauge",
+        id: operation.nodeId,
+        ratio: operation.ratio,
+        label: operation.label,
         accessibilityText: operation.accessibilityText,
       }, path, requireIdentifier);
       return;

@@ -602,9 +602,116 @@
         },
         "min": { "type": "number" },
         "max": { "type": "number" },
-        "caption": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
-        "unit": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
-        "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384 }
+        "caption": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]*$" },
+        "unit": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]*$" },
+        "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" },
+        "activate": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "barChartEmphasis": {
+      "enum": ["default", "accent", "danger"]
+    },
+    "barChartBar": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["label", "value"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "value": { "type": "number", "minimum": 0 },
+        "valueCaption": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]*$" },
+        "emphasis": { "$ref": "#/$defs/barChartEmphasis", "default": "default" }
+      }
+    },
+    "barChart": {
+      "description": "Minimal categorical chart with labeled non-negative numeric bars.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "bars", "accessibilityText"],
+      "properties": {
+        "type": { "const": "barChart" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "bars": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/barChartBar" }
+        },
+        "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" },
+        "activate": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "lineChartPoint": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["x", "y"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "lineChartSeries": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "points"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "points": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100000,
+          "items": { "$ref": "#/$defs/lineChartPoint" }
+        }
+      }
+    },
+    "lineChartBounds": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["min", "max"],
+      "properties": {
+        "min": { "type": "number" },
+        "max": { "type": "number" }
+      }
+    },
+    "lineChartAxis": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "bounds": { "$ref": "#/$defs/lineChartBounds" },
+        "label": { "type": "string", "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]*$" }
+      }
+    },
+    "lineChart": {
+      "description": "Minimal multi-series x/y line chart with optional axis bounds and labels.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "series", "accessibilityText"],
+      "properties": {
+        "type": { "const": "lineChart" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/lineChartSeries" }
+        },
+        "xAxis": { "$ref": "#/$defs/lineChartAxis" },
+        "yAxis": { "$ref": "#/$defs/lineChartAxis" },
+        "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" },
+        "activate": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "gauge": {
+      "description": "Minimal labeled ratio from zero through one.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "ratio", "label", "accessibilityText"],
+      "properties": {
+        "type": { "const": "gauge" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" },
+        "activate": { "$ref": "#/$defs/identifier" }
       }
     },
     "unsupportedRowSlot": {
@@ -763,7 +870,7 @@
       "properties": { "type": { "$ref": "#/$defs/identifier" } },
       "not": {
         "required": ["type"],
-        "properties": { "type": { "enum": ["list", "content"] } }
+        "properties": { "type": { "enum": ["list", "content", "sparkline", "barChart", "lineChart", "gauge"] } }
       }
     },
     "page": {
@@ -785,6 +892,10 @@
           "oneOf": [
             { "$ref": "#/$defs/list" },
             { "$ref": "#/$defs/content" },
+            { "$ref": "#/$defs/sparkline" },
+            { "$ref": "#/$defs/barChart" },
+            { "$ref": "#/$defs/lineChart" },
+            { "$ref": "#/$defs/gauge" },
             { "$ref": "#/$defs/unsupportedBodySlot" }
           ]
         }
@@ -1128,9 +1239,55 @@
             },
             "min": { "type": ["number", "null"] },
             "max": { "type": ["number", "null"] },
-            "caption": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
-            "unit": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
-            "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384 }
+            "caption": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]*$" },
+            "unit": { "type": ["string", "null"], "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]*$" },
+            "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "bars", "accessibilityText"],
+          "properties": {
+            "op": { "const": "barChartSetData" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "bars": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 1000,
+              "items": { "$ref": "#/$defs/barChartBar" }
+            },
+            "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "series", "xAxis", "yAxis", "accessibilityText"],
+          "properties": {
+            "op": { "const": "lineChartSetData" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "series": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": { "$ref": "#/$defs/lineChartSeries" }
+            },
+            "xAxis": { "$ref": "#/$defs/lineChartAxis" },
+            "yAxis": { "$ref": "#/$defs/lineChartAxis" },
+            "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "ratio", "label", "accessibilityText"],
+          "properties": {
+            "op": { "const": "gaugeSetData" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+            "label": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
+            "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" }
           }
         },
         {

@@ -9,6 +9,7 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
     case githubIssuesApp = "github-issues-app"
     case markdownApp = "markdown-app"
     case filetreeApp = "filetree-app"
+    case charts
     case todo
     case markdown
     case media
@@ -24,6 +25,7 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
         case .githubIssuesApp: "GitHub Issues App"
         case .markdownApp: "Markdown App"
         case .filetreeApp: "File Tree App"
+        case .charts: "Charts"
         case .todo: "Todo"
         case .markdown: "Markdown"
         case .media: "Media"
@@ -39,6 +41,7 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
         case .githubIssuesApp: "exclamationmark.circle"
         case .markdownApp: "doc.text"
         case .filetreeApp: "folder"
+        case .charts: "chart.xyaxis.line"
         case .todo: "checklist"
         case .markdown: "doc.richtext"
         case .media: "photo"
@@ -54,7 +57,7 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
     var isCrossPlatformAuditApp: Bool {
         switch self {
         case .usageApp, .diffsApp, .githubIssuesApp, .markdownApp, .filetreeApp: true
-        case .todo, .markdown, .media, .surface, .canvas: false
+        case .charts, .todo, .markdown, .media, .surface, .canvas: false
         }
     }
 }
@@ -197,6 +200,7 @@ final class MiniHost: ObservableObject {
             targetDirectory: targetDirectory.path,
             arguments: [
                 "--features", "markdown-text-area,media,surface-embed",
+                "--example", "charts",
                 "--example", "todo",
                 "--example", "markdown",
                 "--example", "media",
@@ -231,6 +235,7 @@ final class MiniHost: ObservableObject {
             )
         }
         var examples: [(DemoKind, String, [String: String])] = [
+            (.charts, "charts", [:]),
             (.todo, "todo", [:]),
             (.markdown, "markdown", [:]),
             (.media, "media", [:]),
@@ -577,21 +582,37 @@ final class HostedAppSession: ObservableObject, Identifiable {
                 kind: .activate
             )
         case let .page(page):
-            guard case let .list(list) = page.body,
-                  let item = list.items.first,
-                  let toggle = [item.leading, item.trailing, item.accessory]
-                    .compactMap({ slot -> UIToggleSpec? in
-                        guard case let .toggle(toggle) = slot else { return nil }
-                        return toggle
-                    })
-                    .first
-            else { return }
-            action = UIAction(
-                nodeID: toggle.id,
-                action: toggle.setValue,
-                kind: .change,
-                value: .bool(!toggle.value)
-            )
+            switch page.body {
+            case let .list(list):
+                guard let item = list.items.first,
+                      let toggle = [item.leading, item.trailing, item.accessory]
+                        .compactMap({ slot -> UIToggleSpec? in
+                            guard case let .toggle(toggle) = slot else { return nil }
+                            return toggle
+                        })
+                        .first
+                else { return }
+                action = UIAction(
+                    nodeID: toggle.id,
+                    action: toggle.setValue,
+                    kind: .change,
+                    value: .bool(!toggle.value)
+                )
+            case let .sparkline(chart):
+                guard let activate = chart.activate else { return }
+                action = UIAction(nodeID: chart.id, action: activate, kind: .activate)
+            case let .barChart(chart):
+                guard let activate = chart.activate else { return }
+                action = UIAction(nodeID: chart.id, action: activate, kind: .activate)
+            case let .lineChart(chart):
+                guard let activate = chart.activate else { return }
+                action = UIAction(nodeID: chart.id, action: activate, kind: .activate)
+            case let .gauge(gauge):
+                guard let activate = gauge.activate else { return }
+                action = UIAction(nodeID: gauge.id, action: activate, kind: .activate)
+            case .content, .unsupported:
+                return
+            }
         case let .markdownEditor(editor):
             guard let replaceRange = editor.actions.replaceRange else { return }
             let lines = editor.text.split(

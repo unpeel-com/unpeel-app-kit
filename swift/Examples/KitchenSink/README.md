@@ -16,8 +16,8 @@ Either path lets libghostty, native SwiftUI, and embedded web views own keyboard
 focus instead of the terminal that launched the rig.
 
 The first launch fetches `libghostty-spm` 1.5.0 and builds the sibling Usage,
-Diffs, GitHub Issues, Markdown, and File Tree Apps plus this repository's Todo,
-Markdown, Media, Surface Planets, and Canvas + Controls examples into
+Diffs, GitHub Issues, Markdown, and File Tree Apps plus this repository's
+Charts, Todo, Markdown, Media, Surface Planets, and Canvas + Controls examples into
 `target/kitchen-sink`. The five sibling repositories must sit beside
 `unpeel-app-kit`; Unpeel itself is not installed or launched. Surface examples
 are added when their sibling guest artifact exists. Their native and web
@@ -82,6 +82,11 @@ all enter the same revision stream. Native and web typing is optimistic and
 coalesced before it enters that stream, keeping rapid input responsive without
 generating stale same-revision events.
 
+The Charts session cycles Sparkline, BarChart, LineChart, and Gauge with
+Left/Right or Enter/Space. The same data-first Page is rendered by Ratatui,
+Swift Charts / SwiftUI Gauge, and dependency-free SVG; the harness agent button
+invokes the chart's optional semantic activation action.
+
 Surface Planets and Canvas + Controls test the complete three-presenter
 composition without Unpeel. The latter overlays the same closed Button slot in
 Ratatui, SwiftUI, and DOM while the planet scene stays on Surface/USRF.
@@ -115,6 +120,7 @@ the Surface session immediately for smoke testing; the launcher explicitly
 forwards that one test-harness variable through Launch Services.
 Use `UNPEEL_KITCHEN_SINK_SESSION=canvas` to open the semantic-controls overlay
 session instead.
+Use `UNPEEL_KITCHEN_SINK_SESSION=charts` to start on the four-chart showcase.
 
 `TerminalEngineController` is the only libghostty-specific boundary. It uses
 the same GhosttyTerminal architecture as the product Host while keeping this

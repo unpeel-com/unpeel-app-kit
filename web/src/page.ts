@@ -1,10 +1,13 @@
 import {
+  type BarChartSpec,
   type BadgeSpec,
   type CheckmarkSpec,
   type ContentLine,
   type ContentSelection,
   type ContentSpec,
+  type GaugeSpec,
   type InputSpec,
+  type LineChartSpec,
   type ListItemSlot,
   type ListItemSpec,
   type ListSpec,
@@ -15,17 +18,25 @@ import {
   type UiAction,
   type UiSnapshot,
   isBadgeSlot,
+  isBarChartSpec,
   isCheckmarkSlot,
   isContentSpec,
+  isGaugeSpec,
+  isLineChartSpec,
   isListSpec,
   isDisclosureSlot,
   isRenderablePageNode,
   isRenderableContentPageNode,
+  isRenderableChartPageNode,
+  isSparklineBodySpec,
   isSparklineSlot,
   isStatusSlot,
   isToggleSlot,
+  gaugePercentageValueLabel,
   listItemPrimaryRole,
+  normalizedBarChartValues,
   normalizedSparklineSeries,
+  resolvedLineChartBounds,
   uiAction,
 } from "./protocol";
 import { listNavigationDecision } from "./list_navigation";
@@ -52,7 +63,8 @@ export class PageRenderer {
   }
 
   render(snapshot: UiSnapshot): void {
-    if (!isRenderablePageNode(snapshot.root) && !isRenderableContentPageNode(snapshot.root)) {
+    if (!isRenderablePageNode(snapshot.root) && !isRenderableContentPageNode(snapshot.root)
+      && !isRenderableChartPageNode(snapshot.root)) {
       throw new Error(`PageRenderer cannot render ${snapshot.root.type}`);
     }
     this.renderPage(snapshot.root);
@@ -69,7 +81,7 @@ export class PageRenderer {
 
   private renderPage(page: PageNode & {
     header?: InputSpec;
-    body: ListSpec | ContentSpec;
+    body: ListSpec | ContentSpec | SparklineSpec | BarChartSpec | LineChartSpec | GaugeSpec;
   }): void {
     const focusedID = document.activeElement instanceof HTMLElement
       ? document.activeElement.id
@@ -97,6 +109,27 @@ export class PageRenderer {
 
     if (isContentSpec(page.body)) {
       this.element.append(this.content(page.body));
+      this.restoreFocus(focusedID);
+      return;
+    }
+
+    if (isSparklineBodySpec(page.body)) {
+      this.element.append(this.sparkline(page.body, "accent", false));
+      this.restoreFocus(focusedID);
+      return;
+    }
+    if (isBarChartSpec(page.body)) {
+      this.element.append(this.barChart(page.body));
+      this.restoreFocus(focusedID);
+      return;
+    }
+    if (isLineChartSpec(page.body)) {
+      this.element.append(this.lineChart(page.body));
+      this.restoreFocus(focusedID);
+      return;
+    }
+    if (isGaugeSpec(page.body)) {
+      this.element.append(this.gauge(page.body));
       this.restoreFocus(focusedID);
       return;
     }
@@ -389,20 +422,24 @@ export class PageRenderer {
   private sparkline(
     sparkline: SparklineSpec,
     tone: NonNullable<ListItemSpec["valueTone"]>,
+    compact = true,
   ): SVGSVGElement {
     const namespace = "http://www.w3.org/2000/svg";
-    const width = Math.min(Math.max(sparkline.series.length * 4, 64), 180);
-    const height = 24;
+    const width = compact ? Math.min(Math.max(sparkline.series.length * 4, 64), 180) : 640;
+    const height = compact ? 24 : 260;
+    const top = compact ? 2 : 34;
+    const bottom = compact ? height - 2 : height - 20;
     const element = document.createElementNS(namespace, "svg");
     element.classList.add("unpeel-sparkline");
+    if (!compact) element.classList.add("unpeel-chart", "unpeel-chart--sparkline");
     element.dataset.tone = tone;
     element.setAttribute("viewBox", `0 0 ${width} ${height}`);
-    element.setAttribute("width", String(width));
+    element.setAttribute("width", compact ? String(width) : "100%");
     element.setAttribute("height", String(height));
     element.setAttribute("role", "img");
     element.setAttribute("aria-label", sparkline.accessibilityText);
     element.style.display = "block";
-    element.style.flex = "0 0 auto";
+    if (compact) element.style.flex = "0 0 auto";
 
     const title = document.createElementNS(namespace, "title");
     title.textContent = [sparkline.caption, sparkline.unit, sparkline.accessibilityText]
@@ -412,7 +449,7 @@ export class PageRenderer {
     const normalized = normalizedSparklineSeries(sparkline);
     polyline.setAttribute("points", normalized.map((value, index) => {
       const x = normalized.length === 1 ? width / 2 : (index / (normalized.length - 1)) * width;
-      const y = height - 2 - value * (height - 4);
+      const y = bottom - value * (bottom - top);
       return `${x.toFixed(3)},${y.toFixed(3)}`;
     }).join(" "));
     polyline.setAttribute("fill", "none");
@@ -421,15 +458,301 @@ export class PageRenderer {
     polyline.setAttribute("stroke-linecap", "round");
     polyline.setAttribute("stroke-linejoin", "round");
     element.append(title, polyline);
+    if (!compact && (sparkline.caption !== undefined || sparkline.unit !== undefined)) {
+      const caption = document.createElementNS(namespace, "text");
+      caption.setAttribute("x", "0");
+      caption.setAttribute("y", "18");
+      caption.setAttribute("fill", "currentColor");
+      caption.setAttribute("font-size", "14");
+      caption.textContent = [sparkline.caption, sparkline.unit]
+        .filter((value): value is string => value !== undefined)
+        .join(" · ");
+      element.append(caption);
+    }
     if (normalized.length === 1) {
       const point = document.createElementNS(namespace, "circle");
       point.setAttribute("cx", String(width / 2));
-      point.setAttribute("cy", String(height - 2 - normalized[0]! * (height - 4)));
+      point.setAttribute("cy", String(bottom - normalized[0]! * (bottom - top)));
       point.setAttribute("r", "2");
       point.setAttribute("fill", "currentColor");
       element.append(point);
     }
+    this.configureChartActivation(element, sparkline);
     return element;
+  }
+
+  private barChart(chart: BarChartSpec): SVGSVGElement {
+    const namespace = "http://www.w3.org/2000/svg";
+    const width = Math.max(640, chart.bars.length * 54);
+    const height = 320;
+    const left = 40;
+    const right = 20;
+    const top = 28;
+    const bottom = 258;
+    const plotWidth = width - left - right;
+    const plotHeight = bottom - top;
+    const normalized = normalizedBarChartValues(chart);
+    const slotWidth = plotWidth / chart.bars.length;
+    const barWidth = Math.max(Math.min(slotWidth * 0.68, 48), 1);
+    const element = this.chartSVG(chart, width, height, "bar-chart");
+
+    const baseline = document.createElementNS(namespace, "line");
+    baseline.setAttribute("x1", String(left));
+    baseline.setAttribute("x2", String(width - right));
+    baseline.setAttribute("y1", String(bottom));
+    baseline.setAttribute("y2", String(bottom));
+    baseline.setAttribute("stroke", "currentColor");
+    baseline.setAttribute("stroke-opacity", "0.35");
+    element.append(baseline);
+
+    chart.bars.forEach((bar, index) => {
+      const group = document.createElementNS(namespace, "g");
+      group.dataset.label = bar.label;
+      group.dataset.value = String(bar.value);
+      group.dataset.emphasis = bar.emphasis ?? "default";
+      const center = left + slotWidth * (index + 0.5);
+      const barHeight = normalized[index]! * plotHeight;
+      const rectangle = document.createElementNS(namespace, "rect");
+      rectangle.setAttribute("x", String(center - barWidth / 2));
+      rectangle.setAttribute("y", String(bottom - barHeight));
+      rectangle.setAttribute("width", String(barWidth));
+      rectangle.setAttribute("height", String(barHeight));
+      rectangle.setAttribute("rx", "2");
+      rectangle.setAttribute("fill", this.barColor(bar.emphasis ?? "default"));
+
+      const label = document.createElementNS(namespace, "text");
+      label.setAttribute("x", String(center));
+      label.setAttribute("y", "282");
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("fill", "currentColor");
+      label.setAttribute("font-size", "12");
+      label.textContent = bar.label;
+      group.append(rectangle);
+      if (bar.valueCaption !== undefined) {
+        const value = document.createElementNS(namespace, "text");
+        value.setAttribute("x", String(center));
+        value.setAttribute("y", String(Math.max(bottom - barHeight - 7, 14)));
+        value.setAttribute("text-anchor", "middle");
+        value.setAttribute("fill", "currentColor");
+        value.setAttribute("font-size", "11");
+        value.textContent = bar.valueCaption;
+        group.append(value);
+      }
+      group.append(label);
+      element.append(group);
+    });
+    this.configureChartActivation(element, chart);
+    return element;
+  }
+
+  private lineChart(chart: LineChartSpec): SVGSVGElement {
+    const namespace = "http://www.w3.org/2000/svg";
+    const width = 640;
+    const height = 320;
+    const left = 60;
+    const right = 24;
+    const top = 42;
+    const bottom = 264;
+    const [xMinimum, xMaximum] = resolvedLineChartBounds(chart, "x");
+    const [yMinimum, yMaximum] = resolvedLineChartBounds(chart, "y");
+    const x = (value: number): number => left
+      + ((value - xMinimum) / (xMaximum - xMinimum)) * (width - left - right);
+    const y = (value: number): number => bottom
+      - ((value - yMinimum) / (yMaximum - yMinimum)) * (bottom - top);
+    const element = this.chartSVG(chart, width, height, "line-chart");
+
+    for (const [x1, y1, x2, y2] of [
+      [left, bottom, width - right, bottom],
+      [left, top, left, bottom],
+    ]) {
+      const axis = document.createElementNS(namespace, "line");
+      axis.setAttribute("x1", String(x1));
+      axis.setAttribute("y1", String(y1));
+      axis.setAttribute("x2", String(x2));
+      axis.setAttribute("y2", String(y2));
+      axis.setAttribute("stroke", "currentColor");
+      axis.setAttribute("stroke-opacity", "0.4");
+      element.append(axis);
+    }
+
+    chart.series.forEach((series, index) => {
+      const color = this.lineColor(index);
+      const polyline = document.createElementNS(namespace, "polyline");
+      polyline.dataset.series = series.name;
+      polyline.setAttribute("points", series.points
+        .map((point) => `${x(point.x).toFixed(3)},${y(point.y).toFixed(3)}`)
+        .join(" "));
+      polyline.setAttribute("fill", "none");
+      polyline.setAttribute("stroke", color);
+      polyline.setAttribute("stroke-width", "2");
+      polyline.setAttribute("stroke-linecap", "round");
+      polyline.setAttribute("stroke-linejoin", "round");
+      element.append(polyline);
+      if (series.points.length === 1) {
+        const point = series.points[0]!;
+        const circle = document.createElementNS(namespace, "circle");
+        circle.setAttribute("cx", String(x(point.x)));
+        circle.setAttribute("cy", String(y(point.y)));
+        circle.setAttribute("r", "3");
+        circle.setAttribute("fill", color);
+        element.append(circle);
+      }
+      const legend = document.createElementNS(namespace, "text");
+      legend.setAttribute("x", String(left + (index % 8) * ((width - left - right) / 8)));
+      legend.setAttribute("y", String(16 + Math.floor(index / 8) * 14));
+      legend.setAttribute("fill", color);
+      legend.setAttribute("font-size", "12");
+      legend.textContent = series.name;
+      element.append(legend);
+    });
+
+    const labels: Array<[string, number, number, string]> = [
+      [String(xMinimum), left, 284, "start"],
+      [String(xMaximum), width - right, 284, "end"],
+      [String(yMinimum), left - 8, bottom + 4, "end"],
+      [String(yMaximum), left - 8, top + 4, "end"],
+    ];
+    for (const [text, xPosition, yPosition, anchor] of labels) {
+      const label = document.createElementNS(namespace, "text");
+      label.setAttribute("x", String(xPosition));
+      label.setAttribute("y", String(yPosition));
+      label.setAttribute("text-anchor", anchor);
+      label.setAttribute("fill", "currentColor");
+      label.setAttribute("fill-opacity", "0.7");
+      label.setAttribute("font-size", "10");
+      label.textContent = text;
+      element.append(label);
+    }
+    if (chart.xAxis?.label !== undefined) {
+      const label = document.createElementNS(namespace, "text");
+      label.setAttribute("x", String((left + width - right) / 2));
+      label.setAttribute("y", "308");
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("fill", "currentColor");
+      label.setAttribute("font-size", "12");
+      label.textContent = chart.xAxis.label;
+      element.append(label);
+    }
+    if (chart.yAxis?.label !== undefined) {
+      const label = document.createElementNS(namespace, "text");
+      label.setAttribute("x", "14");
+      label.setAttribute("y", String((top + bottom) / 2));
+      label.setAttribute("text-anchor", "middle");
+      label.setAttribute("fill", "currentColor");
+      label.setAttribute("font-size", "12");
+      label.setAttribute("transform", `rotate(-90 14 ${(top + bottom) / 2})`);
+      label.textContent = chart.yAxis.label;
+      element.append(label);
+    }
+    this.configureChartActivation(element, chart);
+    return element;
+  }
+
+  private gauge(gauge: GaugeSpec): SVGSVGElement {
+    const namespace = "http://www.w3.org/2000/svg";
+    const width = 640;
+    const height = 140;
+    const left = 40;
+    const trackWidth = width - left * 2;
+    const element = this.chartSVG(gauge, width, height, "gauge");
+    element.dataset.ratio = String(gauge.ratio);
+
+    const label = document.createElementNS(namespace, "text");
+    label.setAttribute("x", String(left));
+    label.setAttribute("y", "35");
+    label.setAttribute("fill", "currentColor");
+    label.setAttribute("font-size", "16");
+    label.textContent = gauge.label;
+    const percentage = document.createElementNS(namespace, "text");
+    percentage.setAttribute("x", String(width - left));
+    percentage.setAttribute("y", "35");
+    percentage.setAttribute("text-anchor", "end");
+    percentage.setAttribute("fill", "currentColor");
+    percentage.setAttribute("font-size", "16");
+    percentage.textContent = gaugePercentageValueLabel(gauge);
+
+    const track = document.createElementNS(namespace, "rect");
+    track.setAttribute("x", String(left));
+    track.setAttribute("y", "60");
+    track.setAttribute("width", String(trackWidth));
+    track.setAttribute("height", "28");
+    track.setAttribute("rx", "14");
+    track.setAttribute("fill", "currentColor");
+    track.setAttribute("fill-opacity", "0.16");
+    const fill = document.createElementNS(namespace, "rect");
+    fill.setAttribute("x", String(left));
+    fill.setAttribute("y", "60");
+    fill.setAttribute("width", String(trackWidth * gauge.ratio));
+    fill.setAttribute("height", "28");
+    fill.setAttribute("rx", "14");
+    fill.setAttribute("fill", "var(--accent, #0ea5e9)");
+    element.append(label, percentage, track, fill);
+    this.configureChartActivation(element, gauge);
+    return element;
+  }
+
+  private chartSVG(
+    chart: { id: string; accessibilityText: string },
+    width: number,
+    height: number,
+    kind: string,
+  ): SVGSVGElement {
+    const element = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    element.id = chart.id;
+    element.classList.add("unpeel-chart", `unpeel-chart--${kind}`);
+    element.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    element.setAttribute("width", "100%");
+    element.setAttribute("height", String(height));
+    element.setAttribute("role", "img");
+    element.setAttribute("aria-label", chart.accessibilityText);
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = chart.accessibilityText;
+    element.append(title);
+    return element;
+  }
+
+  private configureChartActivation(
+    element: SVGSVGElement,
+    chart: { id: string; activate?: string; accessibilityText: string },
+  ): void {
+    element.id = chart.id;
+    if (chart.activate === undefined) return;
+    element.setAttribute("role", "button");
+    element.setAttribute("tabindex", "0");
+    element.style.cursor = "pointer";
+    const activate = (): void => {
+      this.onAction(uiAction(chart.id, chart.activate!, "activate"));
+    };
+    element.addEventListener("click", (event) => {
+      event.stopPropagation();
+      activate();
+    });
+    element.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      activate();
+    });
+  }
+
+  private barColor(emphasis: NonNullable<BarChartSpec["bars"][number]["emphasis"]>): string {
+    switch (emphasis) {
+      case "accent": return "var(--accent, #0ea5e9)";
+      case "danger": return "var(--danger, #ef4444)";
+      case "default": return "currentColor";
+    }
+  }
+
+  private lineColor(index: number): string {
+    const colors = [
+      "var(--accent, #0ea5e9)",
+      "#a855f7",
+      "#22c55e",
+      "#eab308",
+      "#3b82f6",
+      "var(--danger, #ef4444)",
+    ];
+    return colors[index % colors.length]!;
   }
 
   private status(status: StatusSymbolSpec): HTMLSpanElement {
@@ -520,6 +843,14 @@ export class PageRenderer {
     if ((role === "disclosure" || role === "command" || role === "destructive")
       && item.activate !== undefined) {
       this.onAction(uiAction(item.id, item.activate, "activate"));
+      return true;
+    }
+    if (role === "command") {
+      const sparkline = [item.leading, item.trailing, item.accessory]
+        .find((slot): slot is SparklineSpec => slot !== undefined
+          && isSparklineSlot(slot) && slot.activate !== undefined);
+      if (sparkline?.activate === undefined) return false;
+      this.onAction(uiAction(sparkline.id, sparkline.activate, "activate"));
       return true;
     }
     return false;

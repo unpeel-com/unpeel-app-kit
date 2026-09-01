@@ -127,6 +127,54 @@ private struct PageContent: View {
                 ReadOnlyContentBody(content: content, onAction: onAction)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            if case let .sparkline(sparkline) = page.body {
+                ChartActivation(
+                    id: sparkline.id,
+                    action: sparkline.activate,
+                    accessibilityText: sparkline.accessibilityText,
+                    onAction: onAction
+                ) {
+                    NativeSparkline(
+                        spec: sparkline,
+                        color: .accentColor,
+                        compact: false
+                    )
+                }
+                .padding()
+            }
+            if case let .barChart(chart) = page.body {
+                ChartActivation(
+                    id: chart.id,
+                    action: chart.activate,
+                    accessibilityText: chart.accessibilityText,
+                    onAction: onAction
+                ) {
+                    NativeBarChart(spec: chart)
+                }
+                .padding()
+            }
+            if case let .lineChart(chart) = page.body {
+                ChartActivation(
+                    id: chart.id,
+                    action: chart.activate,
+                    accessibilityText: chart.accessibilityText,
+                    onAction: onAction
+                ) {
+                    NativeLineChart(spec: chart)
+                }
+                .padding()
+            }
+            if case let .gauge(gauge) = page.body {
+                ChartActivation(
+                    id: gauge.id,
+                    action: gauge.activate,
+                    accessibilityText: gauge.accessibilityText,
+                    onAction: onAction
+                ) {
+                    NativeGauge(spec: gauge)
+                }
+                .padding()
+            }
         }
     }
 
@@ -297,8 +345,19 @@ private struct PageContent: View {
                 onAction(UIAction(nodeID: item.id, action: activate, kind: .activate))
             }
         case .command, .destructive:
-            guard let activate = item.activate else { return false }
-            onAction(UIAction(nodeID: item.id, action: activate, kind: .activate))
+            if let activate = item.activate {
+                onAction(UIAction(nodeID: item.id, action: activate, kind: .activate))
+            } else if let sparkline = item.primarySparkline,
+                      let activate = sparkline.activate
+            {
+                onAction(UIAction(
+                    nodeID: sparkline.id,
+                    action: activate,
+                    kind: .activate
+                ))
+            } else {
+                return false
+            }
         case .static:
             return false
         }
@@ -463,7 +522,20 @@ private struct PageContent: View {
                 .padding(.vertical, 2)
                 .background(.quaternary, in: Capsule())
         case let .sparkline(sparkline):
-            NativeSparkline(spec: sparkline, color: color(for: valueTone))
+            NativeSparkline(
+                spec: sparkline,
+                color: color(for: valueTone),
+                onActivate: sparkline.activate.map { action in
+                    {
+                        selectLocally(itemID, in: list)
+                        onAction(UIAction(
+                            nodeID: sparkline.id,
+                            action: action,
+                            kind: .activate
+                        ))
+                    }
+                }
+            )
         case .disclosure:
             Image(systemName: "chevron.right")
                 .foregroundStyle(.tertiary)
@@ -484,6 +556,8 @@ private struct PageContent: View {
 private struct NativeSparkline: View {
     let spec: UISparklineSpec
     let color: Color
+    var compact = true
+    var onActivate: (() -> Void)?
 
     private struct Sample: Identifiable {
         let id: Int
@@ -498,7 +572,32 @@ private struct NativeSparkline: View {
         [spec.caption, spec.unit].compactMap { $0 }.joined(separator: " · ")
     }
 
+    @ViewBuilder
     var body: some View {
+        if let onActivate {
+            Button(action: onActivate) { content }
+                .buttonStyle(.plain)
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !compact, !helpText.isEmpty {
+                Text(helpText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            graph
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spec.accessibilityText)
+        .help(helpText)
+    }
+
+    private var graph: some View {
         Chart(samples) { sample in
             LineMark(
                 x: .value("Point", sample.id),
@@ -520,12 +619,143 @@ private struct NativeSparkline: View {
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
         .frame(
-            width: Swift.min(Swift.max(CGFloat(spec.series.count) * 4, 64), 180),
-            height: 24
+            minWidth: compact ? Swift.min(Swift.max(CGFloat(spec.series.count) * 4, 64), 180) : 160,
+            maxWidth: compact ? Swift.min(Swift.max(CGFloat(spec.series.count) * 4, 64), 180) : .infinity,
+            minHeight: compact ? 24 : 120,
+            maxHeight: compact ? 24 : .infinity
         )
+    }
+}
+
+@MainActor
+private struct ChartActivation<Content: View>: View {
+    let id: String
+    let action: String?
+    let accessibilityText: String
+    let onAction: (UIAction) -> Void
+    let content: Content
+
+    init(
+        id: String,
+        action: String?,
+        accessibilityText: String,
+        onAction: @escaping (UIAction) -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.id = id
+        self.action = action
+        self.accessibilityText = accessibilityText
+        self.onAction = onAction
+        self.content = content()
+    }
+
+    @ViewBuilder
+    var body: some View {
+        if let action {
+            Button {
+                onAction(UIAction(nodeID: id, action: action, kind: .activate))
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(accessibilityText)
+        } else {
+            content
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(accessibilityText)
+        }
+    }
+}
+
+@MainActor
+private struct NativeBarChart: View {
+    let spec: UIBarChartSpec
+
+    var body: some View {
+        Chart(Array(spec.bars.enumerated()), id: \.offset) { _, bar in
+            BarMark(
+                x: .value("Category", bar.label),
+                y: .value("Value", bar.value)
+            )
+            .foregroundStyle(color(for: bar.emphasis))
+            .annotation(position: .top) {
+                if let caption = bar.valueCaption {
+                    Text(caption)
+                        .font(.caption2)
+                }
+            }
+        }
+        .chartYScale(domain: 0...Swift.max(spec.bars.map(\.value).max() ?? 0, 1))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spec.accessibilityText)
-        .help(helpText)
+    }
+
+    private func color(for emphasis: UIBarChartEmphasis) -> Color {
+        switch emphasis {
+        case .standard: .secondary
+        case .accent: .accentColor
+        case .danger: .red
+        }
+    }
+}
+
+@MainActor
+private struct NativeLineChart: View {
+    let spec: UILineChartSpec
+
+    private struct Sample: Identifiable {
+        let id: String
+        let series: String
+        let x: Double
+        let y: Double
+    }
+
+    private var samples: [Sample] {
+        spec.series.flatMap { series in
+            series.points.enumerated().map { index, point in
+                Sample(
+                    id: "\(series.name)-\(index)",
+                    series: series.name,
+                    x: point.x,
+                    y: point.y
+                )
+            }
+        }
+    }
+
+    var body: some View {
+        Chart(samples) { sample in
+            LineMark(
+                x: .value(spec.xAxis.label ?? "X", sample.x),
+                y: .value(spec.yAxis.label ?? "Y", sample.y),
+                series: .value("Series", sample.series)
+            )
+            .foregroundStyle(by: .value("Series", sample.series))
+            .interpolationMethod(.linear)
+        }
+        .chartXScale(domain: spec.resolvedXBounds)
+        .chartYScale(domain: spec.resolvedYBounds)
+        .chartXAxisLabel(spec.xAxis.label ?? "")
+        .chartYAxisLabel(spec.yAxis.label ?? "")
+        .chartLegend(.visible)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spec.accessibilityText)
+    }
+}
+
+@MainActor
+private struct NativeGauge: View {
+    let spec: UIGaugeSpec
+
+    var body: some View {
+        SwiftUI.Gauge(value: spec.ratio, in: 0...1) {
+            Text(spec.label)
+        } currentValueLabel: {
+            Text(spec.percentageValueLabel)
+        }
+        .gaugeStyle(.accessoryLinearCapacity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spec.accessibilityText)
     }
 }
 

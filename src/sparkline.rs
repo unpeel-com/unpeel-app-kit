@@ -24,6 +24,11 @@ const TERMINAL_SCALE: f64 = 1_000.0;
 #[derive(Clone, Copy, Debug)]
 pub struct SparklinePoint(f64);
 
+/// Shared finite-number wire wrapper used by the deliberately closed chart
+/// components. SparklinePoint remains as the source-compatible name for the
+/// first member of the family.
+pub type ChartValue = SparklinePoint;
+
 impl SparklinePoint {
     #[must_use]
     pub fn new(value: f64) -> Self {
@@ -89,6 +94,8 @@ pub struct Sparkline {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     pub accessibility_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activate: Option<String>,
 }
 
 impl Sparkline {
@@ -106,6 +113,7 @@ impl Sparkline {
             caption: None,
             unit: None,
             accessibility_text: accessibility_text.into(),
+            activate: None,
         }
     }
 
@@ -127,6 +135,13 @@ impl Sparkline {
     #[must_use]
     pub fn unit(mut self, unit: impl Into<String>) -> Self {
         self.unit = Some(unit.into());
+        self
+    }
+
+    /// Declares the component's one optional idempotent activation action.
+    #[must_use]
+    pub fn activate(mut self, action: impl Into<String>) -> Self {
+        self.activate = Some(action.into());
         self
     }
 
@@ -232,7 +247,19 @@ impl Sparkline {
                 "must not be empty",
             ));
         }
+        if let Some(activate) = &self.activate {
+            validate_identifier(activate, &format!("{path}.activate"))?;
+        }
         Ok(())
+    }
+
+    pub(crate) fn replace_data_from(&mut self, replacement: Self) {
+        self.series = replacement.series;
+        self.min = replacement.min;
+        self.max = replacement.max;
+        self.caption = replacement.caption;
+        self.unit = replacement.unit;
+        self.accessibility_text = replacement.accessibility_text;
     }
 
     /// Standalone Ratatui interpretation. It keeps the newest points visible

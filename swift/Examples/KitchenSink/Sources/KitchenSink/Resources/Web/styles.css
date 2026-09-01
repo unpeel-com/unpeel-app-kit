@@ -519,6 +519,21 @@ textarea {
   min-height: 0;
 }
 
+.unpeel-chart {
+  display: block;
+  width: min(100%, 760px);
+  height: auto;
+  margin: 0 auto;
+  color: var(--text);
+  overflow: visible;
+}
+
+.unpeel-chart[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 6px;
+  border-radius: 8px;
+}
+
 .unpeel-canvas-page {
   position: relative;
   width: 100%;

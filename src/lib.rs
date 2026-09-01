@@ -11,6 +11,7 @@
 #![deny(unsafe_code)]
 
 mod agent;
+mod bar_chart;
 mod click;
 mod components;
 mod content;
@@ -19,9 +20,11 @@ mod drag;
 mod drop_target;
 mod editor;
 mod explorer;
+mod gauge;
 mod host;
 mod input;
 mod keyboard;
+mod line_chart;
 mod list_navigation;
 mod markdown;
 #[cfg(feature = "markdown-text-area")]
@@ -58,6 +61,9 @@ pub use agent::{
     AgentBridge, AgentError, AgentProjectContext, clipboard_sequence, is_hosted, path_reference,
     send_reference_to_agent, send_to_agent,
 };
+pub use bar_chart::{
+    BAR_CHART_COMPONENT_CAPABILITY, BarChart, BarChartBar, BarChartEmphasis, BarChartWidget,
+};
 pub use click::{DEFAULT_DOUBLE_CLICK_INTERVAL, DoubleClickTracker};
 pub use components::{
     BADGE_COMPONENT_CAPABILITY, BUTTON_COMPONENT_CAPABILITY, Badge, Button, ButtonRole, Checkmark,
@@ -86,9 +92,14 @@ pub use editor::{EditorBridge, EditorError, open_in_editor};
 pub use explorer::{
     Explorer, ExplorerEntry, ExplorerEvent, ExplorerInput, ExplorerTheme, ExplorerWidget,
 };
+pub use gauge::{GAUGE_COMPONENT_CAPABILITY, Gauge, GaugeWidget};
 pub use host::AppReporter;
 pub use input::{InputField, InputFieldAction, InputFieldTheme, InputFieldWidget};
 pub use keyboard::KeyboardEnhancementGuard;
+pub use line_chart::{
+    LINE_CHART_COMPONENT_CAPABILITY, LineChart, LineChartAxis, LineChartBounds, LineChartPoint,
+    LineChartSeries, LineChartWidget,
+};
 pub use list_navigation::{
     ListKeymap, ListNavigationAction, ListNavigationOutcome, ListPageBehavior, ListState,
     RowBoundaryBehavior, RowKeyDecision, RowNavigationState, RowPrimaryRole,
@@ -121,7 +132,9 @@ pub use semantic_menu::{
     MENU_ANCHOR_CAPABILITY, MENU_COMPONENT_CAPABILITY, SemanticMenu, SemanticMenuAnchor,
     SemanticMenuItem, SemanticMenuItemRole, SemanticMenuPresentation, SemanticMenuValidationError,
 };
-pub use sparkline::{SPARKLINE_COMPONENT_CAPABILITY, Sparkline, SparklinePoint, SparklineWidget};
+pub use sparkline::{
+    ChartValue, SPARKLINE_COMPONENT_CAPABILITY, Sparkline, SparklinePoint, SparklineWidget,
+};
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 pub use surface::{
     CANVAS_PAGE_COMPONENT_CAPABILITY, CanvasControl, CanvasPage, CanvasPageLayout, CanvasPageTheme,

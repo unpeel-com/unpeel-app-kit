@@ -32,6 +32,15 @@ renders native list rows and toggles through `PageView`; web does the same with
 `PageRenderer`. With no injected endpoint, bridge detection is inert and the
 App is simply the standalone TUI above.
 
+The chart family has the same standalone-first proof. This cycles through
+Sparkline, BarChart, LineChart, and Gauge using Ratatui's native widgets; when
+hosted, the identical Pages become Swift Charts / SwiftUI Gauge or inline SVG:
+
+```sh
+cargo run --example charts
+cargo run --example charts --no-default-features
+```
+
 The same focus engine also powers App Kit Lists and Explorer. Rows add a
 closed, UITableViewCell-style role instead of arbitrary child widgets:
 checkbox Toggle, navigation Disclosure, selection Checkmark, ordinary or
@@ -51,7 +60,7 @@ swift/Examples/KitchenSink/run-app.sh
 ```
 
 It builds and launches the five sibling Apps—Usage, Diffs, GitHub Issues,
-Markdown, and File Tree—plus the Todo, component Markdown, Media, and (when
+Markdown, and File Tree—plus the Charts, Todo, component Markdown, Media, and (when
 the sibling guest artifact exists) Surface Planets and Canvas + Controls
 examples. Every process runs in a real libghostty PTY rendered through Metal;
 the mini-host creates private per-session Unix
@@ -195,13 +204,16 @@ The standalone component layer currently provides:
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
 | `Tree` / `TreeWidget` | Closed drill-down/outline hierarchy with opaque ids, parent/filter semantics, bounded children, and the same `SelectableRow`/scrollbar foundation |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
-| `Page` | Top-level standalone Ratatui presentation with a constrained Input header and either a List or read-only Content body, plus one optional back action |
+| `Page` | Top-level standalone Ratatui presentation with a constrained Input header and a closed List, Content, Sparkline, BarChart, LineChart, or Gauge body, plus one optional back action |
 | `Content` / `ContentWidget` | Read-only scrollable styled lines for issue, diff, and document detail screens; keyed range selection and bounded context actions without editor semantics |
 | `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and named closed slots |
 | `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
 | `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
-| `Sparkline` / `SparklineWidget` | Closed numeric history series with shared bounds/accessibility semantics and a Ratatui newest-points viewport |
+| `Sparkline` / `SparklineWidget` | Closed numeric history series with shared bounds/accessibility semantics, optional activation, and a Ratatui newest-points viewport |
+| `BarChart` / `BarChartWidget` | Labeled non-negative bars with optional captions and closed default/accent/danger emphasis, rendered by Ratatui BarChart |
+| `LineChart` / `LineChartWidget` | Named finite x/y series with optional bounded/labeled axes, rendered by Ratatui Chart |
+| `Gauge` / `GaugeWidget` | One validated `0...1` ratio and label, rendered as Ratatui Gauge or LineGauge |
 | `Button` | Closed semantic action control with default/primary/destructive native intent rather than arbitrary styling |
 | `CanvasPage` | Exactly one Surface slot plus a bounded fixed top Button toolbar, with Ratatui layout/hit boxes and no generic child tree |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
@@ -242,9 +254,12 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
-| Page semantic projection | Closed Page/List/ListItem/Toggle/Input or read-only Content trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
+| Page semantic projection | Closed List, read-only Content, Sparkline, BarChart, LineChart, or Gauge body; constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
 | Content semantic projection | Keyed styled lines, wrap/monospace intent, inclusive line-range selection, bounded context menus, and line-splice/selection deltas for native detail views |
 | Sparkline semantic projection | Data-first numeric history rendered through Ratatui Sparkline, Swift Charts, or dependency-free inline SVG with one shared domain contract |
+| BarChart semantic projection | Labeled numeric bars rendered through Ratatui BarChart, Swift Charts, or dependency-free inline SVG; emphasis and captions remain spec-owned |
+| LineChart semantic projection | Named x/y series and authoritative axis bounds/labels rendered through Ratatui Chart, Swift Charts, or dependency-free inline SVG |
+| Gauge semantic projection | A shared ratio/label contract rendered through Ratatui Gauge, SwiftUI Gauge, or dependency-free inline SVG |
 | Tree semantic projection | Closed Explorer/Tree hierarchy preserving filter focus, wrap/page navigation, the synthetic parent action, opaque path-free ids, compact keyed deltas, and SwiftUI/ARIA-tree wrappers |
 | Menu semantic projection | Root or Markdown-nested action menus with disabled/danger roles, renderer-local anchors, keyboard navigation, native `NSMenu`/popover and web menu interpretations |
 | Surface semantic projection | Opaque session/stream reference, sizing, background, and input policy only; Swift/web wrappers inject existing USRF local-GPU presenters and never consume frames |
@@ -295,8 +310,8 @@ Kit. Its standalone invariant is strict: every App must remain fully
 functional through its TUI, and semantic rendering is only an optional
 presentation path over that fallback.
 
-`MarkdownEditor`, static `Media`, the Todo-driven Page family, Tree, Menu, and
-Sparkline are complete vertical slices. Media travels as a local path, a bounded 256 KiB
+`MarkdownEditor`, static `Media`, the Todo-driven Page family, Tree, Menu,
+Sparkline, BarChart, LineChart, and Gauge are complete vertical slices. Media travels as a local path, a bounded 256 KiB
 inline image, or a content-addressed blob reference—never as an unbounded JSON
 payload. `Tabs` and later richer components such as `DataGrid` can join the
 same closed, versioned vocabulary. Containment is slot-based:
@@ -311,10 +326,10 @@ The renderer packages live with the component definitions so the contract
 cannot drift:
 
 - `swift/` — `UnpeelAppKitUI`, including native Page/List/Toggle/Input,
-  Swift Charts Sparkline, Tree, Menu, Markdown, and asynchronous `NSImage` Media views plus a
+  Swift Charts Sparkline/BarChart/LineChart, SwiftUI Gauge, Tree, Menu, Markdown, and asynchronous `NSImage` Media views plus a
   reconnecting trusted Unix client;
 - `web/` — `@unpeel/app-kit-ui`, including native DOM Page/List controls,
-  inline-SVG Sparkline, ARIA Tree/Menu, Markdown, and accessible `<img>` Media renderers plus
+  inline-SVG Sparkline/BarChart/LineChart/Gauge, ARIA Tree/Menu, Markdown, and accessible `<img>` Media renderers plus
   `WorkspaceUiSession` for the existing Host's `/mobile` extension; and
 - `protocol/` — validated, forward-compatible schemas and shared fixtures
   consumed by Rust, Swift, and web tests.
