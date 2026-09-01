@@ -1165,6 +1165,7 @@ pub struct PageTheme {
     pub toggle: Style,
     pub badge: Style,
     pub busy: Style,
+    pub selected_busy: Style,
     pub delete: Style,
     pub empty: Style,
     pub selected: Style,
@@ -1176,6 +1177,17 @@ pub struct PageTheme {
     pub scrollbar_track: Style,
     pub scrollbar_thumb: Style,
     pub left_padding: u16,
+    /// Optional inactive styling for the compatibility padding cells before
+    /// the semantic row content.
+    pub left_padding_style: Style,
+    /// Legacy terminal rows may opt out; new List rows retain one cell.
+    pub right_padding: u16,
+    /// Whether a trailing value's separating cell inherits the value style.
+    /// Existing rows that historically styled only glyph cells may opt out.
+    pub style_value_gap: bool,
+    /// Compatibility for rows whose colored status span historically owned
+    /// its following spacer cells. New rows keep those cells neutral.
+    pub style_status_spacing: bool,
 }
 
 /// Terminal hit-test geometry for a rendered [`Page`].
@@ -1213,6 +1225,7 @@ impl PageTheme {
             toggle: Style::new().fg(theme.accent),
             badge: Style::new().fg(theme.muted),
             busy: Style::new().fg(theme.accent),
+            selected_busy: Style::new(),
             delete: Style::new().fg(theme.subtle),
             empty: Style::new().fg(theme.subtle),
             selected: theme.selected_row,
@@ -1224,6 +1237,10 @@ impl PageTheme {
             scrollbar_track: theme.scrollbar_track,
             scrollbar_thumb: theme.scrollbar_thumb,
             left_padding: SELECTABLE_LEFT_PADDING,
+            left_padding_style: Style::new(),
+            right_padding: 1,
+            style_value_gap: true,
+            style_status_spacing: false,
         }
     }
 
@@ -1298,10 +1315,20 @@ impl Widget for ListWidget<'_> {
         if item_count == 0 {
             let content = SelectableRow::new(false, self.theme.selected)
                 .inactive_style(self.theme.style)
+                .right_padding(self.theme.right_padding)
                 .paint(
                     Rect::new(rows_area.x, rows_area.y, rows_area.width, 1),
                     buffer,
                 );
+            buffer.set_style(
+                Rect::new(
+                    rows_area.x,
+                    rows_area.y,
+                    self.theme.left_padding.min(rows_area.width),
+                    1,
+                ),
+                self.theme.empty,
+            );
             Paragraph::new(self.list.empty_message.as_str())
                 .style(self.theme.empty)
                 .render(content, buffer);
@@ -1355,7 +1382,19 @@ fn render_list_item(
     }
     let content = SelectableRow::new(selected, theme.selected)
         .inactive_style(theme.style)
+        .right_padding(theme.right_padding)
         .paint(area, buffer);
+    if !selected && theme.left_padding_style != Style::new() {
+        buffer.set_style(
+            Rect::new(
+                area.x,
+                area.y,
+                theme.left_padding.min(area.width),
+                area.height,
+            ),
+            theme.left_padding_style,
+        );
+    }
     if content.is_empty() {
         return;
     }
@@ -1363,7 +1402,7 @@ fn render_list_item(
     let mut left = Vec::new();
     if item.busy {
         let style = if selected {
-            theme.selected_item
+            theme.selected_busy
         } else {
             theme.busy
         };
@@ -1482,7 +1521,9 @@ fn render_list_item(
     Paragraph::new(Line::from(left)).render(label_area, buffer);
     if right_columns > 0 {
         let mut paragraph = Paragraph::new(Line::from(right)).alignment(Alignment::Right);
-        if let Some(style) = value_style {
+        if theme.style_value_gap
+            && let Some(style) = value_style
+        {
             paragraph = paragraph.style(style);
         }
         paragraph.render(value_area, buffer);
@@ -1513,8 +1554,12 @@ fn append_leading_slot(
             if status.emphasis == ListItemEmphasis::Strong {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            spans.push(Span::styled(status.symbol.clone(), style));
-            spans.push(Span::raw("  "));
+            if theme.style_status_spacing {
+                spans.push(Span::styled(format!("{}  ", status.symbol), style));
+            } else {
+                spans.push(Span::styled(status.symbol.clone(), style));
+                spans.push(Span::raw("  "));
+            }
         }
         ListItemSlot::Badge(badge) => spans.push(Span::styled(
             format!("{} ", badge.text),
