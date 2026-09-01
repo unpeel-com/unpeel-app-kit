@@ -10,8 +10,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Axis, Chart as RatatuiChart, Dataset, GraphType, Widget};
 use serde::{Deserialize, Serialize};
 
-use crate::ChartValue;
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
+use crate::{ChartValue, ColorScheme, KitTheme};
 
 /// Renderer capability for the LineChart component.
 pub const LINE_CHART_COMPONENT_CAPABILITY: &str = "lineChart";
@@ -299,17 +299,11 @@ impl LineChart {
 
     #[must_use]
     pub fn widget(&self) -> LineChartWidget<'_> {
+        let theme = KitTheme::dark();
         LineChartWidget {
             chart: self,
-            axis_style: Style::new().fg(Color::DarkGray),
-            series_styles: [
-                Style::new().fg(Color::Cyan),
-                Style::new().fg(Color::Magenta),
-                Style::new().fg(Color::Green),
-                Style::new().fg(Color::Yellow),
-                Style::new().fg(Color::Blue),
-                Style::new().fg(Color::Red),
-            ],
+            axis_style: Style::new().fg(theme.subtle),
+            series_styles: terminal_series_styles(theme),
         }
     }
 }
@@ -322,11 +316,41 @@ pub struct LineChartWidget<'a> {
 }
 
 impl LineChartWidget<'_> {
+    /// Applies a coherent terminal palette to axes and named series.
+    #[must_use]
+    pub const fn theme(mut self, theme: KitTheme) -> Self {
+        self.axis_style = Style::new().fg(theme.subtle);
+        self.series_styles = terminal_series_styles(theme);
+        self
+    }
+
+    #[must_use]
+    pub const fn styles(mut self, axis: Style, series: [Style; 6]) -> Self {
+        self.axis_style = axis;
+        self.series_styles = series;
+        self
+    }
+
     #[must_use]
     pub const fn axis_style(mut self, style: Style) -> Self {
         self.axis_style = style;
         self
     }
+}
+
+const fn terminal_series_styles(theme: KitTheme) -> [Style; 6] {
+    let (info, success, warning) = match theme.scheme {
+        ColorScheme::Dark => (Color::LightBlue, Color::LightGreen, Color::LightYellow),
+        ColorScheme::Light => (Color::Blue, Color::Green, Color::Yellow),
+    };
+    [
+        Style::new().fg(theme.accent),
+        Style::new().fg(info),
+        Style::new().fg(success),
+        Style::new().fg(warning),
+        Style::new().fg(theme.danger),
+        Style::new().fg(theme.muted),
+    ]
 }
 
 impl Widget for LineChartWidget<'_> {

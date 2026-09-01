@@ -16,9 +16,9 @@ use ratatui::widgets::Widget;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, InputField, KitTheme, ListPageBehavior,
-    RowBoundaryBehavior, RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu,
-    VerticalScrollbar,
+    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, InputField, InputFieldTheme, KitTheme,
+    ListPageBehavior, RowBoundaryBehavior, RowNavigationState, SELECTABLE_LEFT_PADDING,
+    SelectableRow, SemanticMenu, VerticalScrollbar,
 };
 
 pub const TREE_COMPONENT_CAPABILITY: &str = "tree";
@@ -519,6 +519,7 @@ impl Tree {
             state,
             filter_input: None,
             theme: TreeTheme::default(),
+            filter_theme: None,
         }
     }
 
@@ -535,6 +536,7 @@ impl Tree {
             state,
             filter_input: Some(filter_input),
             theme: TreeTheme::default(),
+            filter_theme: None,
         }
     }
 }
@@ -594,6 +596,21 @@ impl TreeTheme {
             scrollbar_track: theme.scrollbar_track,
             scrollbar_thumb: theme.scrollbar_thumb,
             left_padding: SELECTABLE_LEFT_PADDING,
+        }
+    }
+
+    /// Input styling for the Tree's named filter slot, derived from the same
+    /// palette and horizontal rhythm as its rows.
+    #[must_use]
+    pub const fn input_theme(self) -> InputFieldTheme {
+        InputFieldTheme {
+            style: self.style,
+            text: self.filter,
+            focused: self.item.bold(),
+            placeholder: self.empty,
+            prompt: self.filter,
+            selection: self.selected,
+            left_padding: self.left_padding,
         }
     }
 }
@@ -674,12 +691,20 @@ pub struct TreeWidget<'a> {
     state: &'a mut TreeState,
     filter_input: Option<&'a mut InputField>,
     theme: TreeTheme,
+    filter_theme: Option<InputFieldTheme>,
 }
 
 impl TreeWidget<'_> {
     #[must_use]
     pub const fn theme(mut self, theme: TreeTheme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Overrides the Tree-derived terminal style for its filter Input.
+    #[must_use]
+    pub const fn filter_theme(mut self, theme: InputFieldTheme) -> Self {
+        self.filter_theme = Some(theme);
         self
     }
 }
@@ -702,6 +727,10 @@ impl Widget for TreeWidget<'_> {
                 }
                 input.set_placeholder(filter.placeholder.clone());
                 input.set_prompt(format!("{}: ", filter.label));
+                input.set_theme(
+                    self.filter_theme
+                        .unwrap_or_else(|| self.theme.input_theme()),
+                );
                 input.widget().render(row, buffer);
             } else {
                 let value = if filter.value.is_empty() {
@@ -711,8 +740,9 @@ impl Widget for TreeWidget<'_> {
                 };
                 Line::styled(
                     format!(
-                        "{}{}",
+                        "{}{}: {}",
                         " ".repeat(usize::from(self.theme.left_padding)),
+                        filter.label,
                         value
                     ),
                     self.theme.filter,
@@ -1053,5 +1083,37 @@ mod tests {
         assert_eq!(state.selected_id(), Some("today"));
         let rendered = terminal.backend().buffer();
         assert!(rendered.content.iter().any(|cell| cell.symbol() == "▾"));
+    }
+
+    #[test]
+    fn terminal_filter_keeps_its_semantic_label_with_or_without_editing_state() {
+        let mut tree = fixture();
+        tree.filter.as_mut().unwrap().placeholder = "Find a note".to_owned();
+
+        let mut stateless = TreeState::default();
+        let mut stateless_buffer = Buffer::empty(Rect::new(0, 0, 40, 8));
+        tree.widget(&mut stateless)
+            .render(stateless_buffer.area, &mut stateless_buffer);
+        let stateless_row = (0..40)
+            .map(|x| stateless_buffer[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(stateless_row.starts_with("  Filter notes: Find a note"));
+
+        let mut input = InputField::new("");
+        let mut stateful = TreeState::default();
+        let mut theme = TreeTheme::for_theme(KitTheme::light());
+        theme.filter = Style::new().fg(Color::Green);
+        theme.empty = Style::new().fg(Color::Yellow);
+        let mut stateful_buffer = Buffer::empty(Rect::new(0, 0, 40, 8));
+        tree.widget_with_filter(&mut stateful, &mut input)
+            .theme(theme)
+            .render(stateful_buffer.area, &mut stateful_buffer);
+
+        assert_eq!(stateful_buffer[(0, 0)].symbol(), " ");
+        assert_eq!(stateful_buffer[(1, 0)].symbol(), " ");
+        assert_eq!(stateful_buffer[(2, 0)].symbol(), "F");
+        assert_eq!(stateful_buffer[(2, 0)].fg, Color::Green);
+        assert_eq!(stateful_buffer[(16, 0)].symbol(), "F");
+        assert_eq!(stateful_buffer[(16, 0)].fg, Color::Yellow);
     }
 }

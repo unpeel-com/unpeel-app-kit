@@ -2,12 +2,12 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::widgets::{Gauge as RatatuiGauge, LineGauge, Widget};
 use serde::{Deserialize, Serialize};
 
-use crate::ChartValue;
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
+use crate::{ChartValue, KitTheme};
 
 /// Renderer capability for the Gauge component.
 pub const GAUGE_COMPONENT_CAPABILITY: &str = "gauge";
@@ -93,10 +93,11 @@ impl Gauge {
 
     #[must_use]
     pub fn widget(&self) -> GaugeWidget<'_> {
+        let theme = KitTheme::dark();
         GaugeWidget {
             gauge: self,
-            filled_style: Style::new().fg(Color::Cyan),
-            unfilled_style: Style::new().fg(Color::DarkGray),
+            filled_style: Style::new().fg(theme.accent),
+            unfilled_style: Style::new().fg(theme.subtle),
         }
     }
 }
@@ -109,6 +110,14 @@ pub struct GaugeWidget<'a> {
 }
 
 impl GaugeWidget<'_> {
+    /// Applies App Kit's terminal palette to the filled and remaining tracks.
+    #[must_use]
+    pub const fn theme(mut self, theme: KitTheme) -> Self {
+        self.filled_style = Style::new().fg(theme.accent);
+        self.unfilled_style = Style::new().fg(theme.subtle);
+        self
+    }
+
     #[must_use]
     pub const fn styles(mut self, filled: Style, unfilled: Style) -> Self {
         self.filled_style = filled;

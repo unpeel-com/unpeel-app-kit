@@ -27,10 +27,11 @@ cargo run --example todo --no-default-features
 ```
 
 With the default `ui-bridge` feature, that same binary detects a Host-injected
-endpoint and additionally publishes its Page → List → ListItem tree. SwiftUI
-renders native list rows and toggles through `PageView`; web does the same with
-`PageRenderer`. With no injected endpoint, bridge detection is inert and the
-App is simply the standalone TUI above.
+endpoint and publishes its one Page → List → ListItem tree. Ratatui, SwiftUI,
+and web are peer interpreters of that exact structure: the same rows, order,
+values, and actions, with presentation idioms appropriate to each medium. With
+no injected endpoint, bridge detection is inert and Ratatui remains the fully
+functional standalone interpreter.
 
 The chart family has the same standalone-first proof. This cycles through
 Sparkline, BarChart, LineChart, and Gauge using Ratatui's native widgets; when

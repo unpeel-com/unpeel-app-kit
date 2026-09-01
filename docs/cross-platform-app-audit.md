@@ -3,9 +3,9 @@
 Verified on 2026-09-01 with the standalone Kitchen Sink mini-host on macOS.
 The harness built each sibling App, spawned it as the direct child of a real
 libghostty PTY, injected an isolated App-owned `ui.sock` and signing key, and
-drove the live reducer with scoped semantic actions. SwiftUI and the bundled
-DOM renderer consume that same projection; no Unpeel process or workspace
-server participated.
+drove the live reducer with scoped semantic actions. Ratatui, SwiftUI, and the
+bundled DOM renderer consumed the same component tree as peer interpreters; no
+Unpeel process or workspace server participated.
 
 Run it again from the App Kit repository root:
 
@@ -36,3 +36,12 @@ native animation, browser focus rings, and text-selection drawing—are not App
 state surfaces and are intentionally renderer-specific. If a renderer lacks a
 declared component capability, the whole pane falls back to the complete TUI;
 that graceful fallback is not counted as a migrated screen.
+
+The Ratatui design pass is guarded separately from structural parity. Frozen
+pre-migration List buffers still match the shared List/SelectableRow path, and
+Explorer's SelectableRow refactor remains buffer-identical. Tree and component
+buffer tests additionally cover two-cell alignment, full-row selection,
+responsive trailing metadata, inherited Page/Tree input palettes, chart
+palette roles and insets, content selection, popup selection, and proportional
+scrollbars. Component migration therefore changes neither the terminal
+information architecture nor its established interaction polish.

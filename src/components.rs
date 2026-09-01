@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    BarChart, Content, ContentState, ContentTheme, Gauge, InputField, KitTheme, LineChart,
-    ListPageBehavior, ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow,
+    BarChart, Content, ContentState, ContentTheme, Gauge, InputField, InputFieldTheme, KitTheme,
+    LineChart, ListPageBehavior, ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow,
     SemanticMenu, Sparkline, VerticalScrollbar,
 };
 
@@ -1535,6 +1535,7 @@ impl Page {
             list_state,
             content_state: PageContentState::Owned(ContentState::new()),
             theme: PageTheme::default(),
+            input_theme: None,
             content_theme: ContentTheme::default(),
         }
     }
@@ -1557,6 +1558,7 @@ impl Page {
             list_state,
             content_state: PageContentState::Borrowed(content_state),
             theme: PageTheme::default(),
+            input_theme: None,
             content_theme: ContentTheme::default(),
         }
     }
@@ -1966,6 +1968,34 @@ impl PageTheme {
     #[must_use]
     pub fn detected() -> Self {
         Self::for_theme(KitTheme::detected())
+    }
+
+    /// Input styling derived from the same terminal design tokens as this
+    /// Page. A Page owns the visual treatment of its named Input slot; the
+    /// renderer-local editing state must not retain an unrelated palette.
+    #[must_use]
+    pub const fn input_theme(self) -> InputFieldTheme {
+        InputFieldTheme {
+            style: self.style,
+            text: self.item,
+            focused: self.item.add_modifier(Modifier::BOLD),
+            placeholder: self.empty,
+            prompt: self.detail,
+            selection: self.selected,
+            left_padding: self.left_padding,
+        }
+    }
+
+    fn inset_body(self, area: Rect) -> Rect {
+        let left = self.left_padding.min(area.width);
+        let remaining = area.width.saturating_sub(left);
+        let right = self.right_padding.min(remaining);
+        Rect::new(
+            area.x.saturating_add(left),
+            area.y,
+            remaining.saturating_sub(right),
+            area.height,
+        )
     }
 
     fn tone(self, tone: ListItemTone) -> Style {
@@ -2419,6 +2449,7 @@ pub struct PageWidget<'a> {
     list_state: &'a mut ListState,
     content_state: PageContentState<'a>,
     theme: PageTheme,
+    input_theme: Option<InputFieldTheme>,
     content_theme: ContentTheme,
 }
 
@@ -2440,6 +2471,13 @@ impl PageWidget<'_> {
     #[must_use]
     pub const fn theme(mut self, theme: PageTheme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Overrides the Page-derived terminal styling for its Input slot.
+    #[must_use]
+    pub const fn input_theme(mut self, theme: InputFieldTheme) -> Self {
+        self.input_theme = Some(theme);
         self
     }
 
@@ -2477,6 +2515,8 @@ impl Widget for PageWidget<'_> {
             self.input.set_placeholder(input.placeholder.clone());
             self.input.set_prompt(format!("{}: ", input.label));
             self.input
+                .set_theme(self.input_theme.unwrap_or_else(|| self.theme.input_theme()));
+            self.input
                 .widget()
                 .render(layout.input.expect("Page input layout"), buffer);
         }
@@ -2492,23 +2532,24 @@ impl Widget for PageWidget<'_> {
                     .render(layout.list, buffer);
             }
             PageBodySlot::Sparkline(sparkline) => {
+                let body = self.theme.inset_body(layout.list);
                 let metadata = [sparkline.caption.as_deref(), sparkline.unit.as_deref()]
                     .into_iter()
                     .flatten()
                     .collect::<Vec<_>>()
                     .join(" · ");
                 let chart_slot = if metadata.is_empty() {
-                    layout.list
+                    body
                 } else {
-                    let label = Rect::new(layout.list.x, layout.list.y, layout.list.width, 1);
+                    let label = Rect::new(body.x, body.y, body.width, 1);
                     Paragraph::new(metadata)
                         .style(self.theme.value)
                         .render(label, buffer);
                     Rect::new(
-                        layout.list.x,
-                        layout.list.y.saturating_add(1),
-                        layout.list.width,
-                        layout.list.height.saturating_sub(1),
+                        body.x,
+                        body.y.saturating_add(1),
+                        body.width,
+                        body.height.saturating_sub(1),
                     )
                 };
                 let height = chart_slot.height.clamp(1, 3);
@@ -2518,19 +2559,47 @@ impl Widget for PageWidget<'_> {
                     chart_slot.width,
                     height,
                 );
-                sparkline.widget().render(area, buffer);
+                sparkline
+                    .widget()
+                    .style(self.theme.accent)
+                    .render(area, buffer);
             }
-            PageBodySlot::BarChart(chart) => chart.widget().render(layout.list, buffer),
-            PageBodySlot::LineChart(chart) => chart.widget().render(layout.list, buffer),
+            PageBodySlot::BarChart(chart) => chart
+                .widget()
+                .styles(
+                    self.theme.value,
+                    self.theme.accent,
+                    self.theme.danger,
+                    self.theme.item,
+                )
+                .render(self.theme.inset_body(layout.list), buffer),
+            PageBodySlot::LineChart(chart) => chart
+                .widget()
+                .styles(
+                    self.theme.navigation,
+                    [
+                        self.theme.accent,
+                        self.theme.info,
+                        self.theme.success,
+                        self.theme.warning,
+                        self.theme.danger,
+                        self.theme.item,
+                    ],
+                )
+                .render(self.theme.inset_body(layout.list), buffer),
             PageBodySlot::Gauge(gauge) => {
-                let height = layout.list.height.clamp(1, 3);
+                let body = self.theme.inset_body(layout.list);
+                let height = body.height.clamp(1, 3);
                 let area = Rect::new(
-                    layout.list.x,
-                    layout.list.y + layout.list.height.saturating_sub(height) / 2,
-                    layout.list.width,
+                    body.x,
+                    body.y + body.height.saturating_sub(height) / 2,
+                    body.width,
                     height,
                 );
-                gauge.widget().render(area, buffer);
+                gauge
+                    .widget()
+                    .styles(self.theme.accent, self.theme.value)
+                    .render(area, buffer);
             }
         }
     }
@@ -2826,6 +2895,98 @@ mod tests {
         assert_eq!(input.text(), "one source of truth");
         let row = (0..48).map(|x| buffer[(x, 2)].symbol()).collect::<String>();
         assert!(row.contains("Query: one source of truth"));
+    }
+
+    #[test]
+    fn page_input_inherits_the_pages_terminal_palette_and_spacing() {
+        let page = Page::new("Search", List::new("results", Vec::new())).input(
+            Input::new("query", "Query")
+                .placeholder("Find a result")
+                .set_value_action("set-query"),
+        );
+        let mut stale_theme = InputFieldTheme::dark();
+        stale_theme.prompt = Style::new().fg(ratatui::style::Color::Red);
+        stale_theme.placeholder = Style::new().fg(ratatui::style::Color::Red);
+        stale_theme.left_padding = 0;
+        let mut input = InputField::new("").with_theme(stale_theme);
+        let mut state = ListState::new(None);
+        let mut theme = PageTheme::for_theme(KitTheme::light());
+        theme.detail = Style::new().fg(ratatui::style::Color::Green);
+        theme.empty = Style::new().fg(ratatui::style::Color::Yellow);
+        theme.left_padding = 2;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 8));
+
+        page.widget(&mut input, &mut state)
+            .theme(theme)
+            .render(buffer.area, &mut buffer);
+
+        assert_eq!(buffer[(0, 2)].symbol(), " ");
+        assert_eq!(buffer[(1, 2)].symbol(), " ");
+        assert_eq!(buffer[(2, 2)].symbol(), "Q");
+        assert_eq!(buffer[(2, 2)].fg, ratatui::style::Color::Green);
+        assert_eq!(buffer[(9, 2)].symbol(), "F");
+        assert_eq!(buffer[(9, 2)].fg, ratatui::style::Color::Yellow);
+    }
+
+    #[test]
+    fn page_charts_share_the_pages_inset_and_semantic_palette() {
+        let pages = [
+            Page::with_sparkline(
+                "Trend",
+                Sparkline::new("trend", [1.0, 4.0, 2.0], "Trend values"),
+            ),
+            Page::with_bar_chart(
+                "Bars",
+                BarChart::new(
+                    "bars",
+                    [crate::BarChartBar::new("A", 2.0).emphasis(crate::BarChartEmphasis::Accent)],
+                    "A is two",
+                ),
+            ),
+            Page::with_line_chart(
+                "Lines",
+                LineChart::new(
+                    "lines",
+                    [crate::LineChartSeries::new(
+                        "A",
+                        [
+                            crate::LineChartPoint::new(0.0, 0.0),
+                            crate::LineChartPoint::new(1.0, 1.0),
+                        ],
+                    )],
+                    "A rises",
+                ),
+            ),
+            Page::with_gauge(
+                "Gauge",
+                Gauge::new("gauge", 0.75, "Ready", "75 percent ready"),
+            ),
+        ];
+        let accent = ratatui::style::Color::Magenta;
+        let mut theme = PageTheme::for_theme(KitTheme::dark());
+        theme.accent = Style::new().fg(accent);
+
+        for page in pages {
+            let mut input = InputField::new("");
+            let mut state = ListState::default();
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 42, 10));
+            page.widget(&mut input, &mut state)
+                .theme(theme)
+                .render(buffer.area, &mut buffer);
+
+            for y in 2..buffer.area.height {
+                assert_eq!(buffer[(0, y)].symbol(), " ", "{} at row {y}", page.title);
+                assert_eq!(buffer[(1, y)].symbol(), " ", "{} at row {y}", page.title);
+            }
+            assert!(
+                buffer
+                    .content()
+                    .iter()
+                    .any(|cell| !cell.symbol().trim().is_empty() && cell.fg == accent),
+                "{} did not consume the Page accent",
+                page.title
+            );
+        }
     }
 
     #[test]

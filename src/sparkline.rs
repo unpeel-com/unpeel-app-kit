@@ -6,6 +6,7 @@ use ratatui::style::Style;
 use ratatui::widgets::{Sparkline as RatatuiSparkline, Widget};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::KitTheme;
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
 
 /// Renderer capability for the read-only Sparkline component.
@@ -268,7 +269,7 @@ impl Sparkline {
     pub fn widget(&self) -> SparklineWidget<'_> {
         SparklineWidget {
             sparkline: self,
-            style: Style::new(),
+            style: Style::new().fg(KitTheme::dark().accent),
         }
     }
 }
@@ -280,6 +281,13 @@ pub struct SparklineWidget<'a> {
 }
 
 impl SparklineWidget<'_> {
+    /// Applies App Kit's terminal palette while preserving the chart data.
+    #[must_use]
+    pub const fn theme(mut self, theme: KitTheme) -> Self {
+        self.style = Style::new().fg(theme.accent);
+        self
+    }
+
     #[must_use]
     pub const fn style(mut self, style: Style) -> Self {
         self.style = style;

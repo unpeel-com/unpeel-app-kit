@@ -49,7 +49,7 @@ impl MarkdownCommandHint {
             MarkdownCommandHintVisibility::CursorOnEmptyLineOutsideCodeFence => {
                 selection_collapsed
                     && !insert_menu_open
-                    && !(document.is_empty() && !document_placeholder.is_empty())
+                    && (!document.is_empty() || document_placeholder.is_empty())
                     && document
                         .split('\n')
                         .nth(cursor_line)

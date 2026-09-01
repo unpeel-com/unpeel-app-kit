@@ -2,12 +2,12 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::widgets::{Bar as RatatuiBar, BarChart as RatatuiBarChart, BarGroup, Widget};
 use serde::{Deserialize, Serialize};
 
-use crate::ChartValue;
 use crate::components::{ComponentValidationError, validate_identifier, validate_text};
+use crate::{ChartValue, KitTheme};
 
 /// Renderer capability for the BarChart component.
 pub const BAR_CHART_COMPONENT_CAPABILITY: &str = "barChart";
@@ -150,12 +150,13 @@ impl BarChart {
 
     #[must_use]
     pub fn widget(&self) -> BarChartWidget<'_> {
+        let theme = KitTheme::dark();
         BarChartWidget {
             chart: self,
-            default_style: Style::new().fg(Color::Gray),
-            accent_style: Style::new().fg(Color::Cyan),
-            danger_style: Style::new().fg(Color::Red),
-            value_style: Style::new().fg(Color::White),
+            default_style: Style::new().fg(theme.muted),
+            accent_style: Style::new().fg(theme.accent),
+            danger_style: Style::new().fg(theme.danger),
+            value_style: Style::new().fg(theme.text),
         }
     }
 }
@@ -170,6 +171,16 @@ pub struct BarChartWidget<'a> {
 }
 
 impl BarChartWidget<'_> {
+    /// Applies one coherent App Kit terminal palette to every chart role.
+    #[must_use]
+    pub const fn theme(mut self, theme: KitTheme) -> Self {
+        self.default_style = Style::new().fg(theme.muted);
+        self.accent_style = Style::new().fg(theme.accent);
+        self.danger_style = Style::new().fg(theme.danger);
+        self.value_style = Style::new().fg(theme.text);
+        self
+    }
+
     #[must_use]
     pub const fn styles(
         mut self,

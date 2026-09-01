@@ -158,6 +158,23 @@ terminal hit rectangles, scroll offsets, focus, IME composition, and drag
 registration may be fed back as disposable view-local geometry after the
 component interpreter draws the exact published node.
 
+The terminal is not the source representation from which native and web are
+projected. Ratatui, SwiftUI, and web are three peer interpreters of the one
+component tree. Structure is invariant between them: the same components,
+rows, order, values, roles, and actions must be present at the same revision.
+Only the presentation idiom may differ. A SwiftUI `List` may use native row
+chrome and a Ratatui `List` may use terminal cells, but neither may add, omit,
+reorder, summarize, or reinterpret information from the tree.
+
+Good presentation in every medium is part of a component's definition and a
+shipment requirement. The Ratatui interpretation receives the same design
+care as SwiftUI and web: deliberate spacing and alignment, full-row selection,
+responsive metadata, readable chart scales, consistent palette use, and
+terminal-native keyboard and pointer feel. Moving a screen to components must
+not cost terminal polish. Frozen pre-migration buffers protect existing App
+fidelity; component-level buffer tests protect the shared design language as
+it evolves.
+
 Conformance tests therefore render the published node itself through the
 Ratatui interpreter. Testing a lookalike helper or independently rebuilding a
 second terminal tree does not satisfy the single-source-of-truth rule.
