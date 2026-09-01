@@ -94,7 +94,7 @@ fn canvas_page() -> CanvasPage {
 
 fn guest_path() -> Result<PathBuf, Box<dyn Error>> {
     let mut arguments = std::env::args_os().skip(1);
-    while let Some(argument) = arguments.next() {
+    if let Some(argument) = arguments.next() {
         if argument == "--guest" {
             let path = arguments.next().ok_or("--guest needs a WASM path")?;
             return existing_guest(PathBuf::from(path));
