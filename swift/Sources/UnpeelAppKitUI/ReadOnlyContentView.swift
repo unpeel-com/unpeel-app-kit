@@ -73,6 +73,7 @@ struct ReadOnlyContentBody: View {
     private func menuButtons(_ menu: UIMenuSpec, targetID: String) -> some View {
         ForEach(menu.items) { item in
             Button(item.label, role: item.role == .danger ? .destructive : nil) {
+                selected = UIContentSelection(anchorID: targetID, headID: targetID)
                 onAction(UIAction(
                     nodeID: item.id,
                     action: item.action,

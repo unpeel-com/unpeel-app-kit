@@ -172,7 +172,7 @@ export class PageRenderer {
     if (content.contextMenu !== undefined) {
       row.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        this.setContentSelection(content, line.id, line.id, true);
+        this.setContentSelection(content, line.id, line.id, false);
         this.showContextMenu(event, content.contextMenu!, line.id);
       });
     }
@@ -297,18 +297,25 @@ export class PageRenderer {
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", row.dataset.selected);
     row.addEventListener("click", (event) => {
-      this.select(list, item.id);
       const control = event.target instanceof Element
         ? event.target.closest("button, input, label")
         : null;
-      if (control !== null) return;
+      if (control !== null) {
+        this.selectLocally(list, item.id);
+        return;
+      }
       row.parentElement?.focus();
-      this.invokePrimary(item);
+      if (listItemPrimaryRole(item) === "static") {
+        this.select(list, item.id);
+      } else {
+        this.selectLocally(list, item.id);
+        this.invokePrimary(item);
+      }
     });
     if (list.contextMenu !== undefined) {
       row.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        this.select(list, item.id);
+        this.selectLocally(list, item.id);
         this.showContextMenu(event, list.contextMenu!, item.id);
       });
     }
@@ -475,12 +482,7 @@ export class PageRenderer {
   private select(list: ListSpec, itemID: string): void {
     if (!list.items.some((item) => item.id === itemID)) return;
     const changed = this.selections.get(list.id) !== itemID;
-    this.selections.set(list.id, itemID);
-    for (const row of this.element.querySelectorAll<HTMLElement>(".unpeel-list-item")) {
-      const selected = row.dataset.id === itemID;
-      row.dataset.selected = String(selected);
-      row.setAttribute("aria-selected", String(selected));
-    }
+    this.selectLocally(list, itemID);
     if (changed && list.select !== undefined) {
       this.onAction(uiAction(
         list.id,
@@ -488,6 +490,16 @@ export class PageRenderer {
         "change",
         { type: "text", value: itemID },
       ));
+    }
+  }
+
+  private selectLocally(list: ListSpec, itemID: string): void {
+    if (!list.items.some((item) => item.id === itemID)) return;
+    this.selections.set(list.id, itemID);
+    for (const row of this.element.querySelectorAll<HTMLElement>(".unpeel-list-item")) {
+      const selected = row.dataset.id === itemID;
+      row.dataset.selected = String(selected);
+      row.setAttribute("aria-selected", String(selected));
     }
   }
 

@@ -479,6 +479,20 @@ impl Explorer {
         tree
     }
 
+    /// Selects an entry named by the opaque id emitted by [`Self::semantic_tree`].
+    ///
+    /// Apps use this for closed Tree extensions such as a semantic context
+    /// menu. The opaque id is resolved inside Explorer, so Host-local paths
+    /// never have to appear in the semantic protocol.
+    #[cfg(feature = "ui-bridge")]
+    pub fn select_semantic_item(&mut self, id: &str) -> Result<ExplorerEvent, String> {
+        let index = self
+            .semantic_index(id)
+            .ok_or_else(|| format!("Tree item {id:?} is not present"))?;
+        self.set_selected_index(index);
+        Ok(ExplorerEvent::SelectionChanged)
+    }
+
     /// Applies one authenticated semantic Tree action to the same state used
     /// by Ratatui. The caller publishes/acknowledges the resulting revision.
     #[cfg(feature = "ui-bridge")]
@@ -502,10 +516,7 @@ impl Explorer {
             let crate::UiEventValue::Text(item_id) = &event.action.value else {
                 return Err("Tree select/open requires an opaque text item id".to_owned());
             };
-            let Some(index) = self.semantic_index(item_id) else {
-                return Err(format!("Tree item {item_id:?} is not present"));
-            };
-            self.set_selected_index(index);
+            self.select_semantic_item(item_id)?;
             if action == crate::TreeActions::SELECT {
                 if event.action.kind != crate::UiEventKind::Select {
                     return Err("Tree selection requires a select event".to_owned());
@@ -1634,6 +1645,24 @@ mod tests {
             entry_names(&explorer),
             ["../", "a-dir/", "z-dir/", ".secret", "a.txt"]
         );
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[test]
+    fn semantic_context_targets_resolve_without_exposing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("first.txt"), "first").unwrap();
+        fs::write(temp.path().join("second.txt"), "second").unwrap();
+        let mut explorer = Explorer::scoped(temp.path()).unwrap();
+        let tree = explorer.semantic_tree("Files");
+        let second_id = tree.items[1].id.clone();
+
+        assert_eq!(
+            explorer.select_semantic_item(&second_id).unwrap(),
+            ExplorerEvent::SelectionChanged
+        );
+        assert_eq!(explorer.selected().unwrap().name(), "second.txt");
+        assert!(explorer.select_semantic_item("entry-missing").is_err());
     }
 
     #[test]

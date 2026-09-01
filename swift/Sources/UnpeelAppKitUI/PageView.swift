@@ -182,7 +182,7 @@ private struct PageContent: View {
     private func select(_ itemID: String, in list: UIListSpec) {
         guard list.items.contains(where: { $0.id == itemID }) else { return }
         let changed = selectedID != itemID
-        selectedID = itemID
+        selectLocally(itemID, in: list)
         guard changed, let action = list.select else { return }
         onAction(UIAction(
             nodeID: list.id,
@@ -190,6 +190,11 @@ private struct PageContent: View {
             kind: .change,
             value: .text(itemID)
         ))
+    }
+
+    private func selectLocally(_ itemID: String, in list: UIListSpec) {
+        guard list.items.contains(where: { $0.id == itemID }) else { return }
+        selectedID = itemID
     }
 
     private func handleKeyPress(
@@ -264,7 +269,10 @@ private struct PageContent: View {
 
     @discardableResult
     private func invokePrimary(_ item: UIListItemSpec, in list: UIListSpec) -> Bool {
-        select(item.id, in: list)
+        // The role action already identifies its target. Emitting selection
+        // first would give both events the same base revision and make the
+        // role action stale when the App advances on selection.
+        selectLocally(item.id, in: list)
         switch item.primaryRole {
         case .toggle:
             guard let toggle = item.primaryToggle else { return false }
@@ -327,7 +335,7 @@ private struct PageContent: View {
                         menuItem.label,
                         role: menuItem.role == .danger ? .destructive : nil
                     ) {
-                        select(item.id, in: list)
+                        selectLocally(item.id, in: list)
                         onAction(UIAction(
                             nodeID: menuItem.id,
                             action: menuItem.action,
@@ -378,7 +386,7 @@ private struct PageContent: View {
             slot(item.accessory, itemID: item.id, list: list)
             if let action = item.delete {
                 Button {
-                    select(item.id, in: list)
+                    selectLocally(item.id, in: list)
                     onAction(UIAction(
                         nodeID: item.id,
                         action: action,
@@ -424,7 +432,7 @@ private struct PageContent: View {
                 isOn: Binding(
                     get: { toggle.value },
                     set: { value in
-                        select(itemID, in: list)
+                        selectLocally(itemID, in: list)
                         listFocused = true
                         onAction(UIAction(
                             nodeID: toggle.id,

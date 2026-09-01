@@ -20,6 +20,7 @@ export class TreeRenderer {
   private readonly onAction: (action: UiAction) => void;
   private selectedId: string | undefined;
   private filterDraft = "";
+  private clickTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(container: HTMLElement, onAction: (action: UiAction) => void) {
     this.onAction = onAction;
@@ -36,6 +37,7 @@ export class TreeRenderer {
   }
 
   destroy(): void {
+    if (this.clickTimer !== undefined) clearTimeout(this.clickTimer);
     this.element.remove();
   }
 
@@ -161,12 +163,22 @@ export class TreeRenderer {
       busy.textContent = "…";
       item.append(busy);
     }
-    item.addEventListener("click", () => this.select(tree, row.item.id));
-    item.addEventListener("dblclick", () => this.activate(tree, row.item));
+    item.addEventListener("click", () => {
+      if (this.clickTimer !== undefined) clearTimeout(this.clickTimer);
+      this.clickTimer = setTimeout(() => {
+        this.select(tree, row.item.id);
+        this.clickTimer = undefined;
+      }, 180);
+    });
+    item.addEventListener("dblclick", () => {
+      if (this.clickTimer !== undefined) clearTimeout(this.clickTimer);
+      this.clickTimer = undefined;
+      this.activate(tree, row.item);
+    });
     if (tree.contextMenu !== undefined) {
       item.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        this.select(tree, row.item.id);
+        this.selectLocally(row.item.id);
         const host = document.createElement("div");
         host.className = "unpeel-context-menu";
         host.style.position = "fixed";
@@ -200,15 +212,19 @@ export class TreeRenderer {
 
   private select(tree: TreeNode, id: string): void {
     if (this.selectedId === id) return;
+    this.selectLocally(id);
+    this.onAction(uiAction(tree.id, tree.actions.select, "select", { type: "text", value: id }));
+  }
+
+  private selectLocally(id: string): void {
     this.selectedId = id;
     for (const row of this.element.querySelectorAll<HTMLElement>("[role=treeitem]")) {
       row.setAttribute("aria-selected", String(row.dataset.itemId === id));
     }
-    this.onAction(uiAction(tree.id, tree.actions.select, "select", { type: "text", value: id }));
   }
 
   private activate(tree: TreeNode, item: TreeItem): void {
-    this.select(tree, item.id);
+    this.selectLocally(item.id);
     if (item.kind === "parent") {
       this.onAction(uiAction(tree.id, tree.actions.parent, "cancel"));
     } else {

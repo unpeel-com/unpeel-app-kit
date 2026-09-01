@@ -167,8 +167,11 @@ private struct TreeContent: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { activate(row.item) }
-        .onTapGesture { select(row.id) }
+        .gesture(
+            TapGesture(count: 2)
+                .onEnded { activate(row.item) }
+                .exclusively(before: TapGesture().onEnded { select(row.id) })
+        )
         .contextMenu {
             if let menu = tree.contextMenu {
                 ForEach(menu.items) { menuItem in
@@ -176,7 +179,7 @@ private struct TreeContent: View {
                         menuItem.label,
                         role: menuItem.role == .danger ? .destructive : nil
                     ) {
-                        select(row.id)
+                        selectLocally(row.id)
                         onAction(UIAction(
                             nodeID: menuItem.id,
                             action: menuItem.action,
@@ -205,7 +208,7 @@ private struct TreeContent: View {
     private func select(_ id: String) {
         guard visibleItems.contains(where: { $0.id == id }) else { return }
         let changed = selectedID != id
-        selectedID = id
+        selectLocally(id)
         guard changed else { return }
         onAction(UIAction(
             nodeID: nodeID,
@@ -215,8 +218,13 @@ private struct TreeContent: View {
         ))
     }
 
+    private func selectLocally(_ id: String) {
+        guard visibleItems.contains(where: { $0.id == id }) else { return }
+        selectedID = id
+    }
+
     private func activate(_ item: UITreeItem) {
-        select(item.id)
+        selectLocally(item.id)
         if item.kind == .parent {
             parent()
         } else {
