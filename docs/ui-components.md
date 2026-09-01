@@ -113,6 +113,10 @@ The matching **Presentation paths (2026-08-31)** Product Philosophy note in
 Unpeel's `AGENTS.md` makes D14 and D16 the two sanctioned additive channels.
 D16's invariants are load-bearing conformance requirements:
 
+- **The Rust component model is the single source of truth.** Component state,
+  validation, semantics, behavior rules, and action meaning are defined once
+  in the Rust specification. Ratatui, Swift, and web interpret that contract;
+  none may repair, extend, or fork it privately.
 - **Terminal fallback is mandatory.** Every App is first a complete Ratatui
   TUI; semantic presentation cannot be required to launch, use, stream, or
   recover it.
@@ -127,6 +131,51 @@ D16's invariants are load-bearing conformance requirements:
 
 Unsupported components and older Hosts keep using the PTY. These boundaries
 are architectural invariants, not graceful-degradation suggestions.
+
+### Single-source-of-truth conformance
+
+The authoritative component is the owned Rust value and its Rust validation
+and reducer contract. Its serialized schema describes that same value; it is
+not a second model. Swift and web are pure interpreters: they render the
+declared state and translate native input into the declared typed actions.
+They do not own component state or behavior.
+
+A renderer may retain only view-local ephemera that has no App meaning and can
+be discarded on renderer restart—for example scroll position, IME marked-text
+composition, hover, a focus ring, or native control animation. If a value can
+affect validation, an emitted action, another participant, persistence,
+reconnect, accessibility meaning, or the next semantic revision, it belongs
+in the Rust component specification. Participant-specific semantic state uses
+the existing targeted projection; it is not renderer-local state.
+
+Platform code must never add corrective decoding, forked key or action rules,
+renderer-only payload fields, magic defaults, or an out-of-band side channel
+to make a component work. If Swift, web, or Ratatui cannot faithfully express
+the contract, the fix is to evolve the Rust specification, its validation and
+delta operations, the JSON Schema, and the shared fixtures together. Surface
+backgrounds are an example: the background is a `Surface` field consumed by
+Ratatui, Metal, and WebGPU, never a presenter-side default.
+
+Any divergence in declared state, validation outcome, interaction semantics,
+emitted action, accessibility meaning, or resulting App state is a bug.
+Platform-native visuals and disposable ephemera may differ only where the
+specification deliberately leaves presentation open; they cannot change the
+observable component contract.
+
+This is a shipment gate, not a follow-up task. Every new component or behavior
+change must land atomically with:
+
+1. the Rust specification, validation, reducer/action rules, and Ratatui
+   interpretation;
+2. complete Swift and web interpretations of that same contract;
+3. matching JSON Schema and shared NDJSON conformance vectors; and
+4. Rust, Swift, and web behavior tests that start from the same fixture state,
+   apply the same event/delta sequence, and assert the same canonical resulting
+   state and emitted semantic actions.
+
+An addition missing any one of those four parts must not ship. Cross-renderer
+tests must fail on platform-specific fields or state corrections rather than
+normalizing them away.
 
 ## Hosted runtime architecture
 
@@ -390,12 +439,19 @@ event, and clears optimistic/pending state when a new App instance appears.
 
 Every cross-renderer component has:
 
-1. an owned, serializable Rust specification;
+1. an owned, serializable Rust specification as its only behavioral authority;
 2. stable node and action identifiers;
 3. a Ratatui-backed terminal implementation;
 4. a Swift renderer with native controls and accessibility;
 5. a web renderer with native DOM behavior and accessibility; and
-6. validation plus one shared fixture corpus across implementations.
+6. matching validation, JSON Schema, and one shared NDJSON fixture corpus
+   across implementations; and
+7. cross-renderer behavior vectors proving that the same event/delta sequence
+   produces the same canonical state and semantic actions in Rust, Swift, and
+   web.
+
+This list is indivisible: a component is incomplete until all seven parts land
+together. Renderer-local workarounds do not count as an interpretation.
 
 Renderers preserve semantics and interaction, not terminal-cell geometry.
 Platform-native presentation is expected: for example, `List` can map to
@@ -1132,8 +1188,9 @@ vocabulary is intentionally conventional:
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
-Each should be added only with all three renderer interpretations and shared
-fixtures. Media, Page, Tree, and Menu exercise the required pane-level
+Each should be added only with all three renderer interpretations, shared
+fixtures, and cross-renderer event-sequence parity tests. Media, Page, Tree,
+and Menu exercise the required pane-level
 terminal fallback for renderers that do not advertise or recognize a kind;
 every later component inherits that rule. This keeps App Kit opinionated and
 prevents its public API from becoming an unbounded remote widget toolkit.
