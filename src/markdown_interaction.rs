@@ -14,8 +14,20 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::{KitTheme, MarkdownTextArea};
+#[cfg(feature = "ui-bridge")]
+use crate::{
+    MarkdownEditorActions, MarkdownMenuTrigger, SemanticMenu, SemanticMenuAnchor, SemanticMenuItem,
+    SemanticMenuPresentation, UiEvent, UiEventKind, UiEventValue,
+};
 
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+/// One action id shared by the terminal interaction controller and hosted renderers.
+#[cfg(feature = "ui-bridge")]
+pub const MARKDOWN_INSERT_SELECT_ACTION: &str = "markdown-menu-select";
+/// App-owned dismissal action for the nested Markdown insert Menu.
+#[cfg(feature = "ui-bridge")]
+pub const MARKDOWN_INSERT_DISMISS_ACTION: &str = "markdown-menu-dismiss";
 
 /// The closed set of blocks exposed by Markdown's `/` insert menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -184,6 +196,25 @@ pub const MARKDOWN_INSERT_ITEMS: &[MarkdownInsertItem] = &[
     },
 ];
 
+#[cfg(feature = "ui-bridge")]
+const fn markdown_insert_item_id(kind: MarkdownBlockKind) -> &'static str {
+    match kind {
+        MarkdownBlockKind::Heading1 => "block-heading-1",
+        MarkdownBlockKind::Heading2 => "block-heading-2",
+        MarkdownBlockKind::Heading3 => "block-heading-3",
+        MarkdownBlockKind::Heading4 => "block-heading-4",
+        MarkdownBlockKind::Heading5 => "block-heading-5",
+        MarkdownBlockKind::Heading6 => "block-heading-6",
+        MarkdownBlockKind::Paragraph => "block-paragraph",
+        MarkdownBlockKind::BulletList => "block-bullet-list",
+        MarkdownBlockKind::NumberedList => "block-numbered-list",
+        MarkdownBlockKind::Todo => "block-todo",
+        MarkdownBlockKind::Quote => "block-quote",
+        MarkdownBlockKind::CodeBlock => "block-code",
+        MarkdownBlockKind::Divider => "block-divider",
+    }
+}
+
 /// Result of routing one keyboard or pointer interaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MarkdownInteractionOutcome {
@@ -192,6 +223,30 @@ pub enum MarkdownInteractionOutcome {
     StateChanged,
     TextChanged,
 }
+
+/// A hosted Menu action could not be applied to the authoritative Markdown state.
+#[cfg(feature = "ui-bridge")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkdownInteractionEventError {
+    StaleRevision { expected: u64, received: u64 },
+    InvalidAction(String),
+}
+
+#[cfg(feature = "ui-bridge")]
+impl std::fmt::Display for MarkdownInteractionEventError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StaleRevision { expected, received } => write!(
+                formatter,
+                "Markdown changed from revision {received} to {expected}; retry the Menu action"
+            ),
+            Self::InvalidAction(message) => formatter.write_str(message),
+        }
+    }
+}
+
+#[cfg(feature = "ui-bridge")]
+impl std::error::Error for MarkdownInteractionEventError {}
 
 impl MarkdownInteractionOutcome {
     #[must_use]
@@ -226,6 +281,14 @@ struct MarkdownInsertPopup {
     item_kinds: Vec<MarkdownBlockKind>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MarkdownInsertOrigin {
+    #[default]
+    Slash,
+    #[cfg(feature = "ui-bridge")]
+    Palette,
+}
+
 impl MarkdownInsertPopup {
     const fn area(&self) -> Rect {
         self.area
@@ -252,6 +315,7 @@ impl MarkdownInsertPopup {
 #[derive(Debug)]
 pub struct MarkdownEditorInteraction {
     menu_open: bool,
+    menu_origin: MarkdownInsertOrigin,
     menu_selected: usize,
     popup: Option<MarkdownInsertPopup>,
     drag: Option<SelectionDrag>,
@@ -269,6 +333,7 @@ impl MarkdownEditorInteraction {
     pub const fn new() -> Self {
         Self {
             menu_open: false,
+            menu_origin: MarkdownInsertOrigin::Slash,
             menu_selected: 0,
             popup: None,
             drag: None,
@@ -279,6 +344,150 @@ impl MarkdownEditorInteraction {
     #[must_use]
     pub const fn is_insert_menu_open(&self) -> bool {
         self.menu_open
+    }
+
+    /// Projects the terminal interaction controller's current Menu verbatim
+    /// into the closed component vocabulary consumed by Swift and web.
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn semantic_insert_menu(&self, editor: &MarkdownTextArea<'_>) -> Option<SemanticMenu> {
+        if !self.menu_open {
+            return None;
+        }
+        let visible = self.visible_items(editor);
+        let items = visible.iter().map(|item| {
+            SemanticMenuItem::new(
+                markdown_insert_item_id(item.kind),
+                item.label,
+                MARKDOWN_INSERT_SELECT_ACTION,
+            )
+            .hint(format!("{}  {}", item.shortcut, item.sample))
+        });
+        let mut menu = SemanticMenu::new("Insert block", items)
+            .anchor(SemanticMenuAnchor::Caret)
+            .presentation(SemanticMenuPresentation::Popup)
+            .dismiss_action(MARKDOWN_INSERT_DISMISS_ACTION);
+        if let Some(selected) = visible.get(self.menu_selected.min(visible.len().saturating_sub(1)))
+        {
+            menu = menu.selected_id(markdown_insert_item_id(selected.kind));
+        }
+        Some(menu)
+    }
+
+    /// Routes only the nested Menu actions owned by this interaction model.
+    /// All other editor actions return `Ok(None)` for `MarkdownTextArea` to handle.
+    #[cfg(feature = "ui-bridge")]
+    pub fn handle_semantic_ui_event(
+        &mut self,
+        expected_revision: u64,
+        editor_id: &str,
+        editor: &mut MarkdownTextArea<'_>,
+        event: &UiEvent,
+    ) -> Result<Option<MarkdownInteractionOutcome>, MarkdownInteractionEventError> {
+        let is_open = event.action.node_id.as_str() == editor_id
+            && event.action.action.as_str() == MarkdownEditorActions::OPEN_MENU;
+        let is_dismiss = event.action.node_id.as_str() == editor_id
+            && event.action.action.as_str() == MARKDOWN_INSERT_DISMISS_ACTION;
+        let is_selection = event.action.action.as_str() == MARKDOWN_INSERT_SELECT_ACTION;
+        if !is_open && !is_dismiss && !is_selection {
+            return Ok(None);
+        }
+        if event.base_revision != expected_revision {
+            return Err(MarkdownInteractionEventError::StaleRevision {
+                expected: expected_revision,
+                received: event.base_revision,
+            });
+        }
+
+        if is_open {
+            let UiEventValue::Text(trigger) = &event.action.value else {
+                return Err(MarkdownInteractionEventError::InvalidAction(
+                    "Markdown Menu trigger requires a text value".to_owned(),
+                ));
+            };
+            if event.action.kind != UiEventKind::Command {
+                return Err(MarkdownInteractionEventError::InvalidAction(
+                    "Markdown Menu trigger requires a command event".to_owned(),
+                ));
+            }
+            let trigger = match trigger.as_str() {
+                "slash" => MarkdownMenuTrigger::Slash,
+                "palette" => MarkdownMenuTrigger::Palette,
+                other => {
+                    return Err(MarkdownInteractionEventError::InvalidAction(format!(
+                        "unknown Markdown Menu trigger {other}"
+                    )));
+                }
+            };
+            return Ok(Some(self.request_semantic_menu(editor, trigger)));
+        }
+
+        if is_dismiss {
+            if event.action.kind != UiEventKind::Cancel || event.action.value != UiEventValue::None
+            {
+                return Err(MarkdownInteractionEventError::InvalidAction(
+                    "Markdown Menu dismissal requires a cancel event".to_owned(),
+                ));
+            }
+            let before = document(editor);
+            if self.menu_open && self.menu_origin == MarkdownInsertOrigin::Slash {
+                clear_slash_command(editor.text_area_mut());
+            }
+            self.close_menu();
+            return Ok(Some(outcome(true, before != document(editor))));
+        }
+
+        if event.action.kind != UiEventKind::Activate || event.action.value != UiEventValue::None {
+            return Err(MarkdownInteractionEventError::InvalidAction(
+                "Markdown Menu selection requires an activate event".to_owned(),
+            ));
+        }
+        if !self.menu_open {
+            return Err(MarkdownInteractionEventError::InvalidAction(
+                "Markdown Menu is no longer open".to_owned(),
+            ));
+        }
+        let Some(kind) = self
+            .visible_items(editor)
+            .into_iter()
+            .find(|item| markdown_insert_item_id(item.kind) == event.action.node_id.as_str())
+            .map(|item| item.kind)
+        else {
+            return Err(MarkdownInteractionEventError::InvalidAction(
+                "Markdown Menu item is no longer visible".to_owned(),
+            ));
+        };
+        let before = document(editor);
+        apply_slash(editor.text_area_mut(), kind);
+        self.close_menu();
+        Ok(Some(outcome(true, before != document(editor))))
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    fn request_semantic_menu(
+        &mut self,
+        editor: &mut MarkdownTextArea<'_>,
+        trigger: MarkdownMenuTrigger,
+    ) -> MarkdownInteractionOutcome {
+        let before = document(editor);
+        if can_open_slash(editor.text_area()) {
+            if trigger == MarkdownMenuTrigger::Slash {
+                editor.insert_char('/');
+                self.menu_origin = MarkdownInsertOrigin::Slash;
+            } else {
+                self.menu_origin = MarkdownInsertOrigin::Palette;
+            }
+            self.menu_open = true;
+            self.menu_selected = 0;
+            self.popup = None;
+        } else {
+            editor.insert_char(match trigger {
+                MarkdownMenuTrigger::Slash => '/',
+                MarkdownMenuTrigger::Palette => '\\',
+            });
+            apply_markdown_shortcut(editor.text_area_mut());
+        }
+        outcome(true, before != document(editor))
     }
 
     /// Routes one `tui-textarea` input through Markdown-aware editing rules.
@@ -539,6 +748,7 @@ impl MarkdownEditorInteraction {
             } if can_open_slash(editor.text_area_mut()) => {
                 editor.insert_char('/');
                 self.menu_open = true;
+                self.menu_origin = MarkdownInsertOrigin::Slash;
                 self.menu_selected = 0;
                 self.popup = None;
                 true
@@ -559,7 +769,9 @@ impl MarkdownEditorInteraction {
     fn handle_menu_input(&mut self, editor: &mut MarkdownTextArea<'_>, input: Input) -> bool {
         match input {
             Input { key: Key::Esc, .. } => {
-                clear_slash_command(editor.text_area_mut());
+                if self.menu_origin == MarkdownInsertOrigin::Slash {
+                    clear_slash_command(editor.text_area_mut());
+                }
                 self.close_menu();
                 true
             }
@@ -616,7 +828,11 @@ impl MarkdownEditorInteraction {
     }
 
     fn visible_items(&self, editor: &MarkdownTextArea<'_>) -> Vec<&'static MarkdownInsertItem> {
-        let query = slash_query(editor.text_area()).unwrap_or_default();
+        let query = match self.menu_origin {
+            MarkdownInsertOrigin::Slash => slash_query(editor.text_area()).unwrap_or_default(),
+            #[cfg(feature = "ui-bridge")]
+            MarkdownInsertOrigin::Palette => String::new(),
+        };
         visible_markdown_insert_items(&query)
     }
 
@@ -641,7 +857,9 @@ impl MarkdownEditorInteraction {
     }
 
     fn sync_menu(&mut self, editor: &MarkdownTextArea<'_>) {
-        if slash_query(editor.text_area()).is_none() {
+        if self.menu_origin == MarkdownInsertOrigin::Slash
+            && slash_query(editor.text_area()).is_none()
+        {
             self.close_menu();
             return;
         }
@@ -653,6 +871,7 @@ impl MarkdownEditorInteraction {
 
     fn close_menu(&mut self) {
         self.menu_open = false;
+        self.menu_origin = MarkdownInsertOrigin::Slash;
         self.menu_selected = 0;
         self.popup = None;
     }
@@ -1217,6 +1436,57 @@ mod tests {
         );
         assert!(outcome.text_changed());
         assert_eq!(editor.lines(), &["- [ ] "]);
+    }
+
+    #[test]
+    #[cfg(feature = "ui-bridge")]
+    fn hosted_slash_and_selection_use_the_same_interaction_state_as_the_tui() {
+        let mut editor = editor(&[""]);
+        let mut interaction = MarkdownEditorInteraction::new();
+        let slash = crate::UiEvent::new(
+            "app-test",
+            "person-test",
+            "client-test",
+            "renderer-test",
+            "main",
+            "event-slash",
+            4,
+            crate::UiAction::new(
+                "markdown-editor",
+                MarkdownEditorActions::OPEN_MENU,
+                UiEventKind::Command,
+                UiEventValue::Text("slash".to_owned()),
+            ),
+        );
+        assert_eq!(
+            interaction
+                .handle_semantic_ui_event(4, "markdown-editor", &mut editor, &slash)
+                .unwrap(),
+            Some(MarkdownInteractionOutcome::TextChanged)
+        );
+        assert_eq!(editor.lines(), &["/"]);
+        let menu = interaction.semantic_insert_menu(&editor).unwrap();
+        assert_eq!(menu.selected_id.as_deref(), Some("block-heading-1"));
+        assert_eq!(menu.items[0].action, MARKDOWN_INSERT_SELECT_ACTION);
+
+        let select = crate::UiEvent::new(
+            "app-test",
+            "person-test",
+            "client-test",
+            "renderer-test",
+            "main",
+            "event-select",
+            5,
+            crate::UiAction::activate("block-heading-1", MARKDOWN_INSERT_SELECT_ACTION),
+        );
+        assert_eq!(
+            interaction
+                .handle_semantic_ui_event(5, "markdown-editor", &mut editor, &select)
+                .unwrap(),
+            Some(MarkdownInteractionOutcome::TextChanged)
+        );
+        assert_eq!(editor.lines(), &["# "]);
+        assert!(interaction.semantic_insert_menu(&editor).is_none());
     }
 
     #[test]

@@ -136,7 +136,12 @@ cd web
 bun run build:kitchen-sink
 bun run check
 bun test
+bun run test:browser
 ```
+
+The browser test drives the shared slash-command conformance fixture through
+the real DOM renderer. Install its Chromium runtime once with
+`bunx playwright install chromium` if it is not already available.
 
 This package depends on the sibling `UnpeelAppKitUI` library, but is a separate
 SwiftPM package and is never a dependency of that library. Its workflow is

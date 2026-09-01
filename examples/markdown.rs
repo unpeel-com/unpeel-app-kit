@@ -24,9 +24,9 @@ use ratatui::widgets::Paragraph;
 use serde::{Deserialize, Serialize};
 use tui_textarea::{Input as TextInput, Key as TextKey};
 use unpeel_app_kit::{
-    AppMetadata, MarkdownEditor, MarkdownEditorConfig, MarkdownEditorEvent,
-    MarkdownEditorInteraction, MarkdownEditorStyle, MarkdownPresentation, UiBridge, UiBridgeEvent,
-    UiEventOutcome, UiNode, markdown_delta_operations,
+    AppMetadata, MarkdownCommandHint, MarkdownEditor, MarkdownEditorActions, MarkdownEditorConfig,
+    MarkdownEditorEvent, MarkdownEditorInteraction, MarkdownEditorStyle, MarkdownPresentation,
+    UiBridge, UiBridgeEvent, UiEventOutcome, UiNode, markdown_delta_operations,
 };
 
 const STATE_FORMAT: &str = "unpeel.app-kit.example.markdown";
@@ -113,9 +113,16 @@ impl MarkdownApp {
     }
 
     fn config(&self) -> MarkdownEditorConfig {
+        self.config_with_title("Kitchen Sink.md")
+    }
+
+    fn config_with_title(&self, title: impl Into<String>) -> MarkdownEditorConfig {
         MarkdownEditorConfig::new(EDITOR_ID)
-            .title("Kitchen Sink.md")
+            .title(title)
             .presentation(self.state.presentation)
+            .open_menu_action(MarkdownEditorActions::OPEN_MENU)
+            .command_hint(MarkdownCommandHint::new("Type '/' for commands"))
+            .insert_menu(self.interaction.semantic_insert_menu(&self.editor))
     }
 
     fn node(&self) -> UiNode {
@@ -123,11 +130,8 @@ impl MarkdownApp {
     }
 
     fn personalized_node(&self, participant_name: &str) -> UiNode {
-        self.editor.ui_node(
-            &MarkdownEditorConfig::new(EDITOR_ID)
-                .title(format!("Kitchen Sink.md · {participant_name}"))
-                .presentation(self.state.presentation),
-        )
+        self.editor
+            .ui_node(&self.config_with_title(format!("Kitchen Sink.md · {participant_name}")))
     }
 
     fn commit_projection_change(&mut self) -> Result<(u64, u64), Box<dyn Error>> {
@@ -282,38 +286,57 @@ fn drain_bridge(app: &mut MarkdownApp, bridge: &mut UiBridge) -> Result<(), Box<
             UiBridgeEvent::Action { event, .. } => {
                 let previous = app.node();
                 let config = app.config();
-                let outcome = match app.editor.handle_ui_event(app.revision, &config, &event) {
-                    Ok(Some(MarkdownEditorEvent::TextChanged { changed: true }))
-                    | Ok(Some(MarkdownEditorEvent::Undo { changed: true }))
-                    | Ok(Some(MarkdownEditorEvent::Redo { changed: true })) => {
-                        publish_projection_change(app, bridge, previous, true)?;
-                        UiEventOutcome::Applied
-                    }
-                    Ok(Some(MarkdownEditorEvent::PresentationRequested(presentation))) => {
-                        app.state.presentation = presentation;
-                        publish_projection_change(app, bridge, previous, true)?;
-                        UiEventOutcome::Applied
-                    }
-                    Ok(Some(MarkdownEditorEvent::SaveRequested)) => {
-                        app.save_without_revision()?;
-                        UiEventOutcome::Applied
-                    }
-                    Ok(Some(MarkdownEditorEvent::MenuRequested(_))) => UiEventOutcome::Rejected(
-                        "The basic Markdown example does not declare an App-owned Menu".to_owned(),
-                    ),
-                    Ok(Some(MarkdownEditorEvent::SelectionChanged)) => {
-                        publish_projection_change(app, bridge, previous, false)?;
-                        UiEventOutcome::Applied
-                    }
-                    Ok(Some(MarkdownEditorEvent::TextChanged { changed: false }))
-                    | Ok(Some(MarkdownEditorEvent::Undo { changed: false }))
-                    | Ok(Some(MarkdownEditorEvent::Redo { changed: false })) => {
-                        UiEventOutcome::Applied
-                    }
-                    Ok(None) => {
-                        UiEventOutcome::Rejected("Action targets a different component".to_owned())
-                    }
+                let menu_result = app.interaction.handle_semantic_ui_event(
+                    app.revision,
+                    EDITOR_ID,
+                    &mut app.editor,
+                    &event,
+                );
+                let outcome = match menu_result {
                     Err(error) => UiEventOutcome::Rejected(error.to_string()),
+                    Ok(Some(interaction)) => {
+                        publish_projection_change(
+                            app,
+                            bridge,
+                            previous,
+                            interaction.text_changed(),
+                        )?;
+                        UiEventOutcome::Applied
+                    }
+                    Ok(None) => match app.editor.handle_ui_event(app.revision, &config, &event) {
+                        Ok(Some(MarkdownEditorEvent::TextChanged { changed: true }))
+                        | Ok(Some(MarkdownEditorEvent::Undo { changed: true }))
+                        | Ok(Some(MarkdownEditorEvent::Redo { changed: true })) => {
+                            publish_projection_change(app, bridge, previous, true)?;
+                            UiEventOutcome::Applied
+                        }
+                        Ok(Some(MarkdownEditorEvent::PresentationRequested(presentation))) => {
+                            app.state.presentation = presentation;
+                            publish_projection_change(app, bridge, previous, true)?;
+                            UiEventOutcome::Applied
+                        }
+                        Ok(Some(MarkdownEditorEvent::SaveRequested)) => {
+                            app.save_without_revision()?;
+                            UiEventOutcome::Applied
+                        }
+                        Ok(Some(MarkdownEditorEvent::MenuRequested(_))) => UiEventOutcome::Rejected(
+                            "Markdown Menu trigger was not routed through its interaction model"
+                                .to_owned(),
+                        ),
+                        Ok(Some(MarkdownEditorEvent::SelectionChanged)) => {
+                            publish_projection_change(app, bridge, previous, false)?;
+                            UiEventOutcome::Applied
+                        }
+                        Ok(Some(MarkdownEditorEvent::TextChanged { changed: false }))
+                        | Ok(Some(MarkdownEditorEvent::Undo { changed: false }))
+                        | Ok(Some(MarkdownEditorEvent::Redo { changed: false })) => {
+                            UiEventOutcome::Applied
+                        }
+                        Ok(None) => UiEventOutcome::Rejected(
+                            "Action targets a different component".to_owned(),
+                        ),
+                        Err(error) => UiEventOutcome::Rejected(error.to_string()),
+                    },
                 };
                 bridge.acknowledge(&event, outcome, app.revision)?;
             }
@@ -543,5 +566,89 @@ mod tests {
         assert_eq!(app.revision, 2);
         assert_eq!(app.state.revision, 1);
         assert_eq!(fs::read(path).unwrap(), saved);
+    }
+
+    #[test]
+    fn hosted_slash_round_trip_publishes_and_applies_the_same_menu_as_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = MarkdownApp::load(directory.path().join("markdown.json")).unwrap();
+        app.editor.text_area_mut().move_cursor(CursorMove::Bottom);
+        app.editor.text_area_mut().move_cursor(CursorMove::End);
+        app.editor.text_area_mut().insert_newline();
+        let previous = app.node();
+        let unpeel_app_kit::UiComponent::MarkdownEditor(editor) = &previous.element else {
+            panic!("Markdown example must publish MarkdownEditor");
+        };
+        assert_eq!(
+            editor
+                .actions
+                .open_menu
+                .as_ref()
+                .map(|action| action.as_str()),
+            Some(MarkdownEditorActions::OPEN_MENU)
+        );
+        assert_eq!(
+            editor.command_hint.as_ref().map(|hint| hint.text.as_str()),
+            Some("Type '/' for commands")
+        );
+
+        let slash = unpeel_app_kit::UiEvent::new(
+            "app-test",
+            "person-test",
+            "client-test",
+            "renderer-test",
+            VIEW_ID,
+            "event-slash",
+            app.revision,
+            unpeel_app_kit::UiAction::new(
+                EDITOR_ID,
+                MarkdownEditorActions::OPEN_MENU,
+                unpeel_app_kit::UiEventKind::Command,
+                unpeel_app_kit::UiEventValue::Text("slash".to_owned()),
+            ),
+        );
+        assert!(
+            app.interaction
+                .handle_semantic_ui_event(app.revision, EDITOR_ID, &mut app.editor, &slash)
+                .unwrap()
+                .is_some_and(|outcome| outcome.text_changed())
+        );
+        let with_menu = app.node();
+        let operations = markdown_delta_operations(&previous, &with_menu);
+        assert!(operations.iter().any(|operation| matches!(
+            operation,
+            unpeel_app_kit::UiDeltaOperation::MarkdownSetMenus {
+                insert_menu: Some(_),
+                ..
+            }
+        )));
+        let unpeel_app_kit::UiComponent::MarkdownEditor(editor) = &with_menu.element else {
+            panic!("slash must preserve MarkdownEditor");
+        };
+        let item = editor.insert_menu.as_ref().unwrap().items[0].clone();
+        app.advance_projection_revision().unwrap();
+
+        let selection = unpeel_app_kit::UiEvent::new(
+            "app-test",
+            "person-test",
+            "client-test",
+            "renderer-test",
+            VIEW_ID,
+            "event-selection",
+            app.revision,
+            unpeel_app_kit::UiAction::activate(item.id, item.action),
+        );
+        assert!(
+            app.interaction
+                .handle_semantic_ui_event(app.revision, EDITOR_ID, &mut app.editor, &selection,)
+                .unwrap()
+                .is_some_and(|outcome| outcome.text_changed())
+        );
+        let selected = app.node();
+        let unpeel_app_kit::UiComponent::MarkdownEditor(editor) = &selected.element else {
+            panic!("selection must preserve MarkdownEditor");
+        };
+        assert!(editor.insert_menu.is_none());
+        assert!(markdown_document(app.editor.lines()).ends_with("# "));
     }
 }

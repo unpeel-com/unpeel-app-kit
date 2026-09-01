@@ -107,6 +107,10 @@ pub use list_navigation::{
     RowBoundaryBehavior, RowKeyDecision, RowNavigationState, RowPointerDecision, RowPrimaryRole,
 };
 pub use markdown::{MarkdownCommandHint, MarkdownCommandHintVisibility};
+#[cfg(all(feature = "markdown-text-area", feature = "ui-bridge"))]
+pub use markdown_interaction::{
+    MARKDOWN_INSERT_DISMISS_ACTION, MARKDOWN_INSERT_SELECT_ACTION, MarkdownInteractionEventError,
+};
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_interaction::{
     MARKDOWN_INSERT_ITEMS, MarkdownBlockKind, MarkdownEditorInteraction, MarkdownInsertItem,

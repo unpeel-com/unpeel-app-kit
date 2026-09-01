@@ -51,7 +51,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(44);
+    expect(messages).toHaveLength(49);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -403,6 +403,30 @@ describe("shared protocol", () => {
     expect(gaugeValueLabel(updatedQuotaSlot)).toBe("61% left · Resets in 4d");
     expect(updatedQuota.root.footer?.actions[1]?.label).toBe("refreshing…");
     expect(updatedQuota.root.footer?.actions[1]?.disabled).toBe(true);
+
+    const slashSnapshot = messages[44] as UiSnapshot;
+    expect(messages[45]).toMatchObject({
+      type: "event",
+      nodeId: "slash-roundtrip-editor",
+      action: "open-menu",
+      kind: "command",
+      value: { type: "text", value: "slash" },
+    });
+    const slashMenuSnapshot = applyUiDelta(slashSnapshot, messages[46] as UiDelta);
+    if (!isMarkdownEditorNode(slashMenuSnapshot.root)) throw new Error("expected slash Menu");
+    expect(slashMenuSnapshot.root.text).toBe("/");
+    expect(slashMenuSnapshot.root.insertMenu?.anchor).toBe("caret");
+    expect(slashMenuSnapshot.root.insertMenu?.selectedId).toBe("block-heading-1");
+    expect(messages[47]).toMatchObject({
+      type: "event",
+      nodeId: "block-heading-1",
+      action: "markdown-menu-select",
+      kind: "activate",
+    });
+    const selectedSnapshot = applyUiDelta(slashMenuSnapshot, messages[48] as UiDelta);
+    if (!isMarkdownEditorNode(selectedSnapshot.root)) throw new Error("expected Markdown");
+    expect(selectedSnapshot.root.text).toBe("# ");
+    expect(selectedSnapshot.root.insertMenu).toBeUndefined();
   });
 
   test("uses one role-aware Enter and Space decision table", () => {

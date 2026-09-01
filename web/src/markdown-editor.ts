@@ -132,6 +132,7 @@ export class MarkdownEditorRenderer {
     this.insertMenu.className = "unpeel-markdown-editor__insert-menu";
     this.insertMenu.setAttribute("role", "listbox");
     this.insertMenu.hidden = true;
+    this.insertMenu.style.display = "none";
     this.insertMenu.style.position = "absolute";
     this.insertMenu.style.zIndex = "20";
     this.insertMenu.style.insetInlineStart = "12px";
@@ -469,6 +470,7 @@ export class MarkdownEditorRenderer {
     }
     const projection = { ...menu, selectedId: this.semanticSelectedId };
     this.insertMenu.hidden = false;
+    this.insertMenu.style.removeProperty("display");
     renderSemanticMenu(this.insertMenu, projection, this.editor.id, (action) => {
       this.onAction(action);
       this.textarea.focus();
@@ -490,6 +492,7 @@ export class MarkdownEditorRenderer {
 
   private closeInsertMenu(): void {
     this.insertMenu.hidden = true;
+    this.insertMenu.style.display = "none";
     this.insertMenu.replaceChildren();
     this.semanticSelectedId = undefined;
   }

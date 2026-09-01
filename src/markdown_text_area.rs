@@ -5,7 +5,9 @@ use std::ops::{Deref, DerefMut};
 use crossterm::event::MouseEvent;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
+#[cfg(feature = "ui-bridge")]
+use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tui_textarea::{CursorMove, CursorRenderMode, Input, Key, TextArea, WrapMode};

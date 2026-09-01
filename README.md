@@ -926,7 +926,7 @@ cargo test --no-default-features --features media
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 (cd swift && swift test)
-(cd web && bun install --frozen-lockfile && bun run check && bun test)
+(cd web && bun install --frozen-lockfile && bun run check && bun test && bun run test:browser)
 ```
 
 The Explorer and drag tests render into Ratatui's `Buffer`/`TestBackend` and

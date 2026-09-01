@@ -18,7 +18,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 44);
+    assert_eq!(messages.len(), 49);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -590,4 +590,47 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(gauge.value_label(), "61% left · Resets in 4d");
     assert_eq!(page.footer.actions[1].label, "refreshing…");
     assert!(page.footer.actions[1].disabled);
+
+    let UiMessage::Snapshot(slash_snapshot) = &messages[44] else {
+        panic!("slash round-trip must start from a Markdown snapshot");
+    };
+    let UiMessage::Event(slash_event) = &messages[45] else {
+        panic!("slash round-trip must carry the renderer command");
+    };
+    assert_eq!(slash_event.action.action.as_str(), "open-menu");
+    assert_eq!(slash_event.action.kind, UiEventKind::Command);
+    assert_eq!(
+        slash_event.action.value,
+        UiEventValue::Text(MarkdownMenuTrigger::Slash.as_str().to_owned())
+    );
+    let UiMessage::Delta(open_menu_delta) = &messages[46] else {
+        panic!("Rust reducer must publish the slash Menu as a delta");
+    };
+    let menu_snapshot = slash_snapshot.applying(open_menu_delta).unwrap();
+    let UiComponent::MarkdownEditor(editor) = &menu_snapshot.root.element else {
+        panic!("slash delta must preserve MarkdownEditor");
+    };
+    assert_eq!(editor.text, "/");
+    let menu = editor.insert_menu.as_ref().expect("published insert Menu");
+    assert_eq!(menu.anchor, unpeel_app_kit::SemanticMenuAnchor::Caret);
+    assert_eq!(menu.selected_id.as_deref(), Some("block-heading-1"));
+
+    let UiMessage::Event(selection_event) = &messages[47] else {
+        panic!("renderer must return the selected Menu item");
+    };
+    assert_eq!(selection_event.action.node_id.as_str(), "block-heading-1");
+    assert_eq!(
+        selection_event.action.action.as_str(),
+        "markdown-menu-select"
+    );
+    assert_eq!(selection_event.action.kind, UiEventKind::Activate);
+    let UiMessage::Delta(selection_delta) = &messages[48] else {
+        panic!("selected item must publish its resulting Markdown state");
+    };
+    let selected_snapshot = menu_snapshot.applying(selection_delta).unwrap();
+    let UiComponent::MarkdownEditor(editor) = selected_snapshot.root.element else {
+        panic!("selection delta must preserve MarkdownEditor");
+    };
+    assert_eq!(editor.text, "# ");
+    assert!(editor.insert_menu.is_none());
 }
