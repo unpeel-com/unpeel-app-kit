@@ -90,6 +90,11 @@ final class TerminalEngineController: NSObject {
 
         let theme = TerminalTheme(light: Self.colors, dark: Self.colors)
         let controller = TerminalController(theme: theme) { builder in
+            // Match the product Host's proven libghostty launch path: EXEC's
+            // command is part of the controller config, while per-session
+            // cwd/environment stay on the surface options below.
+            builder.withCustom("command", launch.executable)
+            builder.withCustom("wait-after-command", "false")
             builder.withCustom("keybind", "clear")
             builder.withCustom("keybind", "performable:super+c=copy_to_clipboard")
             builder.withCustom("keybind", "super+v=paste_from_clipboard")
@@ -109,14 +114,25 @@ final class TerminalEngineController: NSObject {
             // user's locale (and emits `12,5` under Norwegian locales).
             builder.withCustom("font-size", "12.5")
         }
+        if ProcessInfo.processInfo.environment["UNPEEL_KITCHEN_GHOSTTY_DEBUG"] == "1" {
+            let issue = controller.lastConfigurationIssue ?? "none"
+            let resources = GhosttyRuntimeResources.directoryURL?.path ?? "missing"
+            let terminfo = GhosttyRuntimeResources.terminfoDirectoryURL?.path ?? "missing"
+            NSLog(
+                "[KitchenSink] Ghostty issue=%@ resources=%@ terminfo=%@ command=%@ cwd=%@",
+                issue,
+                resources,
+                terminfo,
+                launch.executable,
+                launch.currentDirectory
+            )
+        }
         let terminal = KitchenSinkTerminalView(frame: view.bounds)
         terminal.configuration = TerminalSurfaceOptions(
             backend: .exec,
             fontSize: 12.5,
             workingDirectory: launch.currentDirectory,
             envVars: launch.environment,
-            command: launch.executable,
-            waitAfterCommand: false,
             context: .window
         )
         terminal.delegate = self
@@ -124,7 +140,22 @@ final class TerminalEngineController: NSObject {
         terminalController = controller
         terminalView = terminal
         view.install(terminal)
-        terminal.setSurfaceVisible(isDisplayed)
+        // libghostty creates the exec backend with its first visible surface.
+        // Bootstrap that surface for one main-loop turn even when this session
+        // starts in the parking window; otherwise an unselected session never
+        // launches its PTY, never creates ui.sock, and cannot participate in
+        // the semantic audit. Parked sessions are hidden again immediately,
+        // so only their always-on process remains active.
+        terminal.setSurfaceVisible(true)
+        if !isDisplayed {
+            DispatchQueue.main.async { [weak self, weak terminal] in
+                guard let self, let terminal,
+                      self.terminalView === terminal,
+                      !self.isDisplayed
+                else { return }
+                terminal.setSurfaceVisible(false)
+            }
+        }
     }
 
     func terminate() {

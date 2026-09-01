@@ -766,14 +766,20 @@ final class HostedAppSession: ObservableObject, Identifiable {
     private func waitForSocketAndStartRenderer() {
         guard !primaryClientStarted, rendererEnabled else { return }
         Task { [weak self] in
-            for _ in 0..<100 {
+            // Guest startup is intentionally allowed to do real provider and
+            // repository discovery before binding its bridge. Five seconds
+            // was not a lifecycle guarantee: slower component apps could be
+            // alive in their PTYs yet permanently miss renderer attachment.
+            // Keep watching for the lifetime of the child instead.
+            while !Task.isCancelled {
                 guard let self, self.rendererEnabled, !self.primaryClientStarted else { return }
+                guard self.terminalEngine.isRunning else { return }
                 if FileManager.default.fileExists(atPath: self.socketPath) {
                     self.primaryClientStarted = true
                     self.primaryClient?.start(rendererState: self.effectiveRendererState)
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(50))
+                try? await Task.sleep(for: .milliseconds(100))
             }
         }
     }
