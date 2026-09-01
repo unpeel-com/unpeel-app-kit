@@ -207,6 +207,7 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
 | Page semantic projection | Closed Page/List/ListItem/Toggle/Input trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
+| Explorer semantic projection (planned) | A separate closed Explorer/Tree contract preserving hierarchy, filter focus, wrap/page navigation, and the synthetic parent action; it is not encoded as flat ListItems |
 | Surface semantic projection | Opaque session/stream reference, sizing, background, and input policy only; Swift/web wrappers inject existing USRF local-GPU presenters and never consume frames |
 | CanvasPage semantic projection | Closed Surface slot plus Button actions; scene/input stays on USRF while toolbar interaction stays on `unpeel.ui` |
 
@@ -518,6 +519,14 @@ pointer with the terminal emulator when it wants native path dragging.
 the component, while file activation remains App-owned. `ExplorerTheme`
 contains styles and spacing only. There is intentionally no `Block`, border,
 or mandatory background, so Apps can compose it without inherited chrome.
+
+The current hosted vocabulary does not flatten Explorer rows into semantic
+`ListItem`s. The planned Explorer/Tree projection keeps directory hierarchy,
+the filter/tree focus loop, single-step selection wrapping, and the synthetic
+parent entry as distinct schema semantics. Until that complete Rust + Swift +
+web slice lands, Filetree and Markdown's picker remain on this fully functional
+Ratatui Explorer and hosted renderers use the pane's terminal fallback. See
+[the Explorer/Tree follow-up contract](docs/ui-components.md#explorertree-follow-up-contract).
 
 ## Project paths and preferred editor
 

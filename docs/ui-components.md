@@ -521,6 +521,78 @@ action. Rich Ratatui meters remain App-owned, but native/web users can navigate
 and refresh the same authoritative provider model without introducing a
 generic dashboard or flex container.
 
+## Explorer/Tree follow-up contract
+
+Filetree and Markdown's note picker are not flat Lists. Their standalone TUIs
+continue to use the existing `Explorer` unchanged, including its current-folder
+navigation, filter focus, synthetic parent row, directory/file distinction,
+selection wrapping, page behavior, path hit testing, and drag registration.
+They must not be migrated by serializing the visible rows as `ListItem`s: doing
+so would erase hierarchy and make parent navigation look like file activation.
+
+The later hosted component is one closed `Explorer`/`Tree` family, not an
+arbitrary recursive `UiNode` container. Its proposed snapshot has:
+
+- one keyed Explorer root with a display location, optional named filter,
+  selected entry id, empty-state text, and declared select/open/parent/filter
+  actions plus one idempotent set-expanded action when outline mode is used;
+- ordered `ExplorerItem` values whose closed kind is `parent`, `directory`, or
+  `file`, plus label, symlink/hidden metadata, and only directory-owned
+  `ExplorerItem` children;
+- an explicit child state (`loaded`, `unloaded`, or `loading`) so a renderer
+  never mistakes an empty directory for a lazily omitted subtree; and
+- bounded node count/depth validation. Items cannot contain controls, Pages,
+  Lists, or arbitrary component children.
+
+The same model supports a drill-down presentation, matching today's Ratatui
+Explorer and Markdown picker, or a native outline presentation. Ordering and
+identity remain App-owned in both cases. An entry id is an opaque App key sent
+back by actions; it is not an absolute Host filesystem path. The App resolves
+that key inside its scoped navigation root. Local Ratatui drag registration may
+continue using absolute paths, but those paths and drag URLs never enter the
+remote semantic snapshot.
+
+The synthetic parent item is a distinct semantic kind. It stays visible while
+filtering, is absent at a scoped root, and invokes the root's `parent` action;
+it never masquerades as a directory or emits the ordinary file `open` action.
+Breadcrumbs or ancestor labels are presentation metadata, not additional
+selectable rows.
+
+Explorer keeps its existing interaction contract rather than inheriting
+`ListKeymap`'s clamped behavior:
+
+- with the tree focused, Up/Down wrap one row, Home/End select boundaries,
+  PageUp/PageDown move by the rendered viewport and clamp, Right/Enter opens,
+  and Left/Backspace/Escape navigates to the parent;
+- Tab, `/`, Ctrl-F, or typing any unmodified printable character focuses the
+  filter; the first printable character is inserted, including `j`, `k`, and
+  `q` rather than interpreting them as List navigation;
+- with the filter focused, Tab or Down returns to the tree, Up moves selection
+  while keeping filter focus, Escape navigates to the parent, and the normal
+  text-selection/editing keys remain native; and
+- Up from the first tree row focuses the filter, preserving the current
+  Filetree and Markdown picker focus loop.
+
+Filter focus is ephemeral per renderer/participant and must not steal focus
+from another participant. The focus loop is a renderer rule; filter value,
+current location, entry projection, and selected id remain authoritative App
+state (or a participant-targeted projection when the App wants private
+selection). Native Swift uses a `TextField` plus `List`/`OutlineGroup`; web uses
+an input plus an ARIA `tree` with roving focus and `treeitem`
+`aria-expanded`/`aria-selected` state. Both implement the same keys above.
+
+The delta vocabulary should start with keyed selection, filter replacement,
+location replacement, child splice, child loading-state, and expansion
+updates. Any non-contiguous base or invalid hierarchy requests a complete
+snapshot. Renderers must advertise Explorer, hierarchy, filter, and parent-row
+capabilities required by a projection; an older renderer falls back to the
+terminal for the whole pane without failing attach.
+
+This is a bounded file/document-navigation primitive for Apps such as a file
+browser or note picker, not IDE project chrome. It remains the D16 semantic
+side of those Apps; editing stays in `MarkdownEditor`, while canvas scenes stay
+on the D14 Surface path.
+
 ## MarkdownEditor v1
 
 The first component reuses `tui-textarea-2` rather than introducing another
@@ -876,7 +948,7 @@ The next useful vocabulary is intentionally conventional:
 | --- | --- | --- |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
-| `Explorer` | existing `Explorer` | hierarchical file navigation and drops |
+| `Explorer` / `Tree` | existing `Explorer` retained exactly | closed hierarchical file/document navigation with filter-focus and a distinct parent-entry action; design above, not yet a wire component |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared
