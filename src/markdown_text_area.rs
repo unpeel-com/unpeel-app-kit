@@ -31,6 +31,8 @@ const DEFAULT_DROP_EDGE_ROWS: u16 = 2;
 /// [`TextArea`] through [`MarkdownTextArea::text_area_mut`] before rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MarkdownTextAreaStyle {
+    /// Style for the spec-owned terminal title/status row.
+    pub status: Style,
     /// Background style for the data row containing the cursor.
     pub cursor_line: Style,
     /// Style retained for the cursor cell, even though the component uses the
@@ -240,6 +242,14 @@ pub struct MarkdownTextArea<'a> {
 /// Its `render` method is always Ratatui-backed. With the `ui-bridge` feature,
 /// the same editor can also project state to Swift and web wrappers.
 pub type MarkdownEditor<'a> = MarkdownTextArea<'a>;
+
+/// Terminal rectangles produced by the complete MarkdownEditor interpreter.
+#[cfg(feature = "ui-bridge")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarkdownEditorTerminalLayout {
+    pub body: Rect,
+    pub status: Rect,
+}
 
 impl<'a> MarkdownTextArea<'a> {
     /// Creates a Markdown editor from an iterator of logical lines.
@@ -617,6 +627,50 @@ impl<'a> MarkdownTextArea<'a> {
                 .flatten(),
             config.insert_menu.is_some(),
         );
+    }
+
+    /// Renders the complete terminal component from the exact published spec.
+    ///
+    /// The document editor keeps renderer-local scroll/cursor mechanics, but
+    /// title, hint visibility, and semantic Menu presence come only from the
+    /// Rust `MarkdownEditorSpec` consumed by every renderer.
+    #[cfg(feature = "ui-bridge")]
+    pub fn render_component(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        spec: &MarkdownEditorSpec,
+    ) -> MarkdownEditorTerminalLayout {
+        let status_height = u16::from(spec.title.is_some() && area.height > 1);
+        let body = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height.saturating_sub(status_height),
+        );
+        let status = Rect::new(
+            area.x,
+            area.bottom().saturating_sub(status_height),
+            area.width,
+            status_height,
+        );
+        self.render_internal(
+            frame,
+            body,
+            show_cursor,
+            (spec.presentation != MarkdownPresentation::Preview)
+                .then_some(spec.command_hint.as_ref())
+                .flatten(),
+            spec.insert_menu.is_some(),
+        );
+        if let Some(title) = &spec.title {
+            frame.render_widget(
+                Paragraph::new(format!("  {title}")).style(self.style.status),
+                status,
+            );
+        }
+        MarkdownEditorTerminalLayout { body, status }
     }
 
     fn render_internal(

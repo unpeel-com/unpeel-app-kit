@@ -484,6 +484,19 @@ impl Explorer {
     /// Apps use this for closed Tree extensions such as a semantic context
     /// menu. The opaque id is resolved inside Explorer, so Host-local paths
     /// never have to appear in the semantic protocol.
+    #[must_use]
+    #[cfg(feature = "ui-bridge")]
+    pub fn path_for_semantic_item(&self, id: &str) -> Option<&Path> {
+        self.semantic_index(id)
+            .and_then(|index| self.entries.get(index))
+            .map(ExplorerEntry::path)
+    }
+
+    /// Selects an entry named by the opaque id emitted by [`Self::semantic_tree`].
+    ///
+    /// The mapping stays App-local: the component tree carries only the
+    /// opaque id while terminal drag and pointer plumbing may resolve its
+    /// filesystem path after the shared Tree interpreter produces geometry.
     #[cfg(feature = "ui-bridge")]
     pub fn select_semantic_item(&mut self, id: &str) -> Result<ExplorerEvent, String> {
         let index = self
@@ -678,6 +691,14 @@ impl Explorer {
     #[must_use]
     pub const fn filter_cursor_position(&self) -> Option<Position> {
         self.filter.cursor_position()
+    }
+
+    /// Borrows the renderer-local filter editor for the shared semantic Tree
+    /// interpreter. The Explorer remains the owner of editing/focus state;
+    /// `Tree::widget_with_filter` only paints the filter slot declared by the
+    /// exact published Tree.
+    pub fn filter_input_mut(&mut self) -> &mut InputField {
+        &mut self.filter
     }
 
     /// Whether a mouse selection drag started in the filter is active.

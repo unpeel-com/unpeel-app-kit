@@ -16,7 +16,7 @@ use ratatui::widgets::Widget;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, KitTheme, ListPageBehavior,
+    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, InputField, KitTheme, ListPageBehavior,
     RowBoundaryBehavior, RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu,
     VerticalScrollbar,
 };
@@ -517,6 +517,23 @@ impl Tree {
         TreeWidget {
             tree: self,
             state,
+            filter_input: None,
+            theme: TreeTheme::default(),
+        }
+    }
+
+    /// Uses the exact Tree interpreter while preserving a renderer-local text
+    /// cursor, selection, and IME surface for the optional filter slot.
+    #[must_use]
+    pub fn widget_with_filter<'a>(
+        &'a self,
+        state: &'a mut TreeState,
+        filter_input: &'a mut InputField,
+    ) -> TreeWidget<'a> {
+        TreeWidget {
+            tree: self,
+            state,
+            filter_input: Some(filter_input),
             theme: TreeTheme::default(),
         }
     }
@@ -630,11 +647,32 @@ impl TreeState {
     pub const fn primary_action_at(&self, position: ratatui::layout::Position) -> bool {
         self.primary_action_area.contains(position)
     }
+
+    #[must_use]
+    pub const fn primary_action_area(&self) -> Rect {
+        self.primary_action_area
+    }
+
+    #[must_use]
+    pub const fn rows_area(&self) -> Rect {
+        self.rows_area
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> usize {
+        self.navigation.offset()
+    }
+
+    #[must_use]
+    pub const fn viewport_rows(&self) -> usize {
+        self.rows_area.height as usize
+    }
 }
 
 pub struct TreeWidget<'a> {
     tree: &'a Tree,
     state: &'a mut TreeState,
+    filter_input: Option<&'a mut InputField>,
     theme: TreeTheme,
 }
 
@@ -647,7 +685,7 @@ impl TreeWidget<'_> {
 }
 
 impl Widget for TreeWidget<'_> {
-    fn render(self, area: Rect, buffer: &mut Buffer) {
+    fn render(mut self, area: Rect, buffer: &mut Buffer) {
         buffer.set_style(area, self.theme.style);
         if area.is_empty() {
             self.state.rows_area = Rect::default();
@@ -658,20 +696,29 @@ impl Widget for TreeWidget<'_> {
         let filter_height = u16::from(self.tree.filter.is_some() && area.height > 0);
         if let Some(filter) = &self.tree.filter {
             let row = Rect::new(area.x, area.y, area.width, filter_height);
-            let value = if filter.value.is_empty() {
-                filter.placeholder.as_str()
+            if let Some(input) = self.filter_input.as_mut() {
+                if input.text() != filter.value {
+                    input.set_text(filter.value.clone());
+                }
+                input.set_placeholder(filter.placeholder.clone());
+                input.set_prompt(format!("{}: ", filter.label));
+                input.widget().render(row, buffer);
             } else {
-                filter.value.as_str()
-            };
-            Line::styled(
-                format!(
-                    "{}{}",
-                    " ".repeat(usize::from(self.theme.left_padding)),
-                    value
-                ),
-                self.theme.filter,
-            )
-            .render(row, buffer);
+                let value = if filter.value.is_empty() {
+                    filter.placeholder.as_str()
+                } else {
+                    filter.value.as_str()
+                };
+                Line::styled(
+                    format!(
+                        "{}{}",
+                        " ".repeat(usize::from(self.theme.left_padding)),
+                        value
+                    ),
+                    self.theme.filter,
+                )
+                .render(row, buffer);
+            }
         }
         let location_height = u16::from(area.height > filter_height);
         let location_area = Rect::new(

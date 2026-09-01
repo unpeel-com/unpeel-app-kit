@@ -416,9 +416,35 @@ impl ContentState {
             .unwrap_or(u16::MAX);
     }
 
+    /// Synchronizes an App's existing renderer-local viewport while migrating
+    /// onto the shared Content interpreter. The next render clamps it against
+    /// the current document and viewport.
+    pub const fn set_offsets(&mut self, vertical: u16, horizontal: u16) {
+        self.vertical_offset = vertical;
+        self.horizontal_offset = horizontal;
+    }
+
     #[must_use]
     pub const fn vertical_offset(&self) -> u16 {
         self.vertical_offset
+    }
+
+    #[must_use]
+    pub const fn horizontal_offset(&self) -> u16 {
+        self.horizontal_offset
+    }
+
+    #[must_use]
+    pub const fn viewport_rows(&self) -> u16 {
+        self.viewport_rows
+    }
+
+    #[must_use]
+    pub fn max_vertical_offset(&self, line_count: usize) -> u16 {
+        line_count
+            .saturating_sub(usize::from(self.viewport_rows))
+            .try_into()
+            .unwrap_or(u16::MAX)
     }
 }
 

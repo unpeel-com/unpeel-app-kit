@@ -88,6 +88,7 @@ impl MarkdownApp {
         let mut editor = MarkdownEditor::new(
             document_lines(&state.text),
             MarkdownEditorStyle {
+                status: Style::new().fg(Color::Gray),
                 cursor_line: Style::new().bg(Color::Rgb(27, 31, 38)),
                 cursor: Style::new().fg(Color::White),
                 selection: Style::new().bg(Color::Rgb(47, 78, 120)),

@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    BarChart, Content, ContentState, Gauge, InputField, KitTheme, LineChart, ListPageBehavior,
-    ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, Sparkline,
-    VerticalScrollbar,
+    BarChart, Content, ContentState, ContentTheme, Gauge, InputField, KitTheme, LineChart,
+    ListPageBehavior, ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow,
+    SemanticMenu, Sparkline, VerticalScrollbar,
 };
 
 /// Renderer capability for the v1 Page container.
@@ -1533,8 +1533,31 @@ impl Page {
             page: self,
             input,
             list_state,
-            content_state: ContentState::new(),
+            content_state: PageContentState::Owned(ContentState::new()),
             theme: PageTheme::default(),
+            content_theme: ContentTheme::default(),
+        }
+    }
+
+    /// Uses the exact Page interpreter while preserving renderer-local Content
+    /// scroll state between frames.
+    ///
+    /// Apps with a Content body must use this instead of recreating the Page
+    /// header and document painter around their own scroll implementation.
+    #[must_use]
+    pub fn widget_with_content_state<'a>(
+        &'a self,
+        input: &'a mut InputField,
+        list_state: &'a mut ListState,
+        content_state: &'a mut ContentState,
+    ) -> PageWidget<'a> {
+        PageWidget {
+            page: self,
+            input,
+            list_state,
+            content_state: PageContentState::Borrowed(content_state),
+            theme: PageTheme::default(),
+            content_theme: ContentTheme::default(),
         }
     }
 
@@ -2394,14 +2417,35 @@ pub struct PageWidget<'a> {
     page: &'a Page,
     input: &'a mut InputField,
     list_state: &'a mut ListState,
-    content_state: ContentState,
+    content_state: PageContentState<'a>,
     theme: PageTheme,
+    content_theme: ContentTheme,
+}
+
+enum PageContentState<'a> {
+    Owned(ContentState),
+    Borrowed(&'a mut ContentState),
+}
+
+impl PageContentState<'_> {
+    fn as_mut(&mut self) -> &mut ContentState {
+        match self {
+            Self::Owned(state) => state,
+            Self::Borrowed(state) => state,
+        }
+    }
 }
 
 impl PageWidget<'_> {
     #[must_use]
     pub const fn theme(mut self, theme: PageTheme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    #[must_use]
+    pub const fn content_theme(mut self, theme: ContentTheme) -> Self {
+        self.content_theme = theme;
         self
     }
 }
@@ -2427,6 +2471,9 @@ impl Widget for PageWidget<'_> {
         .render(layout.title, buffer);
 
         if let Some(input) = self.page.input_spec() {
+            if self.input.text() != input.value {
+                self.input.set_text(input.value.clone());
+            }
             self.input.set_placeholder(input.placeholder.clone());
             self.input.set_prompt(format!("{}: ", input.label));
             self.input
@@ -2440,7 +2487,8 @@ impl Widget for PageWidget<'_> {
                 .render(layout.list, buffer),
             PageBodySlot::Content(content) => {
                 content
-                    .widget(&mut self.content_state)
+                    .widget(self.content_state.as_mut())
+                    .theme(self.content_theme)
                     .render(layout.list, buffer);
             }
             PageBodySlot::Sparkline(sparkline) => {
@@ -2761,6 +2809,23 @@ mod tests {
         assert_eq!(layout.title, Rect::new(3, 5, 50, 2));
         assert_eq!(layout.input, Some(Rect::new(3, 7, 50, 1)));
         assert_eq!(layout.list, Rect::new(3, 9, 50, 6));
+    }
+
+    #[test]
+    fn page_input_renders_the_value_owned_by_the_component_spec() {
+        let page = Page::new("Search", List::new("results", Vec::new())).input(
+            Input::new("query", "Query")
+                .value("one source of truth")
+                .set_value_action("set-query"),
+        );
+        let mut input = InputField::new("stale renderer value");
+        let mut state = ListState::new(None);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 48, 8));
+        page.widget(&mut input, &mut state)
+            .render(Rect::new(0, 0, 48, 8), &mut buffer);
+        assert_eq!(input.text(), "one source of truth");
+        let row = (0..48).map(|x| buffer[(x, 2)].symbol()).collect::<String>();
+        assert!(row.contains("Query: one source of truth"));
     }
 
     #[test]

@@ -115,7 +115,10 @@ pub use markdown_text_area::{
     MarkdownEditor, MarkdownEditorStyle, MarkdownTextArea, MarkdownTextAreaStyle,
 };
 #[cfg(all(feature = "markdown-text-area", feature = "ui-bridge"))]
-pub use markdown_text_area::{MarkdownEditorConfig, MarkdownEditorEvent, MarkdownEditorEventError};
+pub use markdown_text_area::{
+    MarkdownEditorConfig, MarkdownEditorEvent, MarkdownEditorEventError,
+    MarkdownEditorTerminalLayout,
+};
 #[cfg(any(feature = "media", feature = "ui-bridge"))]
 pub use media::{
     MAX_INLINE_MEDIA_BYTES, MEDIA_COMPONENT_CAPABILITY, MediaCellSize, MediaFit, MediaPixelSize,

@@ -312,22 +312,23 @@ textarea {
   flex: 1;
   min-width: 0;
   min-height: 0;
-  padding: 20px;
+  padding: 12px 14px;
   overflow: auto;
 }
 
 .unpeel-page__header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 3px auto 18px;
+  gap: 8px;
+  margin: 1px auto 10px;
   max-width: 760px;
 }
 
 .unpeel-page__header h1 {
   margin: 0;
-  font-size: clamp(24px, 5vw, 36px);
-  letter-spacing: -0.035em;
+  font-size: clamp(19px, 3.5vw, 26px);
+  letter-spacing: -0.025em;
+  line-height: 1.15;
 }
 
 .unpeel-page__back,
@@ -344,9 +345,9 @@ textarea {
 .unpeel-input {
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 8px;
+  gap: 6px;
   max-width: 760px;
-  margin: 0 auto 14px;
+  margin: 0 auto 9px;
 }
 
 .unpeel-input label {
@@ -359,9 +360,9 @@ textarea {
 
 .unpeel-input input {
   min-width: 0;
-  padding: 10px 12px;
+  padding: 7px 9px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--surface-solid);
 }
 
@@ -371,7 +372,7 @@ textarea {
   padding: 0;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 9px;
   background: var(--surface);
   list-style: none;
 }
@@ -379,10 +380,12 @@ textarea {
 .unpeel-list-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 52px;
-  padding: 9px 11px;
+  gap: 8px;
+  min-height: 36px;
+  padding: 5px 9px;
   border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.2;
 }
 
 .unpeel-list-item[data-selected="true"] {
@@ -414,7 +417,7 @@ textarea {
 .unpeel-list-item__content {
   display: grid;
   flex: 1;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
 
@@ -460,7 +463,7 @@ textarea {
 .unpeel-toggle__label,
 .unpeel-list__empty {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .unpeel-list-item__disclosure,

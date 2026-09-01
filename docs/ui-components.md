@@ -147,6 +147,21 @@ not a second model. Swift and web are pure interpreters: they render the
 declared state and translate native input into the declared typed actions.
 They do not own component state or behavior.
 
+For every component screen, the App constructs exactly one `UiNode`. The App
+passes that same owned value to `UiBridge::publish` (or its delta successor)
+and to App Kit's Ratatui interpreter. App Kit's component interpreters are the
+only sanctioned terminal pixel path for those screens. An App must never keep
+a hand-painted Ratatui screen beside a separately constructed semantic
+projection—even when both currently read the same model—because the second
+layout is already a fork and will drift. Reducer state remains App-owned;
+terminal hit rectangles, scroll offsets, focus, IME composition, and drag
+registration may be fed back as disposable view-local geometry after the
+component interpreter draws the exact published node.
+
+Conformance tests therefore render the published node itself through the
+Ratatui interpreter. Testing a lookalike helper or independently rebuilding a
+second terminal tree does not satisfy the single-source-of-truth rule.
+
 A renderer may retain only view-local ephemera that has no App meaning and can
 be discarded on renderer restart—for example scroll position, IME marked-text
 composition, hover, a focus ring, or native control animation. If a value can
