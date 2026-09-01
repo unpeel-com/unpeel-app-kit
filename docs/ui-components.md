@@ -416,7 +416,8 @@ web, and agent participants:
 - `ListItem` owns row fields such as label and detail plus enumerated slots
   such as `leading`, `trailing`, and `accessory`;
 - each slot accepts only the schema-enumerated controls allowed in that role;
-  v1 has completion `Toggle`, static status-symbol, and `Badge` values; and
+  v1 has completion `Toggle`, selection `Checkmark`, navigation `Disclosure`,
+  static status-symbol, and `Badge` values; and
 - `Page` and later containers expose named, purpose-specific regions only when
   their cross-platform semantics are defined.
 
@@ -427,7 +428,9 @@ value that disappears rather than crushing the label below its width contract,
 declared row action; `Page.back` is one declared return action. They are not
 arbitrary children. Renderers advertise `listItemMetadata`,
 `listItemPresentation`, `listItemActivate`, and `pageBack` before receiving a
-tree that depends on them.
+tree that depends on them. Interactive row roles additionally require
+`listItemRole`, so an older renderer falls back instead of guessing at Enter,
+Space, or navigation behavior.
 
 Slot payloads are closed enums, not nested `UiNode` escape hatches. For
 example, a trailing `Toggle` remains a native SwiftUI list-row toggle and an
@@ -463,19 +466,42 @@ Containment is deliberately closed:
 - Page's v1 header accepts Input and its body accepts List;
 - List accepts only ListItem rows; and
 - ListItem's `leading`, `trailing`, and `accessory` slots accept only Toggle,
-  status-symbol, or Badge values, never an arbitrary `UiNode`; it accepts at
-  most one completion Toggle, whose value and the row's `done` state are one
-  validated invariant.
+  Checkmark, Disclosure, status-symbol, or Badge values, never an arbitrary
+  `UiNode`; it accepts at most one primary role, and a completion Toggle's
+  value and the row's `done` state are one validated invariant.
 
-Flat-list behavior is also one Kit-owned contract. `ListKeymap` maps Down/`j`,
-Up/`k`, Home/`g`, End/`G`, PageUp/PageDown, Enter, Escape/`q`, and an explicit
-opt-in Space-as-PageDown. `ListState` clamps at both ends, never wraps, pages by
-the rendered viewport minus `pageOverlap`, and scrolls the selection into view
-with configurable `scrollPadding`. A list may instead declare page behavior
-`scroll` for screens such as Usage whose Page keys move only the viewport.
-Ratatui, SwiftUI, and web use that same key vocabulary; `selectedId` and the
-idempotent `select` action carry the authoritative identity over the semantic
-channel.
+Rows deliberately separate three layers:
+
+- **Focus** is `RowNavigationState` plus `SelectableRow`: behavior-agnostic
+  selection, viewport, reveal, hit testing, and the one exact selected-row
+  painter. `ListState` adds only List-specific spinner presentation around
+  that engine.
+- **Role** is closed `ListItem` vocabulary. A Toggle is the checkbox-style
+  boolean row; Disclosure is a chevron/navigation affordance; Checkmark is a
+  selection-mode row; `activate` without an accessory is a command row and
+  may declare `actionRole: destructive`; no role/action is static information.
+- **Navigation** is App-owned and server-driven. Activating a Disclosure sends
+  the declared action to the reducer; the App publishes the next Page, and
+  that Page's `back` action pops it. SwiftUI may animate that replacement, but
+  no renderer becomes the router or durable owner of the navigation stack.
+
+`ListKeymap::decision_for_key` owns the keyboard decision table once:
+
+| Key | Focused row result |
+| --- | --- |
+| Enter | invoke Toggle, Checkmark, Disclosure, command, or destructive primary role; static rows do nothing |
+| Space | invoke only a Toggle primary role; otherwise PageDown |
+| Down/`j`, Up/`k`, Home/`g`, End/`G`, PageUp/PageDown | move focus through the shared navigation engine |
+| Escape/`q` | request the current Page's App-owned `back` action |
+
+Flat List focus clamps at both ends, never wraps, pages by the rendered
+viewport minus `pageOverlap`, and reveals focus with configurable
+`scrollPadding`. A List may declare page behavior `scroll` for screens such as
+Usage whose Page keys move only the viewport. Ratatui, SwiftUI, and web use
+the same decision table; `selectedId` and the idempotent `select` action carry
+the authoritative identity over the semantic channel. The older
+`action_for_key`/`spacePagesDown` surface remains wire/API-compatible for
+existing Apps, but new role-aware Apps use `decision_for_key`.
 
 The terminal renderer deliberately reproduces the established App rows by
 construction: selected background across the complete row, exactly two cells
@@ -502,16 +528,17 @@ published. A relaunch loads and validates this file before its first snapshot.
 Hosted production Apps may place the same model inside `UiStateStore`; the
 renderer is never the durable owner in either form.
 
-Page adds five compact operations: `toggleSetValue`, `inputSetValue`,
-`listInsertItem`, `listRemoveItem`, and `listSetSelection`. A Toggle update also updates its row's
-denormalized `done` value, preserving one semantic invariant across all three
-renderers.
+Page adds six compact operations: `toggleSetValue`, `checkmarkSetValue`,
+`inputSetValue`, `listInsertItem`, `listRemoveItem`, and `listSetSelection`. A
+Toggle update also updates its row's denormalized `done` value, preserving one
+semantic invariant across all three renderers.
 
 The pane-level degradation rule is explicit: if a renderer does not recognize
-the Page root, any named slot kind, or any required Page/List/ListItem/Toggle/
-Input, ListItem metadata/activation, or Page-back capability, it keeps the
-attachment alive and requests the complete terminal view for that pane. It
-never rejects the attach merely because its component vocabulary is older.
+the Page root, any named slot/role kind, or any required
+Page/List/ListItem/Toggle/Input, `listItemRole`, ListItem
+metadata/activation, or Page-back capability, it keeps the attachment alive
+and requests the complete terminal view for that pane. It never rejects the
+attach merely because its component vocabulary is older.
 
 The sixteenth shared NDJSON fixture exercises the same Page family as a Usage
 master/detail screen: provider rows carry a leading health status, plan badge,
@@ -533,12 +560,12 @@ like file activation.
 
 ### Shared primitives before a wire component
 
-`Explorer` currently paints selected rows itself and owns a separate movement
-implementation. That duplication is temporary. Before adding the semantic
-component, refactor the existing Ratatui Explorer internally onto
-`SelectableRow`, `VerticalScrollbar`, and the same lower-level selection/
-viewport navigation engine used by `ListState`, with key decoding shared with
-`ListKeymap`.
+The prerequisite internal refactor is complete. Ratatui `Explorer` now paints
+every selectable entry through `SelectableRow`, uses `VerticalScrollbar`, and
+owns a `RowNavigationState` from the same focus engine wrapped by `ListState`.
+Its filter-aware key adapter delegates the common Enter/Space/movement/back
+decision to `ListKeymap`; App-specific create, quit, and menu commands stay in
+the owning App.
 
 The common navigation engine must expose an explicit boundary policy rather
 than forcing Explorer into List's clamp policy. Flat Lists stay clamped;
@@ -548,14 +575,12 @@ Explorer's filter-aware key adapter also keeps printable `j`, `k`, and `q` as
 filter input instead of inheriting List aliases. Shared implementation means
 shared mechanics, not identical public bindings in incompatible focus modes.
 
-This internal refactor has a hard parity gate: capture the pre-refactor
-Explorer buffer and keystroke sequences, then assert cell-for-cell Ratatui
-buffers plus identical selection, scroll, filter-focus, directory, parent-row,
-and activation outcomes afterward. Filetree and Markdown picker fixtures must
-exercise the same shared engine. Only after those tests pass should the new
-Explorer/Tree snapshot and Swift/web renderers land. This order ensures the
-terminal generation and semantic generation cannot drift in selection styling
-or navigation behavior.
+The refactor is guarded by a frozen legacy painter comparison that checks the
+Ratatui row buffer cell for cell, plus key-sequence tests for selection,
+scroll, filter focus, directory, parent-row, and activation behavior. Filetree
+and Markdown's picker consume the same adapter. The later Explorer/Tree wire
+snapshot and Swift/web renderers remain a separate step; this ordering keeps
+terminal behavior fixed before adding a second presentation generation.
 
 The later hosted component is one closed `Explorer`/`Tree` family, not an
 arbitrary recursive `UiNode` container. Its proposed snapshot has:
@@ -975,7 +1000,7 @@ The next useful vocabulary is intentionally conventional:
 | --- | --- | --- |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
 | `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
-| `Explorer` / `Tree` | existing `Explorer` behavior retained while its internals move to shared `SelectableRow` and navigation primitives | closed hierarchical file/document navigation with filter-focus and a distinct parent-entry action; design above, not yet a wire component |
+| `Explorer` / `Tree` | existing `Explorer`, now backed by shared `SelectableRow` and `RowNavigationState` with its established page-wrap policy intact | closed hierarchical file/document navigation with filter-focus and a distinct parent-entry action; design above, not yet a wire component |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared

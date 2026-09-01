@@ -3,8 +3,8 @@
 use std::io::{BufReader, Cursor};
 
 use unpeel_app_kit::{
-    ButtonRole, CanvasControl, ListItemSlot, MediaSource, SurfaceInputPolicy, UiComponent,
-    UiEventKind, UiEventValue, UiMessage, read_ui_message,
+    ButtonRole, CanvasControl, ListItemActionRole, ListItemSlot, MediaSource, RowPrimaryRole,
+    SurfaceInputPolicy, UiComponent, UiEventKind, UiEventValue, UiMessage, read_ui_message,
 };
 
 const STREAM: &str = include_str!("../protocol/unpeel-ui-v1.ndjson");
@@ -17,7 +17,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 21);
+    assert_eq!(messages.len(), 23);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -205,4 +205,55 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         canvas.surface.surface.reference.stream_id,
         "canvas-planets-detail"
     );
+
+    let UiMessage::Snapshot(roles_snapshot) = &messages[21] else {
+        panic!("twenty-second fixture must contain every ListItem row role");
+    };
+    let UiComponent::Page(page) = &roles_snapshot.root.element else {
+        panic!("row-role fixture must contain Page");
+    };
+    assert_eq!(page.list().items[0].primary_role(), RowPrimaryRole::Toggle);
+    assert_eq!(
+        page.list().items[1].primary_role(),
+        RowPrimaryRole::Disclosure
+    );
+    assert_eq!(
+        page.list().items[2].primary_role(),
+        RowPrimaryRole::Checkmark
+    );
+    assert_eq!(page.list().items[3].primary_role(), RowPrimaryRole::Command);
+    assert_eq!(
+        page.list().items[4].primary_role(),
+        RowPrimaryRole::Destructive
+    );
+    assert_eq!(page.list().items[5].primary_role(), RowPrimaryRole::Static);
+    assert_eq!(
+        page.list().items[4].action_role,
+        ListItemActionRole::Destructive
+    );
+    assert_eq!(
+        page.required_capabilities(),
+        vec![
+            "page",
+            "list",
+            "listItem",
+            "pageBack",
+            "listItemMetadata",
+            "listItemActivate",
+            "listItemRole",
+            "toggle",
+            "listItemPresentation",
+            "listSelection",
+        ]
+    );
+
+    let UiMessage::Delta(roles_delta) = &messages[22] else {
+        panic!("twenty-third fixture must update checkmark state compactly");
+    };
+    let updated = roles_snapshot.applying(roles_delta).unwrap();
+    let UiComponent::Page(page) = updated.root.element else {
+        panic!("row-role delta must preserve Page");
+    };
+    assert!(!page.list().items[2].primary_checkmark().unwrap().value);
+    assert_eq!(page.list().selected_id.as_deref(), Some("row-destructive"));
 }

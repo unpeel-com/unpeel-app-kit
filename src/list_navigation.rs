@@ -1,4 +1,6 @@
-//! Shared, clamped navigation and viewport state for App Kit lists.
+//! Shared focus navigation and viewport state for App Kit row collections.
+
+use std::ops::{Deref, DerefMut};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
@@ -14,6 +16,39 @@ pub enum ListPageBehavior {
     #[default]
     Selection,
     Scroll,
+}
+
+/// How single-row movement behaves at the first and last item.
+///
+/// Flat Lists clamp. Explorer retains its established wrap behavior while
+/// using the exact same focus/viewport engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowBoundaryBehavior {
+    #[default]
+    Clamp,
+    Wrap,
+}
+
+/// Primary semantic role of the focused row.
+///
+/// The navigation layer needs only this closed behavior hint; component ids,
+/// actions, persistence, and routing remain App-owned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowPrimaryRole {
+    #[default]
+    Static,
+    Toggle,
+    Checkmark,
+    Disclosure,
+    Command,
+    Destructive,
+}
+
+impl RowPrimaryRole {
+    #[must_use]
+    pub const fn is_interactive(self) -> bool {
+        !matches!(self, Self::Static)
+    }
 }
 
 /// Closed keyboard vocabulary shared by every flat App Kit list.
@@ -39,10 +74,18 @@ pub enum ListNavigationOutcome {
     Back,
 }
 
+/// Role-aware result of interpreting one key for a focused row collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKeyDecision {
+    Navigate(ListNavigationAction),
+    InvokePrimary,
+}
+
 /// App Kit's standard list keymap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ListKeymap {
     space_pages_down: bool,
+    character_aliases: bool,
 }
 
 impl ListKeymap {
@@ -50,6 +93,7 @@ impl ListKeymap {
     pub const fn new() -> Self {
         Self {
             space_pages_down: false,
+            character_aliases: true,
         }
     }
 
@@ -63,6 +107,20 @@ impl ListKeymap {
     #[must_use]
     pub const fn pages_down_with_space(&self) -> bool {
         self.space_pages_down
+    }
+
+    /// Enables or disables `j`/`k`/`g`/`G`/`q` navigation aliases.
+    ///
+    /// Explorer disables them because printable characters focus its filter.
+    #[must_use]
+    pub const fn character_aliases(mut self, enabled: bool) -> Self {
+        self.character_aliases = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn uses_character_aliases(&self) -> bool {
+        self.character_aliases
     }
 
     /// Maps a crossterm press/repeat event into the shared list vocabulary.
@@ -90,33 +148,77 @@ impl ListKeymap {
             KeyCode::Char(' ') if self.space_pages_down && !command_modifier => {
                 Some(ListNavigationAction::PageDown)
             }
-            KeyCode::Char('j') if !command_modifier => Some(ListNavigationAction::Down),
-            KeyCode::Char('k') if !command_modifier => Some(ListNavigationAction::Up),
-            KeyCode::Char('g') if !command_modifier => Some(ListNavigationAction::First),
-            KeyCode::Char('G') if !command_modifier => Some(ListNavigationAction::Last),
-            KeyCode::Char('q') if !command_modifier => Some(ListNavigationAction::Back),
+            KeyCode::Char('j') if self.character_aliases && !command_modifier => {
+                Some(ListNavigationAction::Down)
+            }
+            KeyCode::Char('k') if self.character_aliases && !command_modifier => {
+                Some(ListNavigationAction::Up)
+            }
+            KeyCode::Char('g') if self.character_aliases && !command_modifier => {
+                Some(ListNavigationAction::First)
+            }
+            KeyCode::Char('G') if self.character_aliases && !command_modifier => {
+                Some(ListNavigationAction::Last)
+            }
+            KeyCode::Char('q') if self.character_aliases && !command_modifier => {
+                Some(ListNavigationAction::Back)
+            }
             _ => None,
+        }
+    }
+
+    /// Applies the one App Kit keyboard decision table for a focused row.
+    ///
+    /// Enter invokes the row's primary role. Space invokes only a Toggle;
+    /// otherwise it pages down. Escape/back aliases remain navigation so the
+    /// Page/App can route them through its authoritative back action.
+    #[must_use]
+    pub fn decision_for_key(
+        &self,
+        key: &KeyEvent,
+        primary_role: RowPrimaryRole,
+    ) -> Option<RowKeyDecision> {
+        if matches!(key.kind, KeyEventKind::Release) {
+            return None;
+        }
+        let command_modifier = key.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SUPER
+                | KeyModifiers::HYPER
+                | KeyModifiers::META,
+        );
+        if command_modifier {
+            return None;
+        }
+        match key.code {
+            KeyCode::Enter => primary_role
+                .is_interactive()
+                .then_some(RowKeyDecision::InvokePrimary),
+            KeyCode::Char(' ') if primary_role == RowPrimaryRole::Toggle => {
+                Some(RowKeyDecision::InvokePrimary)
+            }
+            KeyCode::Char(' ') => Some(RowKeyDecision::Navigate(ListNavigationAction::PageDown)),
+            _ => self.action_for_key(key).map(RowKeyDecision::Navigate),
         }
     }
 }
 
-/// Selection, scroll offset, and last-rendered geometry for one flat list.
-///
-/// Selection always clamps at the first/last item. The state never wraps.
+/// Selection, scroll offset, and last-rendered geometry for a row collection.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ListState {
+pub struct RowNavigationState {
     selected: Option<usize>,
     offset: usize,
     viewport_rows: usize,
     scroll_padding: usize,
     page_overlap: usize,
     page_behavior: ListPageBehavior,
+    boundary_behavior: RowBoundaryBehavior,
     reveal_selected: bool,
     rows_area: Rect,
-    spinner_frame: usize,
 }
 
-impl Default for ListState {
+impl Default for RowNavigationState {
     fn default() -> Self {
         Self {
             selected: None,
@@ -125,14 +227,14 @@ impl Default for ListState {
             scroll_padding: 0,
             page_overlap: 1,
             page_behavior: ListPageBehavior::Selection,
+            boundary_behavior: RowBoundaryBehavior::Clamp,
             reveal_selected: true,
             rows_area: Rect::default(),
-            spinner_frame: 0,
         }
     }
 }
 
-impl ListState {
+impl RowNavigationState {
     #[must_use]
     pub const fn new(selected: Option<usize>) -> Self {
         Self {
@@ -142,9 +244,9 @@ impl ListState {
             scroll_padding: 0,
             page_overlap: 1,
             page_behavior: ListPageBehavior::Selection,
+            boundary_behavior: RowBoundaryBehavior::Clamp,
             reveal_selected: true,
             rows_area: Rect::new(0, 0, 0, 0),
-            spinner_frame: 0,
         }
     }
 
@@ -168,15 +270,6 @@ impl ListState {
         self.rows_area
     }
 
-    #[must_use]
-    pub const fn spinner_frame(&self) -> usize {
-        self.spinner_frame
-    }
-
-    pub const fn set_spinner_frame(&mut self, frame: usize) {
-        self.spinner_frame = frame;
-    }
-
     pub const fn set_navigation(
         &mut self,
         scroll_padding: usize,
@@ -186,6 +279,15 @@ impl ListState {
         self.scroll_padding = scroll_padding;
         self.page_overlap = page_overlap;
         self.page_behavior = page_behavior;
+    }
+
+    pub const fn set_boundary_behavior(&mut self, behavior: RowBoundaryBehavior) {
+        self.boundary_behavior = behavior;
+    }
+
+    #[must_use]
+    pub const fn boundary_behavior(&self) -> RowBoundaryBehavior {
+        self.boundary_behavior
     }
 
     pub fn select(&mut self, selected: Option<usize>, item_count: usize) -> bool {
@@ -265,6 +367,17 @@ impl ListState {
             };
         }
         let next = match action {
+            ListNavigationAction::Down
+                if self.boundary_behavior == RowBoundaryBehavior::Wrap
+                    && current == item_count - 1 =>
+            {
+                0
+            }
+            ListNavigationAction::Up
+                if self.boundary_behavior == RowBoundaryBehavior::Wrap && current == 0 =>
+            {
+                item_count - 1
+            }
             ListNavigationAction::Down => current.saturating_add(1),
             ListNavigationAction::Up => current.saturating_sub(1),
             ListNavigationAction::First => 0,
@@ -344,6 +457,59 @@ impl ListState {
     }
 }
 
+/// List-specific render state layered over behavior-agnostic row focus.
+///
+/// Navigation methods are available through `Deref`; the spinner frame stays
+/// here so Explorer/Tree do not inherit presentation state from the focus
+/// engine they share with List.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ListState {
+    navigation: RowNavigationState,
+    spinner_frame: usize,
+}
+
+impl ListState {
+    #[must_use]
+    pub const fn new(selected: Option<usize>) -> Self {
+        Self {
+            navigation: RowNavigationState::new(selected),
+            spinner_frame: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn navigation(&self) -> &RowNavigationState {
+        &self.navigation
+    }
+
+    pub const fn navigation_mut(&mut self) -> &mut RowNavigationState {
+        &mut self.navigation
+    }
+
+    #[must_use]
+    pub const fn spinner_frame(&self) -> usize {
+        self.spinner_frame
+    }
+
+    pub const fn set_spinner_frame(&mut self, frame: usize) {
+        self.spinner_frame = frame;
+    }
+}
+
+impl Deref for ListState {
+    type Target = RowNavigationState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.navigation
+    }
+}
+
+impl DerefMut for ListState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.navigation
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,6 +524,35 @@ mod tests {
         assert_eq!(
             standard.action_for_key(&key(KeyCode::Char('j'))),
             Some(ListNavigationAction::Down)
+        );
+        assert_eq!(
+            standard.decision_for_key(&key(KeyCode::Enter), RowPrimaryRole::Toggle),
+            Some(RowKeyDecision::InvokePrimary)
+        );
+        assert_eq!(
+            standard.decision_for_key(&key(KeyCode::Char(' ')), RowPrimaryRole::Toggle),
+            Some(RowKeyDecision::InvokePrimary)
+        );
+        assert_eq!(
+            standard.decision_for_key(&key(KeyCode::Char(' ')), RowPrimaryRole::Disclosure),
+            Some(RowKeyDecision::Navigate(ListNavigationAction::PageDown))
+        );
+        assert_eq!(
+            standard.decision_for_key(&key(KeyCode::Enter), RowPrimaryRole::Static),
+            None
+        );
+        assert_eq!(
+            standard.decision_for_key(
+                &KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+                RowPrimaryRole::Command,
+            ),
+            None
+        );
+        assert_eq!(
+            standard
+                .character_aliases(false)
+                .action_for_key(&key(KeyCode::Char('j'))),
+            None
         );
         assert_eq!(
             standard.action_for_key(&key(KeyCode::Char('q'))),
@@ -411,5 +606,30 @@ mod tests {
             ListNavigationOutcome::Scrolled(4)
         );
         assert_eq!(scroll.selected(), Some(1));
+    }
+
+    #[test]
+    fn explorer_boundary_policy_wraps_steps_but_clamps_pages() {
+        let mut state = RowNavigationState::new(Some(0));
+        state.set_boundary_behavior(RowBoundaryBehavior::Wrap);
+        state.set_navigation(0, 0, ListPageBehavior::Selection);
+        state.prepare(Rect::new(0, 0, 20, 3), 10);
+        assert_eq!(
+            state.navigate(ListNavigationAction::Up, 10),
+            ListNavigationOutcome::SelectionChanged(9)
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::Down, 10),
+            ListNavigationOutcome::SelectionChanged(0)
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::PageUp, 10),
+            ListNavigationOutcome::None
+        );
+        state.select(Some(9), 10);
+        assert_eq!(
+            state.navigate(ListNavigationAction::PageDown, 10),
+            ListNavigationOutcome::None
+        );
     }
 }

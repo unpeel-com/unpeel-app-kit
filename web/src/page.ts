@@ -1,5 +1,6 @@
 import {
   type BadgeSpec,
+  type CheckmarkSpec,
   type InputSpec,
   type ListItemSlot,
   type ListItemSpec,
@@ -10,11 +11,15 @@ import {
   type UiAction,
   type UiSnapshot,
   isBadgeSlot,
+  isCheckmarkSlot,
+  isDisclosureSlot,
   isRenderablePageNode,
   isStatusSlot,
   isToggleSlot,
+  listItemPrimaryRole,
   uiAction,
 } from "./protocol";
+import { listNavigationDecision } from "./list_navigation";
 
 /** Native DOM interpretation of Page, List, ListItem, Toggle, and Input. */
 export class PageRenderer {
@@ -158,15 +163,19 @@ export class PageRenderer {
     row.className = "unpeel-list-item";
     row.dataset.id = item.id;
     row.dataset.done = String(item.done ?? false);
+    row.dataset.role = listItemPrimaryRole(item);
+    row.dataset.actionRole = item.actionRole ?? "default";
     row.dataset.selected = String(this.selections.get(list.id) === item.id);
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", row.dataset.selected);
     row.addEventListener("click", (event) => {
       this.select(list, item.id);
-      if (!(event.target instanceof HTMLButtonElement)
-        && !(event.target instanceof HTMLInputElement)) {
-        row.parentElement?.focus();
-      }
+      const control = event.target instanceof Element
+        ? event.target.closest("button, input, label")
+        : null;
+      if (control !== null) return;
+      row.parentElement?.focus();
+      this.invokePrimary(item);
     });
     if (item.busy === true) {
       const busy = document.createElement("span");
@@ -191,18 +200,7 @@ export class PageRenderer {
       detail.textContent = item.detail;
       labelContent.append(detail);
     }
-    if (item.activate !== undefined) {
-      const activate = document.createElement("button");
-      activate.type = "button";
-      activate.className = "unpeel-list-item__activate";
-      activate.append(labelContent);
-      activate.addEventListener("click", () => {
-        this.onAction(uiAction(item.id, item.activate!, "activate"));
-      });
-      row.append(activate);
-    } else {
-      row.append(labelContent);
-    }
+    row.append(labelContent);
     if (item.value !== undefined) {
       const value = document.createElement("span");
       value.className = "unpeel-list-item__value";
@@ -234,6 +232,8 @@ export class PageRenderer {
     if (isToggleSlot(slot)) row.append(this.toggle(slot));
     else if (isStatusSlot(slot)) row.append(this.status(slot));
     else if (isBadgeSlot(slot)) row.append(this.badge(slot));
+    else if (isDisclosureSlot(slot)) row.append(this.disclosure());
+    else if (isCheckmarkSlot(slot)) row.append(this.checkmark(slot));
   }
 
   private status(status: StatusSymbolSpec): HTMLSpanElement {
@@ -276,6 +276,59 @@ export class PageRenderer {
     return label;
   }
 
+  private disclosure(): HTMLSpanElement {
+    const element = document.createElement("span");
+    element.className = "unpeel-list-item__disclosure";
+    element.textContent = "›";
+    element.setAttribute("aria-hidden", "true");
+    return element;
+  }
+
+  private checkmark(checkmark: CheckmarkSpec): HTMLSpanElement {
+    const element = document.createElement("span");
+    element.className = "unpeel-list-item__checkmark";
+    element.textContent = checkmark.value ? "✓" : "";
+    element.setAttribute(
+      "aria-label",
+      `${checkmark.label}: ${checkmark.value ? "selected" : "not selected"}`,
+    );
+    return element;
+  }
+
+  private invokePrimary(item: ListItemSpec): boolean {
+    const role = listItemPrimaryRole(item);
+    if (role === "toggle") {
+      const toggle = [item.leading, item.trailing, item.accessory]
+        .find((slot): slot is ToggleSpec => slot !== undefined && isToggleSlot(slot));
+      if (toggle === undefined) return false;
+      this.onAction(uiAction(
+        toggle.id,
+        toggle.setValue,
+        "change",
+        { type: "bool", value: !toggle.value },
+      ));
+      return true;
+    }
+    if (role === "checkmark") {
+      const checkmark = [item.leading, item.trailing, item.accessory]
+        .find((slot): slot is CheckmarkSpec => slot !== undefined && isCheckmarkSlot(slot));
+      if (checkmark === undefined) return false;
+      this.onAction(uiAction(
+        checkmark.id,
+        checkmark.setValue,
+        "change",
+        { type: "bool", value: !checkmark.value },
+      ));
+      return true;
+    }
+    if ((role === "disclosure" || role === "command" || role === "destructive")
+      && item.activate !== undefined) {
+      this.onAction(uiAction(item.id, item.activate, "activate"));
+      return true;
+    }
+    return false;
+  }
+
   private reconcileSelection(list: ListSpec): void {
     const previousServer = this.serverSelections.get(list.id);
     if (!this.selections.has(list.id) || previousServer !== list.selectedId) {
@@ -310,23 +363,24 @@ export class PageRenderer {
     element: HTMLElement,
   ): void {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
-    if (event.key === "Escape" || event.key === "q") {
+    if (list.items.length === 0) return;
+    const selectedID = this.selections.get(list.id);
+    const selectedIndex = list.items.findIndex((item) => item.id === selectedID);
+    const current = selectedIndex >= 0 ? selectedIndex : 0;
+    const item = list.items[current];
+    const decision = listNavigationDecision(event.key, listItemPrimaryRole(item));
+    if (decision === "back") {
       if (page.back === undefined) return;
       event.preventDefault();
       this.onAction(uiAction(page.id, page.back, "cancel"));
       return;
     }
-    if (list.items.length === 0) return;
-    const selectedID = this.selections.get(list.id) ?? list.selectedId;
-    const current = Math.max(list.items.findIndex((item) => item.id === selectedID), 0);
-    if (event.key === "Enter") {
-      const item = list.items[current];
-      if (item.activate === undefined) return;
+    if (decision === "invokePrimary") {
       event.preventDefault();
-      this.onAction(uiAction(item.id, item.activate, "activate"));
+      this.invokePrimary(item);
       return;
     }
-    if ((event.key === "PageDown" || event.key === "PageUp")
+    if ((decision === "pageDown" || decision === "pageUp")
       && (list.pageBehavior ?? "selection") === "scroll") {
       return;
     }
@@ -336,20 +390,13 @@ export class PageRenderer {
     const pageRows = Math.max(visibleRows - (list.pageOverlap ?? 1), 1);
     const last = list.items.length - 1;
     let next: number | undefined;
-    switch (event.key) {
-      case "ArrowDown":
-      case "j": next = Math.min(current + 1, last); break;
-      case "ArrowUp":
-      case "k": next = Math.max(current - 1, 0); break;
-      case "Home":
-      case "g": next = 0; break;
-      case "End":
-      case "G": next = last; break;
-      case "PageDown": next = Math.min(current + pageRows, last); break;
-      case "PageUp": next = Math.max(current - pageRows, 0); break;
-      case " ":
-        if (list.spacePagesDown === true) next = Math.min(current + pageRows, last);
-        break;
+    switch (decision) {
+      case "down": next = Math.min(current + 1, last); break;
+      case "up": next = Math.max(current - 1, 0); break;
+      case "first": next = 0; break;
+      case "last": next = last; break;
+      case "pageDown": next = Math.min(current + pageRows, last); break;
+      case "pageUp": next = Math.max(current - pageRows, 0); break;
       default: break;
     }
     if (next === undefined) return;

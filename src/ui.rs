@@ -1048,6 +1048,11 @@ pub enum UiDeltaOperation {
         node_id: String,
         value: bool,
     },
+    /// Sets one selection-mode Checkmark without changing row focus.
+    CheckmarkSetValue {
+        node_id: String,
+        value: bool,
+    },
     InputSetValue {
         node_id: String,
         value: String,
@@ -1108,6 +1113,14 @@ impl UiDeltaOperation {
     #[must_use]
     pub fn toggle_set_value(node_id: impl Into<String>, value: bool) -> Self {
         Self::ToggleSetValue {
+            node_id: node_id.into(),
+            value,
+        }
+    }
+
+    #[must_use]
+    pub fn checkmark_set_value(node_id: impl Into<String>, value: bool) -> Self {
+        Self::CheckmarkSetValue {
             node_id: node_id.into(),
             value,
         }
@@ -1187,7 +1200,9 @@ impl UiDeltaOperation {
                         ))
                     })
             }
-            Self::ToggleSetValue { node_id, .. } | Self::InputSetValue { node_id, .. } => {
+            Self::ToggleSetValue { node_id, .. }
+            | Self::CheckmarkSetValue { node_id, .. }
+            | Self::InputSetValue { node_id, .. } => {
                 validate_identifier(node_id, &format!("{path}.nodeId"))
                     .map_err(UiProtocolError::InvalidView)
             }
@@ -1296,6 +1311,11 @@ impl UiNode {
                 UiDeltaOperation::ToggleSetValue { node_id, value } => {
                     self.page_mut(index)?
                         .set_toggle_value(node_id, *value)
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::CheckmarkSetValue { node_id, value } => {
+                    self.page_mut(index)?
+                        .set_checkmark_value(node_id, *value)
                         .map_err(|error| component_delta_error(index, error))?;
                 }
                 UiDeltaOperation::InputSetValue { node_id, value } => {

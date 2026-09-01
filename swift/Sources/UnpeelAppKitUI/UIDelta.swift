@@ -14,6 +14,7 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case mediaSetSource(nodeID: String, source: MediaSource, intrinsic: MediaPixelSize)
     case surfaceSetReference(nodeID: String, reference: SurfaceReference)
     case toggleSetValue(nodeID: String, value: Bool)
+    case checkmarkSetValue(nodeID: String, value: Bool)
     case inputSetValue(nodeID: String, value: String)
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
     case listSetSelection(listID: String, selectedID: String?)
@@ -57,6 +58,7 @@ extension UIDeltaOperation: Codable {
         case mediaSetSource
         case surfaceSetReference
         case toggleSetValue
+        case checkmarkSetValue
         case inputSetValue
         case listInsertItem
         case listSetSelection
@@ -124,6 +126,11 @@ extension UIDeltaOperation: Codable {
             )
         case .toggleSetValue:
             self = .toggleSetValue(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                value: try container.decode(Bool.self, forKey: .value)
+            )
+        case .checkmarkSetValue:
+            self = .checkmarkSetValue(
                 nodeID: try container.decode(String.self, forKey: .nodeID),
                 value: try container.decode(Bool.self, forKey: .value)
             )
@@ -203,6 +210,10 @@ extension UIDeltaOperation: Codable {
             try container.encode(reference, forKey: .reference)
         case let .toggleSetValue(nodeID, value):
             try container.encode(Operation.toggleSetValue, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(value, forKey: .value)
+        case let .checkmarkSetValue(nodeID, value):
+            try container.encode(Operation.checkmarkSetValue, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
             try container.encode(value, forKey: .value)
         case let .inputSetValue(nodeID, value):
@@ -418,6 +429,44 @@ private extension UINode {
             }
             page.body = .list(list)
             return UINode(id: id, component: .page(page))
+        case let .checkmarkSetValue(nodeID, value):
+            var page = try page()
+            guard case var .list(list) = page.body else {
+                throw UIDeltaApplicationError("Delta targets an unavailable List")
+            }
+            var found = false
+            for index in list.items.indices {
+                var item = list.items[index]
+                var itemFound = false
+                item.leading = setCheckmark(
+                    item.leading,
+                    id: nodeID,
+                    value: value,
+                    found: &itemFound
+                )
+                item.trailing = setCheckmark(
+                    item.trailing,
+                    id: nodeID,
+                    value: value,
+                    found: &itemFound
+                )
+                item.accessory = setCheckmark(
+                    item.accessory,
+                    id: nodeID,
+                    value: value,
+                    found: &itemFound
+                )
+                if itemFound {
+                    list.items[index] = item
+                    found = true
+                    break
+                }
+            }
+            guard found else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Checkmark")
+            }
+            page.body = .list(list)
+            return UINode(id: id, component: .page(page))
         case let .inputSetValue(nodeID, value):
             var page = try page()
             guard case var .input(input) = page.header, input.id == nodeID else {
@@ -500,6 +549,22 @@ private func setToggle(
         label: toggle.label,
         value: value,
         setValue: toggle.setValue
+    ))
+}
+
+private func setCheckmark(
+    _ slot: UIListItemSlot?,
+    id: String,
+    value: Bool,
+    found: inout Bool
+) -> UIListItemSlot? {
+    guard case let .checkmark(checkmark) = slot, checkmark.id == id else { return slot }
+    found = true
+    return .checkmark(UICheckmarkSpec(
+        id: checkmark.id,
+        label: checkmark.label,
+        value: value,
+        setValue: checkmark.setValue
     ))
 }
 

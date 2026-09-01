@@ -32,6 +32,15 @@ renders native list rows and toggles through `PageView`; web does the same with
 `PageRenderer`. With no injected endpoint, bridge detection is inert and the
 App is simply the standalone TUI above.
 
+The same focus engine also powers App Kit Lists and Explorer. Rows add a
+closed, UITableViewCell-style role instead of arbitrary child widgets:
+checkbox Toggle, navigation Disclosure, selection Checkmark, ordinary or
+destructive command, or static information. Enter invokes the focused primary
+role; Space invokes a Toggle and otherwise pages down; Escape routes through
+the App-owned Page back action. Disclosure never makes the renderer the
+router—the reducer publishes the next durable Page for terminal, SwiftUI, and
+web together.
+
 ## Kitchen Sink mini-host (macOS)
 
 The repository also includes a self-contained macOS 14+ SwiftUI test rig that

@@ -4,6 +4,15 @@ import Testing
 @testable import UnpeelAppKitUI
 
 @Test
+func listNavigationUsesOneRoleAwareDecisionTable() {
+    #expect(uiListNavigationDecision(key: .enter, primaryRole: .disclosure) == .invokePrimary)
+    #expect(uiListNavigationDecision(key: .enter, primaryRole: .static) == nil)
+    #expect(uiListNavigationDecision(key: .space, primaryRole: .toggle) == .invokePrimary)
+    #expect(uiListNavigationDecision(key: .space, primaryRole: .checkmark) == .pageDown)
+    #expect(uiListNavigationDecision(key: .back, primaryRole: .command) == .back)
+}
+
+@Test
 func nativeMarkdownSelectionReconciliationPreservesOnlyUnsyncedLocalRanges() {
     let previous = NSRange(location: 2, length: 0)
     let incoming = NSRange(location: 2, length: 8)
@@ -44,7 +53,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 21)
+    #expect(messages.count == 23)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -135,7 +144,7 @@ func sharedProtocolFixturesDecode() throws {
     #expect(list.selectedID == "todo-1")
     #expect(list.select == "select-todo")
     #expect(page.requiredCapabilities == [
-        "page", "list", "listItem", "input", "toggle", "listSelection",
+        "page", "list", "listItem", "input", "listItemRole", "toggle", "listSelection",
     ])
 
     guard case let .delta(todoDelta) = messages[14],
@@ -173,7 +182,7 @@ func sharedProtocolFixturesDecode() throws {
     #expect(usageList.items[1].activate == "refresh-usage")
     #expect(usagePage.requiredCapabilities == [
         "page", "list", "listItem", "pageBack", "listItemMetadata", "listItemActivate",
-        "listItemPresentation", "statusSymbol", "badge", "listSelection",
+        "listItemRole", "listItemPresentation", "statusSymbol", "badge", "listSelection",
     ])
 
     guard case let .snapshot(surfaceSnapshot) = messages[16],
@@ -224,6 +233,27 @@ func sharedProtocolFixturesDecode() throws {
         return
     }
     #expect(updatedCanvas.surface.surface.reference.streamID == "canvas-planets-detail")
+
+    guard case let .snapshot(rolesSnapshot) = messages[21],
+          case let .page(rolesPage) = rolesSnapshot.root.component,
+          case let .list(roles) = rolesPage.body,
+          case let .delta(rolesDelta) = messages[22],
+          case let .page(updatedRolesPage) = try rolesSnapshot.applying(rolesDelta).root.component,
+          case let .list(updatedRoles) = updatedRolesPage.body
+    else {
+        Issue.record("final fixtures must contain every row role and its compact delta")
+        return
+    }
+    #expect(roles.items.map(\.primaryRole) == [
+        .toggle, .disclosure, .checkmark, .command, .destructive, .static,
+    ])
+    #expect(roles.items[4].actionRole == .destructive)
+    #expect(rolesPage.requiredCapabilities == [
+        "page", "list", "listItem", "pageBack", "listItemMetadata", "listItemActivate",
+        "listItemRole", "toggle", "listItemPresentation", "listSelection",
+    ])
+    #expect(updatedRoles.items[2].primaryCheckmark?.value == false)
+    #expect(updatedRoles.selectedID == "row-destructive")
 }
 
 @Test

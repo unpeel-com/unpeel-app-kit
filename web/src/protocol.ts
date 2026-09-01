@@ -11,6 +11,7 @@ export const UI_LIST_ITEM_CAPABILITY = "listItem" as const;
 export const UI_LIST_ITEM_METADATA_CAPABILITY = "listItemMetadata" as const;
 export const UI_LIST_ITEM_ACTIVATE_CAPABILITY = "listItemActivate" as const;
 export const UI_LIST_ITEM_PRESENTATION_CAPABILITY = "listItemPresentation" as const;
+export const UI_LIST_ITEM_ROLE_CAPABILITY = "listItemRole" as const;
 export const UI_LIST_SELECTION_CAPABILITY = "listSelection" as const;
 export const UI_STATUS_SYMBOL_CAPABILITY = "statusSymbol" as const;
 export const UI_BADGE_CAPABILITY = "badge" as const;
@@ -30,6 +31,7 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_LIST_ITEM_METADATA_CAPABILITY,
   UI_LIST_ITEM_ACTIVATE_CAPABILITY,
   UI_LIST_ITEM_PRESENTATION_CAPABILITY,
+  UI_LIST_ITEM_ROLE_CAPABILITY,
   UI_LIST_SELECTION_CAPABILITY,
   UI_STATUS_SYMBOL_CAPABILITY,
   UI_BADGE_CAPABILITY,
@@ -267,9 +269,24 @@ export interface ToggleSpec {
   setValue: string;
 }
 
+export interface CheckmarkSpec {
+  type: "checkmark";
+  id: string;
+  label: string;
+  value: boolean;
+  setValue: string;
+}
+
+export interface DisclosureSpec {
+  type: "disclosure";
+}
+
 export type ListItemTone = "default" | "muted" | "accent" | "info" | "success"
   | "warning" | "danger";
 export type ListItemEmphasis = "regular" | "strong";
+export type ListItemActionRole = "default" | "destructive";
+export type ListItemPrimaryRole = "static" | "toggle" | "checkmark" | "disclosure"
+  | "command" | "destructive";
 export type ListPageBehavior = "selection" | "scroll";
 
 export interface StatusSymbolSpec {
@@ -292,7 +309,8 @@ export interface UnsupportedComponentSlot {
   [field: string]: unknown;
 }
 
-export type ListItemSlot = ToggleSpec | StatusSymbolSpec | BadgeSpec | UnsupportedComponentSlot;
+export type ListItemSlot = ToggleSpec | StatusSymbolSpec | BadgeSpec | DisclosureSpec
+  | CheckmarkSpec | UnsupportedComponentSlot;
 
 export interface ListItemSpec {
   id: string;
@@ -310,6 +328,7 @@ export interface ListItemSpec {
   accessory?: ListItemSlot;
   delete?: string;
   activate?: string;
+  actionRole?: ListItemActionRole;
 }
 
 export interface ListSpec {
@@ -394,10 +413,32 @@ export function isBadgeSlot(slot: ListItemSlot): slot is BadgeSpec {
   return slot.type === "badge";
 }
 
+export function isDisclosureSlot(slot: ListItemSlot): slot is DisclosureSpec {
+  return slot.type === "disclosure";
+}
+
+export function isCheckmarkSlot(slot: ListItemSlot): slot is CheckmarkSpec {
+  return slot.type === "checkmark";
+}
+
 export function isKnownListItemSlot(
   slot: ListItemSlot,
-): slot is ToggleSpec | StatusSymbolSpec | BadgeSpec {
-  return isToggleSlot(slot) || isStatusSlot(slot) || isBadgeSlot(slot);
+): slot is ToggleSpec | StatusSymbolSpec | BadgeSpec | DisclosureSpec | CheckmarkSpec {
+  return isToggleSlot(slot) || isStatusSlot(slot) || isBadgeSlot(slot)
+    || isDisclosureSlot(slot) || isCheckmarkSlot(slot);
+}
+
+export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
+  const slots = [item.leading, item.trailing, item.accessory].filter(
+    (slot): slot is ListItemSlot => slot !== undefined,
+  );
+  if (slots.some(isToggleSlot)) return "toggle";
+  if (slots.some(isCheckmarkSlot)) return "checkmark";
+  if (slots.some(isDisclosureSlot)) return "disclosure";
+  if (item.activate !== undefined) {
+    return item.actionRole === "destructive" ? "destructive" : "command";
+  }
+  return "static";
 }
 
 export function isListSpec(slot: ListSpec | UnsupportedComponentSlot): slot is ListSpec {
@@ -448,6 +489,9 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
   }
   if (node.body.items.some((item) => item.activate !== undefined)) {
     capabilities.push(UI_LIST_ITEM_ACTIVATE_CAPABILITY);
+  }
+  if (node.body.items.some((item) => listItemPrimaryRole(item) !== "static")) {
+    capabilities.push(UI_LIST_ITEM_ROLE_CAPABILITY);
   }
   if (node.body.items.some((item) => [item.leading, item.trailing, item.accessory]
     .some((slot) => slot?.type === "toggle"))) {
@@ -513,6 +557,7 @@ export type UiDeltaOperation =
   }
   | { op: "surfaceSetReference"; nodeId: string; reference: SurfaceReference }
   | { op: "toggleSetValue"; nodeId: string; value: boolean }
+  | { op: "checkmarkSetValue"; nodeId: string; value: boolean }
   | { op: "inputSetValue"; nodeId: string; value: string }
   | { op: "listInsertItem"; listId: string; index: number; item: ListItemSpec }
   | { op: "listSetSelection"; listId: string; selectedId: string | null }
@@ -875,6 +920,27 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     if (!matched) throw new Error("Delta targets an unavailable Toggle");
     return { ...page, body: { ...page.body, items } };
   }
+  if (operation.op === "checkmarkSetValue") {
+    const page = requireRenderablePage(root);
+    let matched = false;
+    const items = page.body.items.map((item) => {
+      const update = (slot: ListItemSlot | undefined): ListItemSlot | undefined => {
+        if (slot === undefined || !isCheckmarkSlot(slot) || slot.id !== operation.nodeId) {
+          return slot;
+        }
+        matched = true;
+        return { ...slot, value: operation.value };
+      };
+      return {
+        ...item,
+        leading: update(item.leading),
+        trailing: update(item.trailing),
+        accessory: update(item.accessory),
+      };
+    });
+    if (!matched) throw new Error("Delta targets an unavailable Checkmark");
+    return { ...page, body: { ...page.body, items } };
+  }
   if (operation.op === "inputSetValue") {
     const page = requireRenderablePage(root);
     if (page.header === undefined || page.header.id !== operation.nodeId) {
@@ -1224,8 +1290,14 @@ function validateListItem(
     throw new Error(`${path}.busy must be a boolean`);
   }
   const toggleValues: boolean[] = [];
+  let checkmarkCount = 0;
+  let disclosureCount = 0;
   if (item.delete !== undefined) requireIdentifier(item.delete, `${path}.delete`);
   if (item.activate !== undefined) requireIdentifier(item.activate, `${path}.activate`);
+  if (item.actionRole !== undefined
+    && !["default", "destructive"].includes(String(item.actionRole))) {
+    throw new Error(`${path}.actionRole is unsupported`);
+  }
   for (const name of ["leading", "trailing", "accessory"] as const) {
     if (item[name] === undefined) continue;
     const slot = record(item[name], `${path}.${name}`);
@@ -1259,11 +1331,46 @@ function validateListItem(
       }
       toggleValues.push(slot.value);
       requireIdentifier(slot.setValue, `${path}.${name}.setValue`);
+      continue;
+    }
+    if (slot.type === "checkmark") {
+      register(slot.id, `${path}.${name}.id`);
+      requireString(slot.label, `${path}.${name}.label`, true);
+      if (typeof slot.value !== "boolean") {
+        throw new Error(`${path}.${name}.value must be a boolean`);
+      }
+      requireIdentifier(slot.setValue, `${path}.${name}.setValue`);
+      checkmarkCount += 1;
+      if (name !== "accessory") {
+        throw new Error(`${path}.${name} Checkmark is accepted only as an accessory`);
+      }
+      continue;
+    }
+    if (slot.type === "disclosure") {
+      disclosureCount += 1;
+      if (name !== "accessory") {
+        throw new Error(`${path}.${name} Disclosure is accepted only as an accessory`);
+      }
     }
   }
   if (toggleValues.length > 1) throw new Error(`${path} accepts at most one completion Toggle`);
   if (toggleValues.length === 1 && toggleValues[0] !== (item.done ?? false)) {
     throw new Error(`${path}.done must match its completion Toggle`);
+  }
+  if (checkmarkCount > 1 || disclosureCount > 1) {
+    throw new Error(`${path} accepts at most one Checkmark or Disclosure`);
+  }
+  if (disclosureCount > 0 && item.activate === undefined) {
+    throw new Error(`${path}.activate is required by Disclosure`);
+  }
+  const independentRoles = Number(toggleValues.length > 0)
+    + Number(checkmarkCount > 0)
+    + Number(disclosureCount > 0)
+    + Number(item.activate !== undefined && disclosureCount === 0);
+  if (independentRoles > 1) throw new Error(`${path} primary role is ambiguous`);
+  if (item.actionRole === "destructive"
+    && (item.activate === undefined || disclosureCount > 0)) {
+    throw new Error(`${path}.actionRole destructive requires a plain command row`);
   }
 }
 
@@ -1484,6 +1591,7 @@ function validateDeltaOperation(value: unknown, path: string): void {
       validateSurfaceReference(operation.reference, `${path}.reference`);
       return;
     case "toggleSetValue":
+    case "checkmarkSetValue":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       if (typeof operation.value !== "boolean") throw new Error(`${path}.value must be boolean`);
       return;

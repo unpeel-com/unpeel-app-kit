@@ -45,6 +45,15 @@ impl SelectableRow {
         self
     }
 
+    /// Overrides the standard two-cell inset for a compatibility surface.
+    /// New List rows should keep the default; Explorer uses its existing
+    /// theme value while sharing this exact painter.
+    #[must_use]
+    pub const fn left_padding(mut self, columns: u16) -> Self {
+        self.left_padding = columns;
+        self
+    }
+
     #[must_use]
     pub const fn right_padding(mut self, columns: u16) -> Self {
         self.right_padding = columns;

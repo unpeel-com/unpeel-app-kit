@@ -19,6 +19,12 @@ public struct PageView: View {
         switch snapshot.root.component {
         case let .page(page):
             PageContent(nodeID: snapshot.root.id, page: page, onAction: onAction)
+                .id(snapshot.root.id)
+                .transition(.asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity)
+                ))
+                .animation(.snappy, value: snapshot.root.id)
         case .canvasPage, .markdownEditor, .media, .surface, .unsupported:
             EmptyView()
         }
@@ -190,21 +196,25 @@ private struct PageContent: View {
         guard press.modifiers.intersection([.command, .control, .option]).isEmpty else {
             return .ignored
         }
-        if press.key == .escape || press.characters == "q" {
-            guard let back = page.back else { return .ignored }
-            onAction(UIAction(nodeID: nodeID, action: back, kind: .cancel))
-            return .handled
-        }
         guard !list.items.isEmpty else { return .ignored }
         let current = list.items.firstIndex(where: { $0.id == selectedID })
             ?? list.items.firstIndex(where: { $0.id == list.selectedID })
             ?? 0
-        if press.key == .return {
-            guard let action = list.items[current].activate else { return .ignored }
-            onAction(UIAction(nodeID: list.items[current].id, action: action, kind: .activate))
+        guard let key = navigationKey(press),
+              let decision = uiListNavigationDecision(
+                key: key,
+                primaryRole: list.items[current].primaryRole
+              )
+        else { return .ignored }
+        if decision == .back {
+            guard let back = page.back else { return .ignored }
+            onAction(UIAction(nodeID: nodeID, action: back, kind: .cancel))
             return .handled
         }
-        if list.pageBehavior == .scroll, press.key == .pageDown || press.key == .pageUp {
+        if decision == .invokePrimary {
+            return invokePrimary(list.items[current], in: list) ? .handled : .ignored
+        }
+        if list.pageBehavior == .scroll, decision == .pageDown || decision == .pageUp {
             return .ignored
         }
 
@@ -212,27 +222,74 @@ private struct PageContent: View {
         let pageRows = max(visibleRows - max(list.pageOverlap, 0), 1)
         let last = list.items.count - 1
         let next: Int
-        switch (press.key, press.characters) {
-        case (.downArrow, _), (_, "j"):
+        switch decision {
+        case .down:
             next = min(current + 1, last)
-        case (.upArrow, _), (_, "k"):
+        case .up:
             next = max(current - 1, 0)
-        case (.home, _), (_, "g"):
+        case .first:
             next = 0
-        case (.end, _), (_, "G"):
+        case .last:
             next = last
-        case (.pageDown, _):
+        case .pageDown:
             next = min(current + pageRows, last)
-        case (.pageUp, _):
+        case .pageUp:
             next = max(current - pageRows, 0)
-        case (.space, _) where list.spacePagesDown:
-            next = min(current + pageRows, last)
-        default:
+        case .invokePrimary, .back:
             return .ignored
         }
         select(list.items[next].id, in: list)
         proxy.scrollTo(list.items[next].id, anchor: list.scrollPadding > 0 ? .center : nil)
         return .handled
+    }
+
+    private func navigationKey(_ press: KeyPress) -> UIListNavigationKey? {
+        switch (press.key, press.characters) {
+        case (.downArrow, _), (_, "j"): .down
+        case (.upArrow, _), (_, "k"): .up
+        case (.home, _), (_, "g"): .first
+        case (.end, _), (_, "G"): .last
+        case (.pageDown, _): .pageDown
+        case (.pageUp, _): .pageUp
+        case (.return, _): .enter
+        case (.space, _): .space
+        case (.escape, _), (_, "q"): .back
+        default: nil
+        }
+    }
+
+    @discardableResult
+    private func invokePrimary(_ item: UIListItemSpec, in list: UIListSpec) -> Bool {
+        select(item.id, in: list)
+        switch item.primaryRole {
+        case .toggle:
+            guard let toggle = item.primaryToggle else { return false }
+            onAction(UIAction(
+                nodeID: toggle.id,
+                action: toggle.setValue,
+                kind: .change,
+                value: .bool(!toggle.value)
+            ))
+        case .checkmark:
+            guard let checkmark = item.primaryCheckmark else { return false }
+            onAction(UIAction(
+                nodeID: checkmark.id,
+                action: checkmark.setValue,
+                kind: .change,
+                value: .bool(!checkmark.value)
+            ))
+        case .disclosure:
+            guard let activate = item.activate else { return false }
+            withAnimation(.snappy) {
+                onAction(UIAction(nodeID: item.id, action: activate, kind: .activate))
+            }
+        case .command, .destructive:
+            guard let activate = item.activate else { return false }
+            onAction(UIAction(nodeID: item.id, action: activate, kind: .activate))
+        case .static:
+            return false
+        }
+        return true
     }
 
     private func color(for tone: UIListItemTone) -> Color {
@@ -259,11 +316,6 @@ private struct PageContent: View {
                 itemRowContent(item, list: list, value: nil)
             }
         }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            select(item.id, in: list)
-            listFocused = true
-        }
     }
 
     private func itemRowContent(
@@ -277,33 +329,33 @@ private struct PageContent: View {
                     .controlSize(.small)
                     .accessibilityLabel("Loading")
             }
-            slot(item.leading)
-            if let activate = item.activate {
+            slot(item.leading, itemID: item.id, list: list)
+            if item.primaryRole == .static {
+                itemLabel(item)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
                 Button {
-                    select(item.id, in: list)
-                    onAction(UIAction(
-                        nodeID: item.id,
-                        action: activate,
-                        kind: .activate
-                    ))
+                    listFocused = true
+                    _ = invokePrimary(item, in: list)
                 } label: {
                     itemLabel(item)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-            } else {
-                itemLabel(item)
             }
-            Spacer(minLength: 12)
+            Spacer(minLength: 4)
             if let value {
                 Text(value)
                     .foregroundStyle(color(for: item.valueTone))
                     .multilineTextAlignment(.trailing)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            slot(item.trailing)
-            slot(item.accessory)
+            slot(item.trailing, itemID: item.id, list: list)
+            slot(item.accessory, itemID: item.id, list: list)
             if let action = item.delete {
                 Button {
+                    select(item.id, in: list)
                     onAction(UIAction(
                         nodeID: item.id,
                         action: action,
@@ -322,8 +374,12 @@ private struct PageContent: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(item.label)
                 .strikethrough(item.done)
-                .foregroundStyle(item.done ? Color.secondary : color(for: item.labelTone))
                 .fontWeight(item.emphasis == .strong ? .semibold : .regular)
+                .foregroundStyle(
+                    item.actionRole == .destructive
+                        ? Color.red
+                        : (item.done ? Color.secondary : color(for: item.labelTone))
+                )
             if let detail = item.detail {
                 Text(detail)
                     .font(.caption)
@@ -334,13 +390,19 @@ private struct PageContent: View {
     }
 
     @ViewBuilder
-    private func slot(_ slot: UIListItemSlot?) -> some View {
+    private func slot(
+        _ slot: UIListItemSlot?,
+        itemID: String,
+        list: UIListSpec
+    ) -> some View {
         switch slot {
         case let .toggle(toggle):
             Toggle(
                 isOn: Binding(
                     get: { toggle.value },
                     set: { value in
+                        select(itemID, in: list)
+                        listFocused = true
                         onAction(UIAction(
                             nodeID: toggle.id,
                             action: toggle.setValue,
@@ -354,7 +416,7 @@ private struct PageContent: View {
             }
             .labelsHidden()
             .accessibilityLabel(toggle.label)
-            .toggleStyle(.switch)
+            .toggleStyle(.checkbox)
         case let .status(status):
             Text(status.symbol)
                 .foregroundStyle(color(for: status.tone))
@@ -367,6 +429,16 @@ private struct PageContent: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(.quaternary, in: Capsule())
+        case .disclosure:
+            Image(systemName: "chevron.right")
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        case let .checkmark(checkmark):
+            Image(systemName: "checkmark")
+                .foregroundStyle(Color.accentColor)
+                .opacity(checkmark.value ? 1 : 0)
+                .accessibilityLabel(checkmark.label)
+                .accessibilityValue(checkmark.value ? "Selected" : "Not selected")
         case .unsupported, .none:
             EmptyView()
         }

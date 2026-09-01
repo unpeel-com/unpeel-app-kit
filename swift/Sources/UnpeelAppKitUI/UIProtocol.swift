@@ -14,6 +14,7 @@ public enum UnpeelUIProtocol {
     public static let listItemMetadataCapability = "listItemMetadata"
     public static let listItemActivateCapability = "listItemActivate"
     public static let listItemPresentationCapability = "listItemPresentation"
+    public static let listItemRoleCapability = "listItemRole"
     public static let listSelectionCapability = "listSelection"
     public static let statusSymbolCapability = "statusSymbol"
     public static let badgeCapability = "badge"
@@ -35,6 +36,7 @@ public enum UnpeelUIProtocol {
         listItemMetadataCapability,
         listItemActivateCapability,
         listItemPresentationCapability,
+        listItemRoleCapability,
         listSelectionCapability,
         statusSymbolCapability,
         badgeCapability,
@@ -1123,6 +1125,20 @@ public struct UIToggleSpec: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+public struct UICheckmarkSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let label: String
+    public let value: Bool
+    public let setValue: String
+
+    public init(id: String, label: String, value: Bool, setValue: String) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.setValue = setValue
+    }
+}
+
 public enum UIListItemTone: String, Codable, Equatable, Hashable, Sendable {
     case `default`
     case muted
@@ -1136,6 +1152,20 @@ public enum UIListItemTone: String, Codable, Equatable, Hashable, Sendable {
 public enum UIListItemEmphasis: String, Codable, Equatable, Hashable, Sendable {
     case regular
     case strong
+}
+
+public enum UIListItemActionRole: String, Codable, Equatable, Hashable, Sendable {
+    case `default`
+    case destructive
+}
+
+public enum UIListItemPrimaryRole: Equatable, Sendable {
+    case `static`
+    case toggle
+    case checkmark
+    case disclosure
+    case command
+    case destructive
 }
 
 public enum UIListPageBehavior: String, Codable, Equatable, Hashable, Sendable {
@@ -1217,6 +1247,8 @@ public enum UIListItemSlot: Equatable, Hashable, Sendable {
     case toggle(UIToggleSpec)
     case status(UIStatusSymbolSpec)
     case badge(UIBadgeSpec)
+    case disclosure
+    case checkmark(UICheckmarkSpec)
     case unsupported(kind: String)
 
     public var kind: String {
@@ -1224,6 +1256,8 @@ public enum UIListItemSlot: Equatable, Hashable, Sendable {
         case .toggle: "toggle"
         case .status: "status"
         case .badge: "badge"
+        case .disclosure: "disclosure"
+        case .checkmark: "checkmark"
         case let .unsupported(kind): kind
         }
     }
@@ -1239,6 +1273,8 @@ extension UIListItemSlot: Codable {
         case "toggle": self = .toggle(try UIToggleSpec(from: decoder))
         case "status": self = .status(try UIStatusSymbolSpec(from: decoder))
         case "badge": self = .badge(try UIBadgeSpec(from: decoder))
+        case "disclosure": self = .disclosure
+        case "checkmark": self = .checkmark(try UICheckmarkSpec(from: decoder))
         default: self = .unsupported(kind: kind)
         }
     }
@@ -1255,6 +1291,11 @@ extension UIListItemSlot: Codable {
         case let .badge(badge):
             try container.encode("badge", forKey: .type)
             try badge.encode(to: encoder)
+        case .disclosure:
+            try container.encode("disclosure", forKey: .type)
+        case let .checkmark(checkmark):
+            try container.encode("checkmark", forKey: .type)
+            try checkmark.encode(to: encoder)
         case let .unsupported(kind):
             try container.encode(kind, forKey: .type)
         }
@@ -1277,6 +1318,7 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     public var accessory: UIListItemSlot?
     public let delete: String?
     public let activate: String?
+    public let actionRole: UIListItemActionRole
 
     public init(
         id: String,
@@ -1293,7 +1335,8 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         trailing: UIListItemSlot? = nil,
         accessory: UIListItemSlot? = nil,
         delete: String? = nil,
-        activate: String? = nil
+        activate: String? = nil,
+        actionRole: UIListItemActionRole = .default
     ) {
         self.id = id
         self.label = label
@@ -1310,11 +1353,12 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         self.accessory = accessory
         self.delete = delete
         self.activate = activate
+        self.actionRole = actionRole
     }
 
     enum CodingKeys: String, CodingKey {
         case id, label, labelTone, emphasis, detail, value, valueTone, valueMinWidth
-        case done, busy, leading, trailing, accessory, delete, activate
+        case done, busy, leading, trailing, accessory, delete, activate, actionRole
     }
 
     public init(from decoder: Decoder) throws {
@@ -1334,6 +1378,10 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         accessory = try container.decodeIfPresent(UIListItemSlot.self, forKey: .accessory)
         delete = try container.decodeIfPresent(String.self, forKey: .delete)
         activate = try container.decodeIfPresent(String.self, forKey: .activate)
+        actionRole = try container.decodeIfPresent(
+            UIListItemActionRole.self,
+            forKey: .actionRole
+        ) ?? .default
         guard [label, detail, value].compactMap({ $0 }).allSatisfy({
             !$0.contains("\n") && !$0.contains("\r")
         }) else {
@@ -1361,6 +1409,90 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
                 debugDescription: "ListItem accepts one completion Toggle whose value matches done"
             )
         }
+        let checkmarks = [leading, trailing, accessory].compactMap { slot -> UICheckmarkSpec? in
+            guard case let .checkmark(checkmark) = slot else { return nil }
+            return checkmark
+        }
+        let disclosures = [leading, trailing, accessory].filter { slot in
+            guard case .disclosure = slot else { return false }
+            return true
+        }
+        guard checkmarks.count <= 1, disclosures.count <= 1 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .accessory,
+                in: container,
+                debugDescription: "ListItem accepts one checkmark or disclosure accessory"
+            )
+        }
+        if !checkmarks.isEmpty {
+            guard case .checkmark? = accessory else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .accessory,
+                    in: container,
+                    debugDescription: "Checkmark is accepted only in the accessory slot"
+                )
+            }
+        }
+        if !disclosures.isEmpty {
+            guard case .disclosure? = accessory, activate != nil else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .accessory,
+                    in: container,
+                    debugDescription: "Disclosure accessory requires activate"
+                )
+            }
+        }
+        let independentRoles = (toggles.isEmpty ? 0 : 1)
+            + (checkmarks.isEmpty ? 0 : 1)
+            + (disclosures.isEmpty ? 0 : 1)
+            + (activate != nil && disclosures.isEmpty ? 1 : 0)
+        guard independentRoles <= 1 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .activate,
+                in: container,
+                debugDescription: "ListItem primary role is ambiguous"
+            )
+        }
+        guard actionRole != .destructive || activate != nil && disclosures.isEmpty else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .actionRole,
+                in: container,
+                debugDescription: "destructive is accepted only for a plain command row"
+            )
+        }
+    }
+
+    public var primaryRole: UIListItemPrimaryRole {
+        if [leading, trailing, accessory].contains(where: {
+            guard case .toggle? = $0 else { return false }
+            return true
+        }) { return .toggle }
+        if [leading, trailing, accessory].contains(where: {
+            guard case .checkmark? = $0 else { return false }
+            return true
+        }) { return .checkmark }
+        if [leading, trailing, accessory].contains(where: {
+            guard case .disclosure? = $0 else { return false }
+            return true
+        }) { return .disclosure }
+        if activate != nil {
+            return actionRole == .destructive ? .destructive : .command
+        }
+        return .static
+    }
+
+    public var primaryToggle: UIToggleSpec? {
+        for slot in [leading, trailing, accessory] {
+            if case let .toggle(toggle)? = slot { return toggle }
+        }
+        return nil
+    }
+
+    public var primaryCheckmark: UICheckmarkSpec? {
+        for slot in [leading, trailing, accessory] {
+            if case let .checkmark(checkmark)? = slot { return checkmark }
+        }
+        return nil
     }
 }
 
@@ -1563,6 +1695,9 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
         if list.items.contains(where: { $0.activate != nil }) {
             capabilities.append(UnpeelUIProtocol.listItemActivateCapability)
         }
+        if list.items.contains(where: { $0.primaryRole != .static }) {
+            capabilities.append(UnpeelUIProtocol.listItemRoleCapability)
+        }
         var hasToggle = false
         var hasStatus = false
         var hasBadge = false
@@ -1572,6 +1707,7 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
                 case .toggle: hasToggle = true
                 case .status: hasStatus = true
                 case .badge: hasBadge = true
+                case .disclosure, .checkmark: break
                 case .unsupported: return nil
                 }
             }

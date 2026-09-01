@@ -29,7 +29,7 @@ use ratatui::widgets::Paragraph;
 use serde::{Deserialize, Serialize};
 use unpeel_app_kit::{
     Input, InputField, InputFieldAction, KitTheme, List, ListItem, ListItemSlot, ListKeymap,
-    ListNavigationOutcome, ListState, Page, PageTheme, Toggle,
+    ListNavigationOutcome, ListState, Page, PageTheme, RowKeyDecision, RowPrimaryRole, Toggle,
 };
 
 #[cfg(feature = "ui-bridge")]
@@ -463,14 +463,6 @@ fn terminal_intent(app: &mut TodoApp, key: KeyEvent) -> Option<Result<Intent, St
         return None;
     }
 
-    if key.code == KeyCode::Char(' ') {
-        return app.selected_todo().map(|todo| {
-            Ok(Intent::Toggle {
-                id: todo.id,
-                value: !todo.done,
-            })
-        });
-    }
     match key.code {
         KeyCode::Delete | KeyCode::Char('d') => app
             .selected_todo()
@@ -479,26 +471,30 @@ fn terminal_intent(app: &mut TodoApp, key: KeyEvent) -> Option<Result<Intent, St
             app.focus_input(true);
             None
         }
-        _ => match ListKeymap::new()
-            .action_for_key(&key)
-            .map(|action| app.list_state.navigate(action, app.state.todos.len()))
-        {
-            Some(ListNavigationOutcome::Back) => Some(Err("quit".to_owned())),
-            Some(ListNavigationOutcome::Activate(index)) => {
-                app.state.todos.get(index).map(|todo| {
+        _ => {
+            let role = app
+                .selected_todo()
+                .map(|todo| component_item(todo).primary_role())
+                .unwrap_or(RowPrimaryRole::Static);
+            match ListKeymap::new().decision_for_key(&key, role) {
+                Some(RowKeyDecision::InvokePrimary) => app.selected_todo().map(|todo| {
                     Ok(Intent::Toggle {
                         id: todo.id,
                         value: !todo.done,
                     })
-                })
+                }),
+                Some(RowKeyDecision::Navigate(action)) => {
+                    match app.list_state.navigate(action, app.state.todos.len()) {
+                        ListNavigationOutcome::Back => Some(Err("quit".to_owned())),
+                        ListNavigationOutcome::Activate(_)
+                        | ListNavigationOutcome::None
+                        | ListNavigationOutcome::SelectionChanged(_)
+                        | ListNavigationOutcome::Scrolled(_) => None,
+                    }
+                }
+                None => None,
             }
-            Some(
-                ListNavigationOutcome::None
-                | ListNavigationOutcome::SelectionChanged(_)
-                | ListNavigationOutcome::Scrolled(_),
-            )
-            | None => None,
-        },
+        }
     }
 }
 
@@ -818,6 +814,36 @@ mod tests {
         assert!(matches!(intent, Intent::Toggle { id: 2, value: true }));
         assert_eq!(app.list_state.selected(), Some(1));
         assert!(!app.input_focused);
+    }
+
+    #[test]
+    fn terminal_todo_inherits_the_shared_focus_and_role_key_table() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = TodoApp::load(directory.path().join("todo.json")).unwrap();
+        app.focus_input(false);
+
+        let enter = terminal_intent(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            enter,
+            Intent::Toggle {
+                id: 1,
+                value: false
+            }
+        ));
+
+        assert!(
+            terminal_intent(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),).is_none()
+        );
+        assert_eq!(app.list_state.selected(), Some(1));
+        let space = terminal_intent(
+            &mut app,
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(space, Intent::Toggle { id: 2, value: true }));
     }
 
     #[cfg(feature = "ui-bridge")]

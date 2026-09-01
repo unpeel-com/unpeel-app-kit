@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    InputField, KitTheme, ListPageBehavior, ListState, SELECTABLE_LEFT_PADDING, SelectableRow,
-    VerticalScrollbar,
+    InputField, KitTheme, ListPageBehavior, ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING,
+    SelectableRow, VerticalScrollbar,
 };
 
 /// Renderer capability for the v1 Page container.
@@ -35,6 +35,8 @@ pub const LIST_ITEM_METADATA_CAPABILITY: &str = "listItemMetadata";
 pub const LIST_ITEM_ACTIVATE_CAPABILITY: &str = "listItemActivate";
 /// Renderer capability for status/badge/busy ListItem presentation.
 pub const LIST_ITEM_PRESENTATION_CAPABILITY: &str = "listItemPresentation";
+/// Renderer capability for primary row roles and their native affordances.
+pub const LIST_ITEM_ROLE_CAPABILITY: &str = "listItemRole";
 /// Renderer capability for authoritative selection and shared list navigation.
 pub const LIST_SELECTION_CAPABILITY: &str = "listSelection";
 /// Renderer capability for static leading status symbols.
@@ -144,6 +146,47 @@ impl Toggle {
     }
 }
 
+/// Selection-mode checkmark carried by one ListItem accessory.
+///
+/// Unlike a Toggle, Space remains PageDown; Enter/click applies this idempotent
+/// boolean action through the App-owned reducer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Checkmark {
+    pub id: String,
+    pub label: String,
+    pub value: bool,
+    pub set_value: String,
+}
+
+impl Checkmark {
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        value: bool,
+        set_value: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            value,
+            set_value: set_value.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn marker(&self) -> &'static str {
+        if self.value { "✓" } else { " " }
+    }
+
+    fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
+        validate_identifier(&self.id, &format!("{path}.id"))?;
+        validate_text(&self.label, MAX_SHORT_TEXT_BYTES, &format!("{path}.label"))?;
+        validate_identifier(&self.set_value, &format!("{path}.setValue"))
+    }
+}
+
 /// Semantic foreground treatment shared by terminal, native, and web rows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +208,15 @@ pub enum ListItemEmphasis {
     #[default]
     Regular,
     Strong,
+}
+
+/// Visual severity for a plain command/button row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ListItemActionRole {
+    #[default]
+    Default,
+    Destructive,
 }
 
 /// Compact leading state such as `M`, `A`, `D`, or an issue number/state.
@@ -289,6 +341,8 @@ pub enum ListItemSlot {
     Toggle(Toggle),
     Status(StatusSymbol),
     Badge(Badge),
+    Disclosure,
+    Checkmark(Checkmark),
 }
 
 impl ListItemSlot {
@@ -307,11 +361,24 @@ impl ListItemSlot {
         Self::Badge(badge)
     }
 
+    /// UITableViewCell-style navigation affordance. The row's `activate`
+    /// action remains the authoritative App/router transition.
+    #[must_use]
+    pub const fn disclosure() -> Self {
+        Self::Disclosure
+    }
+
+    #[must_use]
+    pub const fn checkmark(checkmark: Checkmark) -> Self {
+        Self::Checkmark(checkmark)
+    }
+
     #[must_use]
     pub const fn id(&self) -> Option<&str> {
         match self {
             Self::Toggle(toggle) => Some(toggle.id.as_str()),
-            Self::Status(_) | Self::Badge(_) => None,
+            Self::Checkmark(checkmark) => Some(checkmark.id.as_str()),
+            Self::Status(_) | Self::Badge(_) | Self::Disclosure => None,
         }
     }
 
@@ -320,20 +387,44 @@ impl ListItemSlot {
             Self::Toggle(toggle) => toggle.validate(path),
             Self::Status(status) => status.validate(path),
             Self::Badge(badge) => badge.validate(path),
+            Self::Disclosure => Ok(()),
+            Self::Checkmark(checkmark) => checkmark.validate(path),
         }
     }
 
     fn toggle_mut(&mut self, id: &str) -> Option<&mut Toggle> {
         match self {
             Self::Toggle(toggle) if toggle.id == id => Some(toggle),
-            Self::Toggle(_) | Self::Status(_) | Self::Badge(_) => None,
+            Self::Toggle(_)
+            | Self::Status(_)
+            | Self::Badge(_)
+            | Self::Disclosure
+            | Self::Checkmark(_) => None,
         }
     }
 
     fn as_toggle(&self) -> Option<&Toggle> {
         match self {
             Self::Toggle(toggle) => Some(toggle),
-            Self::Status(_) | Self::Badge(_) => None,
+            Self::Status(_) | Self::Badge(_) | Self::Disclosure | Self::Checkmark(_) => None,
+        }
+    }
+
+    fn checkmark_mut(&mut self, id: &str) -> Option<&mut Checkmark> {
+        match self {
+            Self::Checkmark(checkmark) if checkmark.id == id => Some(checkmark),
+            Self::Toggle(_)
+            | Self::Status(_)
+            | Self::Badge(_)
+            | Self::Disclosure
+            | Self::Checkmark(_) => None,
+        }
+    }
+
+    fn as_checkmark(&self) -> Option<&Checkmark> {
+        match self {
+            Self::Checkmark(checkmark) => Some(checkmark),
+            Self::Toggle(_) | Self::Status(_) | Self::Badge(_) | Self::Disclosure => None,
         }
     }
 }
@@ -374,6 +465,8 @@ pub struct ListItem {
     pub delete: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activate: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_list_item_action_role")]
+    pub action_role: ListItemActionRole,
 }
 
 impl ListItem {
@@ -395,6 +488,7 @@ impl ListItem {
             accessory: None,
             delete: None,
             activate: None,
+            action_role: ListItemActionRole::Default,
         }
     }
 
@@ -481,6 +575,75 @@ impl ListItem {
         self
     }
 
+    /// Declares a plain command/button row with no accessory affordance.
+    #[must_use]
+    pub fn command_action(self, action: impl Into<String>) -> Self {
+        self.activate_action(action)
+    }
+
+    /// Declares a command row whose native and web treatment is destructive.
+    #[must_use]
+    pub fn destructive_action(mut self, action: impl Into<String>) -> Self {
+        self.activate = Some(action.into());
+        self.action_role = ListItemActionRole::Destructive;
+        self.label_tone = ListItemTone::Danger;
+        self
+    }
+
+    /// Declares navigation to another App-owned Page. The accessory is only
+    /// an affordance; the reducer remains the router and publishes the Page.
+    #[must_use]
+    pub fn disclosure_action(mut self, action: impl Into<String>) -> Self {
+        self.activate = Some(action.into());
+        self.accessory = Some(ListItemSlot::Disclosure);
+        self
+    }
+
+    /// Declares a selection-mode row with one idempotent checkmark action.
+    #[must_use]
+    pub fn checkmark(mut self, checkmark: Checkmark) -> Self {
+        self.accessory = Some(ListItemSlot::Checkmark(checkmark));
+        self
+    }
+
+    /// Behavior hint consumed by the shared Enter/Space decision table.
+    #[must_use]
+    pub fn primary_role(&self) -> RowPrimaryRole {
+        if self
+            .slots()
+            .any(|slot| matches!(slot, ListItemSlot::Toggle(_)))
+        {
+            RowPrimaryRole::Toggle
+        } else if self
+            .slots()
+            .any(|slot| matches!(slot, ListItemSlot::Checkmark(_)))
+        {
+            RowPrimaryRole::Checkmark
+        } else if self
+            .slots()
+            .any(|slot| matches!(slot, ListItemSlot::Disclosure))
+        {
+            RowPrimaryRole::Disclosure
+        } else if self.activate.is_some() {
+            match self.action_role {
+                ListItemActionRole::Default => RowPrimaryRole::Command,
+                ListItemActionRole::Destructive => RowPrimaryRole::Destructive,
+            }
+        } else {
+            RowPrimaryRole::Static
+        }
+    }
+
+    #[must_use]
+    pub fn primary_toggle(&self) -> Option<&Toggle> {
+        self.slots().find_map(ListItemSlot::as_toggle)
+    }
+
+    #[must_use]
+    pub fn primary_checkmark(&self) -> Option<&Checkmark> {
+        self.slots().find_map(ListItemSlot::as_checkmark)
+    }
+
     pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
         validate_identifier(&self.id, &format!("{path}.id"))?;
         validate_text(&self.label, MAX_LABEL_BYTES, &format!("{path}.label"))?;
@@ -510,6 +673,56 @@ impl ListItem {
             return Err(ComponentValidationError::new(
                 format!("{path}.slots"),
                 "ListItem v1 accepts at most one completion Toggle",
+            ));
+        }
+        let checkmarks = self
+            .slots()
+            .filter_map(ListItemSlot::as_checkmark)
+            .collect::<Vec<_>>();
+        let disclosures = self
+            .slots()
+            .filter(|slot| matches!(slot, ListItemSlot::Disclosure))
+            .count();
+        if checkmarks.len() > 1 || disclosures > 1 {
+            return Err(ComponentValidationError::new(
+                format!("{path}.slots"),
+                "ListItem accepts at most one checkmark or disclosure accessory",
+            ));
+        }
+        if !checkmarks.is_empty() && !matches!(self.accessory, Some(ListItemSlot::Checkmark(_))) {
+            return Err(ComponentValidationError::new(
+                format!("{path}.accessory"),
+                "Checkmark is accepted only in the accessory slot",
+            ));
+        }
+        if disclosures > 0 && !matches!(self.accessory, Some(ListItemSlot::Disclosure)) {
+            return Err(ComponentValidationError::new(
+                format!("{path}.accessory"),
+                "Disclosure is accepted only in the accessory slot",
+            ));
+        }
+        let independent_roles = usize::from(!toggles.is_empty())
+            + usize::from(!checkmarks.is_empty())
+            + usize::from(disclosures > 0)
+            + usize::from(self.activate.is_some() && disclosures == 0);
+        if independent_roles > 1 {
+            return Err(ComponentValidationError::new(
+                format!("{path}.role"),
+                "ListItem primary role is ambiguous",
+            ));
+        }
+        if disclosures > 0 && self.activate.is_none() {
+            return Err(ComponentValidationError::new(
+                format!("{path}.activate"),
+                "Disclosure requires an App-owned activate action",
+            ));
+        }
+        if self.action_role == ListItemActionRole::Destructive
+            && (self.activate.is_none() || disclosures > 0)
+        {
+            return Err(ComponentValidationError::new(
+                format!("{path}.actionRole"),
+                "destructive is accepted only for a plain command row",
             ));
         }
         if let Some(toggle) = toggles.first()
@@ -563,6 +776,20 @@ impl ListItem {
         }
         found
     }
+
+    fn set_checkmark_value(&mut self, id: &str, value: bool) -> bool {
+        for slot in self.slots_mut() {
+            if let Some(checkmark) = slot.checkmark_mut(id) {
+                checkmark.value = value;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+const fn is_default_list_item_action_role(role: &ListItemActionRole) -> bool {
+    matches!(role, ListItemActionRole::Default)
 }
 
 /// A keyed collection that contains only [`ListItem`] rows.
@@ -934,6 +1161,14 @@ impl Page {
         if self.list().items.iter().any(|item| item.activate.is_some()) {
             capabilities.push(LIST_ITEM_ACTIVATE_CAPABILITY);
         }
+        if self
+            .list()
+            .items
+            .iter()
+            .any(|item| item.primary_role().is_interactive())
+        {
+            capabilities.push(LIST_ITEM_ROLE_CAPABILITY);
+        }
         if self.list().items.iter().any(|item| {
             item.slots()
                 .any(|slot| matches!(slot, ListItemSlot::Toggle(_)))
@@ -1089,6 +1324,22 @@ impl Page {
         Err(ComponentValidationError::new(
             "delta.nodeId",
             format!("Toggle {toggle_id:?} is not present"),
+        ))
+    }
+
+    pub(crate) fn set_checkmark_value(
+        &mut self,
+        checkmark_id: &str,
+        value: bool,
+    ) -> Result<(), ComponentValidationError> {
+        for item in &mut self.body.as_list_mut().items {
+            if item.set_checkmark_value(checkmark_id, value) {
+                return Ok(());
+            }
+        }
+        Err(ComponentValidationError::new(
+            "delta.nodeId",
+            format!("Checkmark {checkmark_id:?} is not present"),
         ))
     }
 
@@ -1426,6 +1677,8 @@ fn render_list_item(
         .add_modifier(Modifier::CROSSED_OUT)
     } else if selected {
         theme.selected_item
+    } else if item.action_role == ListItemActionRole::Destructive {
+        theme.danger
     } else {
         theme.tone(item.label_tone)
     };
@@ -1569,6 +1822,22 @@ fn append_leading_slot(
                 theme.tone(badge.tone)
             },
         )),
+        ListItemSlot::Disclosure => spans.push(Span::styled(
+            "› ",
+            if selected {
+                theme.selected_detail
+            } else {
+                theme.value
+            },
+        )),
+        ListItemSlot::Checkmark(checkmark) => spans.push(Span::styled(
+            format!("{} ", checkmark.marker()),
+            if selected {
+                theme.selected_item
+            } else {
+                theme.accent
+            },
+        )),
     }
 }
 
@@ -1601,6 +1870,22 @@ fn append_trailing_slot(
                 theme.selected_badge
             } else {
                 theme.tone(badge.tone)
+            },
+        )),
+        ListItemSlot::Disclosure => spans.push(Span::styled(
+            "›",
+            if selected {
+                theme.selected_detail
+            } else {
+                theme.value
+            },
+        )),
+        ListItemSlot::Checkmark(checkmark) => spans.push(Span::styled(
+            checkmark.marker(),
+            if selected {
+                theme.selected_item
+            } else {
+                theme.accent
             },
         )),
     }
@@ -1775,7 +2060,14 @@ mod tests {
         page.validate().unwrap();
         assert_eq!(
             page.required_capabilities(),
-            vec!["page", "list", "listItem", "input", "toggle"]
+            vec![
+                "page",
+                "list",
+                "listItem",
+                "input",
+                "listItemRole",
+                "toggle"
+            ]
         );
 
         let mut duplicate = page;
@@ -1950,8 +2242,69 @@ mod tests {
                 "pageBack",
                 "listItemMetadata",
                 "listItemActivate",
+                "listItemRole",
             ]
         );
+    }
+
+    #[test]
+    fn list_item_roles_are_closed_and_render_their_terminal_affordances() {
+        let page = Page::new(
+            "Roles",
+            List::new(
+                "roles",
+                vec![
+                    ListItem::new("settings", "Settings").disclosure_action("open-settings"),
+                    ListItem::new("dark", "Dark theme").checkmark(Checkmark::new(
+                        "dark-checkmark",
+                        "Dark theme selected",
+                        true,
+                        "set-dark",
+                    )),
+                    ListItem::new("refresh", "Refresh").command_action("refresh"),
+                    ListItem::new("delete", "Delete workspace")
+                        .destructive_action("delete-workspace"),
+                    ListItem::new("version", "Version 1.0"),
+                ],
+            ),
+        );
+        page.validate().unwrap();
+        assert_eq!(
+            page.list()
+                .items
+                .iter()
+                .map(ListItem::primary_role)
+                .collect::<Vec<_>>(),
+            vec![
+                RowPrimaryRole::Disclosure,
+                RowPrimaryRole::Checkmark,
+                RowPrimaryRole::Command,
+                RowPrimaryRole::Destructive,
+                RowPrimaryRole::Static,
+            ]
+        );
+
+        let mut state = ListState::new(Some(4));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 5));
+        page.list()
+            .widget(&mut state)
+            .render(Rect::new(0, 0, 40, 5), &mut buffer);
+        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert!(row(0).contains("Settings"));
+        assert!(row(0).contains('›'));
+        assert!(row(1).contains("Dark theme"));
+        assert!(row(1).contains('✓'));
+        assert_eq!(buffer[(2, 3)].fg, KitTheme::dark().danger);
+
+        let ambiguous = ListItem::new("ambiguous", "Ambiguous")
+            .trailing(ListItemSlot::toggle(Toggle::new(
+                "toggle",
+                "Toggle",
+                false,
+                "set-toggle",
+            )))
+            .activate_action("also-activate");
+        assert!(ambiguous.validate("item").is_err());
     }
 
     #[test]

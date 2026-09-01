@@ -55,13 +55,14 @@ pub use agent::{
 };
 pub use click::{DEFAULT_DOUBLE_CLICK_INTERVAL, DoubleClickTracker};
 pub use components::{
-    BADGE_COMPONENT_CAPABILITY, BUTTON_COMPONENT_CAPABILITY, Badge, Button, ButtonRole,
+    BADGE_COMPONENT_CAPABILITY, BUTTON_COMPONENT_CAPABILITY, Badge, Button, ButtonRole, Checkmark,
     ComponentValidationError, INPUT_COMPONENT_CAPABILITY, Input, LIST_COMPONENT_CAPABILITY,
     LIST_ITEM_ACTIVATE_CAPABILITY, LIST_ITEM_COMPONENT_CAPABILITY, LIST_ITEM_METADATA_CAPABILITY,
-    LIST_ITEM_PRESENTATION_CAPABILITY, LIST_SELECTION_CAPABILITY, List, ListItem, ListItemEmphasis,
-    ListItemSlot, ListItemTone, ListWidget, PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page,
-    PageBodySlot, PageHeaderSlot, PageLayout, PageTheme, PageWidget,
-    STATUS_SYMBOL_COMPONENT_CAPABILITY, StatusSymbol, TOGGLE_COMPONENT_CAPABILITY, Toggle,
+    LIST_ITEM_PRESENTATION_CAPABILITY, LIST_ITEM_ROLE_CAPABILITY, LIST_SELECTION_CAPABILITY, List,
+    ListItem, ListItemActionRole, ListItemEmphasis, ListItemSlot, ListItemTone, ListWidget,
+    PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page, PageBodySlot, PageHeaderSlot,
+    PageLayout, PageTheme, PageWidget, STATUS_SYMBOL_COMPONENT_CAPABILITY, StatusSymbol,
+    TOGGLE_COMPONENT_CAPABILITY, Toggle,
 };
 pub use context::{
     AppContext, AppMode, ProjectContext, UnpeelUser, WorkspaceContext, WorktreeContext,
@@ -80,6 +81,7 @@ pub use input::{InputField, InputFieldAction, InputFieldTheme, InputFieldWidget}
 pub use keyboard::KeyboardEnhancementGuard;
 pub use list_navigation::{
     ListKeymap, ListNavigationAction, ListNavigationOutcome, ListPageBehavior, ListState,
+    RowBoundaryBehavior, RowKeyDecision, RowNavigationState, RowPrimaryRole,
 };
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_interaction::{

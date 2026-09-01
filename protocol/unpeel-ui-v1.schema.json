@@ -473,6 +473,25 @@
         "setValue": { "$ref": "#/$defs/identifier" }
       }
     },
+    "checkmark": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "label", "value", "setValue"],
+      "properties": {
+        "type": { "const": "checkmark" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "maxLength": 4096 },
+        "value": { "type": "boolean" },
+        "setValue": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "disclosure": {
+      "description": "Navigation affordance only; the ListItem activate action remains the App-owned router.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type"],
+      "properties": { "type": { "const": "disclosure" } }
+    },
     "listItemTone": {
       "enum": ["default", "muted", "accent", "info", "success", "warning", "danger"]
     },
@@ -510,7 +529,7 @@
       "properties": { "type": { "$ref": "#/$defs/identifier" } },
       "not": {
         "required": ["type"],
-        "properties": { "type": { "enum": ["toggle", "status", "badge"] } }
+        "properties": { "type": { "enum": ["toggle", "status", "badge", "disclosure", "checkmark"] } }
       }
     },
     "listItemSlot": {
@@ -518,6 +537,8 @@
         { "$ref": "#/$defs/toggle" },
         { "$ref": "#/$defs/statusSymbol" },
         { "$ref": "#/$defs/badge" },
+        { "$ref": "#/$defs/disclosure" },
+        { "$ref": "#/$defs/checkmark" },
         { "$ref": "#/$defs/unsupportedRowSlot" }
       ]
     },
@@ -540,7 +561,8 @@
         "trailing": { "$ref": "#/$defs/listItemSlot" },
         "accessory": { "$ref": "#/$defs/listItemSlot" },
         "delete": { "$ref": "#/$defs/identifier" },
-        "activate": { "$ref": "#/$defs/identifier" }
+        "activate": { "$ref": "#/$defs/identifier" },
+        "actionRole": { "enum": ["default", "destructive"], "default": "default" }
       }
     },
     "list": {
@@ -797,6 +819,16 @@
           "required": ["op", "nodeId", "value"],
           "properties": {
             "op": { "const": "toggleSetValue" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "value": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "value"],
+          "properties": {
+            "op": { "const": "checkmarkSetValue" },
             "nodeId": { "$ref": "#/$defs/identifier" },
             "value": { "type": "boolean" }
           }

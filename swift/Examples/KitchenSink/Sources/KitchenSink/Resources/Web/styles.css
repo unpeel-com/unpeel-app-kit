@@ -263,6 +263,14 @@ textarea {
   background: var(--accent-soft);
 }
 
+.unpeel-list-item:not([data-role="static"]) {
+  cursor: pointer;
+}
+
+.unpeel-list-item[data-action-role="destructive"] .unpeel-list-item__label {
+  color: var(--danger);
+}
+
 .unpeel-list:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -322,10 +330,23 @@ textarea {
 
 .unpeel-list-item__detail,
 .unpeel-list-item__value,
+.unpeel-list-item__disclosure,
 .unpeel-toggle__label,
 .unpeel-list__empty {
   color: var(--muted);
   font-size: 12px;
+}
+
+.unpeel-list-item__disclosure,
+.unpeel-list-item__checkmark {
+  flex: 0 0 auto;
+  min-width: 1em;
+  text-align: center;
+}
+
+.unpeel-list-item__checkmark {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .unpeel-list-item__activate {

@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,8 +11,10 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    ColorScheme, DragSurface, InputField, InputFieldAction, InputFieldTheme, KitTheme,
-    SELECTABLE_LEFT_PADDING, VerticalScrollbar,
+    ColorScheme, DragSurface, InputField, InputFieldAction, InputFieldTheme, KitTheme, ListKeymap,
+    ListNavigationAction, ListNavigationOutcome, ListPageBehavior, RowBoundaryBehavior,
+    RowKeyDecision, RowNavigationState, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow,
+    VerticalScrollbar,
 };
 
 /// One item in the current directory shown by [`Explorer`].
@@ -217,7 +220,7 @@ pub struct Explorer {
     navigation_root: Option<PathBuf>,
     all_entries: Vec<ExplorerEntry>,
     entries: Vec<ExplorerEntry>,
-    selected: usize,
+    navigation: RowNavigationState,
     show_hidden: bool,
     file_extensions: Option<Vec<String>>,
     prune_unmatched_directories: bool,
@@ -225,8 +228,6 @@ pub struct Explorer {
     filter: InputField,
     show_path: bool,
     theme: ExplorerTheme,
-    scroll: usize,
-    viewport_rows: usize,
     area: Rect,
     list_area: Rect,
 }
@@ -271,12 +272,16 @@ impl Explorer {
         let filter = InputField::new("Filter files")
             .with_prompt("/ ")
             .with_theme(input_theme(&theme));
+        let mut navigation = RowNavigationState::new((!entries.is_empty()).then_some(selected));
+        navigation.set_boundary_behavior(RowBoundaryBehavior::Wrap);
+        navigation.set_navigation(theme.scroll_padding, 0, ListPageBehavior::Selection);
+        navigation.prepare(Rect::new(0, 0, 0, 12), entries.len());
         Ok(Self {
             cwd,
             navigation_root,
             all_entries,
             entries,
-            selected,
+            navigation,
             show_hidden: false,
             file_extensions: None,
             prune_unmatched_directories: false,
@@ -284,8 +289,6 @@ impl Explorer {
             filter,
             show_path: true,
             theme,
-            scroll: 0,
-            viewport_rows: 12,
             area: Rect::default(),
             list_area: Rect::default(),
         })
@@ -295,6 +298,8 @@ impl Explorer {
     #[must_use]
     pub fn with_theme(mut self, theme: ExplorerTheme) -> Self {
         self.filter.set_theme(input_theme(&theme));
+        self.navigation
+            .set_navigation(theme.scroll_padding, 0, ListPageBehavior::Selection);
         self.theme = theme;
         self
     }
@@ -302,6 +307,8 @@ impl Explorer {
     /// Replaces the visual theme without changing navigation state.
     pub fn set_theme(&mut self, theme: ExplorerTheme) {
         self.filter.set_theme(input_theme(&theme));
+        self.navigation
+            .set_navigation(theme.scroll_padding, 0, ListPageBehavior::Selection);
         self.theme = theme;
     }
 
@@ -393,13 +400,13 @@ impl Explorer {
     }
 
     #[must_use]
-    pub const fn selected_index(&self) -> usize {
-        self.selected
+    pub fn selected_index(&self) -> usize {
+        self.navigation.selected().unwrap_or(0)
     }
 
     #[must_use]
     pub fn selected(&self) -> Option<&ExplorerEntry> {
-        self.entries.get(self.selected)
+        self.entries.get(self.selected_index())
     }
 
     #[must_use]
@@ -485,7 +492,7 @@ impl Explorer {
 
     #[must_use]
     pub const fn scroll_offset(&self) -> usize {
-        self.scroll
+        self.navigation.offset()
     }
 
     /// Number of matching files and folders, excluding the synthetic parent.
@@ -572,13 +579,11 @@ impl Explorer {
     /// Selects an entry by index, clamped to the available entries.
     pub fn set_selected_index(&mut self, index: usize) -> bool {
         if self.entries.is_empty() {
-            self.selected = 0;
+            self.navigation.select(None, 0);
             return false;
         }
         let next = index.min(self.entries.len() - 1);
-        let changed = next != self.selected;
-        self.selected = next;
-        changed
+        self.navigation.select(Some(next), self.entries.len())
     }
 
     /// Selects the entry matching an absolute path.
@@ -642,7 +647,7 @@ impl Explorer {
     /// Refreshes the current directory while preserving the selected path.
     pub fn refresh(&mut self) -> io::Result<()> {
         let preferred = self.selected().map(|entry| entry.path.clone());
-        let previous = self.selected;
+        let previous = self.selected_index();
         let all_entries = read_entries(
             &self.cwd,
             self.show_hidden,
@@ -653,9 +658,12 @@ impl Explorer {
         self.all_entries = all_entries;
         self.rebuild_filtered(preferred.as_deref());
         if preferred.is_none() {
-            self.selected = previous.min(self.entries.len().saturating_sub(1));
+            self.navigation.select(
+                (!self.entries.is_empty())
+                    .then_some(previous.min(self.entries.len().saturating_sub(1))),
+                self.entries.len(),
+            );
         }
-        self.clamp_scroll();
         Ok(())
     }
 
@@ -665,7 +673,7 @@ impl Explorer {
             return Ok(());
         }
         let preferred = self.selected().map(|entry| entry.path.clone());
-        let previous = self.selected;
+        let previous = self.selected_index();
         let all_entries = read_entries(
             &self.cwd,
             show,
@@ -677,21 +685,117 @@ impl Explorer {
         self.show_hidden = show;
         self.rebuild_filtered(preferred.as_deref());
         if preferred.is_none() {
-            self.selected = previous.min(self.entries.len().saturating_sub(1));
+            self.navigation.select(
+                (!self.entries.is_empty())
+                    .then_some(previous.min(self.entries.len().saturating_sub(1))),
+                self.entries.len(),
+            );
         }
-        self.clamp_scroll();
         Ok(())
+    }
+
+    /// Converts a terminal key with the shared row decision table while
+    /// preserving Explorer's filter focus and printable-character contract.
+    /// App-specific commands (quit, create, menus) remain outside the helper.
+    #[must_use]
+    pub fn input_for_key(&self, key: &KeyEvent) -> Option<ExplorerInput> {
+        if matches!(key.kind, KeyEventKind::Release) {
+            return None;
+        }
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alternate = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let command = key
+            .modifiers
+            .intersects(KeyModifiers::SUPER | KeyModifiers::META);
+        let non_text_modifier = key.modifiers.intersects(
+            KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SUPER
+                | KeyModifiers::HYPER
+                | KeyModifiers::META,
+        );
+        if self.filter_focused() {
+            return match key.code {
+                KeyCode::Esc => Some(ExplorerInput::Parent),
+                KeyCode::Tab | KeyCode::Down => Some(ExplorerInput::BlurFilter),
+                KeyCode::Up => Some(ExplorerInput::Up),
+                KeyCode::Left if command => Some(ExplorerInput::FilterHome { extend: shift }),
+                KeyCode::Right if command => Some(ExplorerInput::FilterEnd { extend: shift }),
+                KeyCode::Left => Some(ExplorerInput::FilterLeft {
+                    extend: shift,
+                    word: control || alternate,
+                }),
+                KeyCode::Right => Some(ExplorerInput::FilterRight {
+                    extend: shift,
+                    word: control || alternate,
+                }),
+                KeyCode::Home => Some(ExplorerInput::FilterHome { extend: shift }),
+                KeyCode::End => Some(ExplorerInput::FilterEnd { extend: shift }),
+                KeyCode::PageUp => Some(ExplorerInput::PageUp),
+                KeyCode::PageDown => Some(ExplorerInput::PageDown),
+                KeyCode::Enter => Some(ExplorerInput::Open),
+                KeyCode::Backspace => Some(ExplorerInput::FilterBackspace),
+                KeyCode::Char('h') if control => Some(ExplorerInput::FilterBackspace),
+                KeyCode::Delete => Some(ExplorerInput::FilterDelete),
+                KeyCode::Char('a') if control || command => Some(ExplorerInput::FilterSelectAll),
+                KeyCode::Char('u') if control => Some(ExplorerInput::ClearFilter),
+                KeyCode::Char(character) if !non_text_modifier => {
+                    Some(ExplorerInput::FilterCharacter(character))
+                }
+                _ => None,
+            };
+        }
+        match key.code {
+            KeyCode::Char('h') if control => return Some(ExplorerInput::ToggleHidden),
+            KeyCode::Char('f') if control => return Some(ExplorerInput::FocusFilter),
+            KeyCode::Char('r') if control => return Some(ExplorerInput::Refresh),
+            KeyCode::Tab | KeyCode::Char('/') => return Some(ExplorerInput::FocusFilter),
+            KeyCode::Up if self.selected_index() == 0 => return Some(ExplorerInput::FocusFilter),
+            KeyCode::Left | KeyCode::Backspace => return Some(ExplorerInput::Parent),
+            KeyCode::Right => return Some(ExplorerInput::Open),
+            _ => {}
+        }
+        let primary = self.selected().map_or(RowPrimaryRole::Static, |entry| {
+            if entry.is_directory() || entry.is_parent() {
+                RowPrimaryRole::Disclosure
+            } else {
+                RowPrimaryRole::Command
+            }
+        });
+        match ListKeymap::new()
+            .character_aliases(false)
+            .decision_for_key(key, primary)
+        {
+            Some(RowKeyDecision::InvokePrimary) => Some(ExplorerInput::Open),
+            Some(RowKeyDecision::Navigate(action)) => match action {
+                ListNavigationAction::Down => Some(ExplorerInput::Down),
+                ListNavigationAction::Up => Some(ExplorerInput::Up),
+                ListNavigationAction::First => Some(ExplorerInput::First),
+                ListNavigationAction::Last => Some(ExplorerInput::Last),
+                ListNavigationAction::PageDown => Some(ExplorerInput::PageDown),
+                ListNavigationAction::PageUp => Some(ExplorerInput::PageUp),
+                ListNavigationAction::Activate => Some(ExplorerInput::Open),
+                ListNavigationAction::Back => Some(ExplorerInput::Parent),
+            },
+            None => match key.code {
+                KeyCode::Char(character) if !non_text_modifier => {
+                    Some(ExplorerInput::FilterCharacter(character))
+                }
+                _ => None,
+            },
+        }
     }
 
     /// Updates navigation state from a backend-neutral action.
     pub fn handle(&mut self, input: ExplorerInput) -> io::Result<ExplorerEvent> {
         match input {
-            ExplorerInput::Up => Ok(self.move_selection(-1)),
-            ExplorerInput::Down => Ok(self.move_selection(1)),
-            ExplorerInput::First => Ok(self.select_boundary(false)),
-            ExplorerInput::Last => Ok(self.select_boundary(true)),
-            ExplorerInput::PageUp => Ok(self.move_selection(-(self.viewport_rows as isize))),
-            ExplorerInput::PageDown => Ok(self.move_selection(self.viewport_rows as isize)),
+            ExplorerInput::Up => Ok(self.navigate_rows(ListNavigationAction::Up)),
+            ExplorerInput::Down => Ok(self.navigate_rows(ListNavigationAction::Down)),
+            ExplorerInput::First => Ok(self.navigate_rows(ListNavigationAction::First)),
+            ExplorerInput::Last => Ok(self.navigate_rows(ListNavigationAction::Last)),
+            ExplorerInput::PageUp => Ok(self.navigate_rows(ListNavigationAction::PageUp)),
+            ExplorerInput::PageDown => Ok(self.navigate_rows(ListNavigationAction::PageDown)),
             ExplorerInput::Parent => self.open_parent(),
             ExplorerInput::Open => self.open_selected(),
             ExplorerInput::ToggleHidden => {
@@ -768,13 +872,7 @@ impl Explorer {
     }
 
     fn entry_index_at(&self, position: Position) -> Option<usize> {
-        if !self.list_area.contains(position) {
-            return None;
-        }
-        let index = self
-            .scroll
-            .saturating_add(usize::from(position.y.saturating_sub(self.list_area.y)));
-        (index < self.entries.len()).then_some(index)
+        self.navigation.item_at(position, self.entries.len())
     }
 
     fn rebuild_filtered(&mut self, preferred: Option<&Path>) {
@@ -792,7 +890,7 @@ impl Explorer {
             .iter()
             .position(|entry| !entry.parent)
             .unwrap_or(0);
-        self.selected = preferred
+        let selected = preferred
             .and_then(|path| {
                 self.entries.iter().position(|entry| {
                     entry.path == path && (self.filter.text().is_empty() || !entry.parent)
@@ -800,7 +898,12 @@ impl Explorer {
             })
             .unwrap_or(first_match)
             .min(self.entries.len().saturating_sub(1));
-        self.scroll = 0;
+        self.navigation.set_offset(0, self.entries.len());
+        self.navigation.select(
+            (!self.entries.is_empty()).then_some(selected),
+            self.entries.len(),
+        );
+        self.navigation.request_reveal();
     }
 
     fn edit_filter(&mut self, action: InputFieldAction) -> ExplorerEvent {
@@ -839,42 +942,13 @@ impl Explorer {
         Ok(())
     }
 
-    fn move_selection(&mut self, delta: isize) -> ExplorerEvent {
-        let len = self.entries.len();
-        if len == 0 || delta == 0 {
-            return ExplorerEvent::None;
-        }
-        let next = if delta < 0 {
-            if delta == -1 && self.selected == 0 {
-                len - 1
-            } else {
-                self.selected.saturating_sub(delta.unsigned_abs())
-            }
-        } else {
-            let candidate = self.selected.saturating_add(delta as usize);
-            if candidate >= len {
-                if delta == 1 { 0 } else { len - 1 }
-            } else {
-                candidate
-            }
-        };
-        if self.set_selected_index(next) {
-            ExplorerEvent::SelectionChanged
-        } else {
-            ExplorerEvent::None
-        }
-    }
-
-    fn select_boundary(&mut self, last: bool) -> ExplorerEvent {
-        let index = if last {
-            self.entries.len().saturating_sub(1)
-        } else {
-            0
-        };
-        if self.set_selected_index(index) {
-            ExplorerEvent::SelectionChanged
-        } else {
-            ExplorerEvent::None
+    fn navigate_rows(&mut self, action: ListNavigationAction) -> ExplorerEvent {
+        match self.navigation.navigate(action, self.entries.len()) {
+            ListNavigationOutcome::SelectionChanged(_) => ExplorerEvent::SelectionChanged,
+            ListNavigationOutcome::None
+            | ListNavigationOutcome::Scrolled(_)
+            | ListNavigationOutcome::Activate(_)
+            | ListNavigationOutcome::Back => ExplorerEvent::None,
         }
     }
 
@@ -920,8 +994,12 @@ impl Explorer {
         self.filter.clear();
         self.filter.set_focused(false);
         self.entries = self.all_entries.clone();
-        self.selected = selected;
-        self.scroll = 0;
+        self.navigation.set_offset(0, self.entries.len());
+        self.navigation.select(
+            (!self.entries.is_empty()).then_some(selected),
+            self.entries.len(),
+        );
+        self.navigation.request_reveal();
         Ok(ExplorerEvent::DirectoryChanged(self.cwd.clone()))
     }
 
@@ -952,8 +1030,7 @@ impl Explorer {
         if area.is_empty() {
             self.filter.clear_render_state();
             self.list_area = Rect::default();
-            self.viewport_rows = 0;
-            self.scroll = 0;
+            self.navigation.prepare(Rect::default(), self.entries.len());
             return;
         }
 
@@ -992,8 +1069,9 @@ impl Explorer {
         let overflow = list_height > 0 && self.entries.len() > usize::from(list_height);
         let list_width = area.width.saturating_sub(u16::from(overflow));
         self.list_area = Rect::new(area.x, list_y, list_width, list_height);
-        self.viewport_rows = usize::from(list_height);
-        self.ensure_selected_visible();
+        self.navigation
+            .set_navigation(self.theme.scroll_padding, 0, ListPageBehavior::Selection);
+        self.navigation.prepare(self.list_area, self.entries.len());
 
         let visible = usize::from(list_height);
         if self.match_count() == 0 && visible > self.entries.len() {
@@ -1014,11 +1092,14 @@ impl Explorer {
                 self.list_area.width,
                 1,
             );
-            Line::styled(label, self.theme.style.patch(self.theme.empty))
-                .render(message_area, buffer);
+            let style = self.theme.style.patch(self.theme.empty);
+            Line::styled(label, style).render(message_area, buffer);
         }
 
-        for (slot, index) in (self.scroll..self.entries.len()).take(visible).enumerate() {
+        for (slot, index) in (self.navigation.offset()..self.entries.len())
+            .take(visible)
+            .enumerate()
+        {
             let row = Rect::new(
                 self.list_area.x,
                 self.list_area.y.saturating_add(slot as u16),
@@ -1026,11 +1107,24 @@ impl Explorer {
                 1,
             );
             let entry = &self.entries[index];
-            let selected = index == self.selected;
-            let style = self.entry_style(entry, selected);
-            buffer.set_style(row, style);
-            let label = self.entry_label(entry, selected, row.width);
-            Line::styled(label, style).render(row, buffer);
+            let selected = self.navigation.selected() == Some(index);
+            let inactive_style = self.entry_style(entry);
+            let active_style = inactive_style.patch(self.theme.selected);
+            let content = SelectableRow::new(selected, active_style)
+                .inactive_style(inactive_style)
+                .left_padding(self.theme.left_padding)
+                .right_padding(0)
+                .paint(row, buffer);
+            let label = self.entry_label(entry, selected, content.width);
+            Line::styled(
+                label,
+                if selected {
+                    active_style
+                } else {
+                    inactive_style
+                },
+            )
+            .render(content, buffer);
             drags.register(row, &entry.path);
         }
 
@@ -1041,14 +1135,18 @@ impl Explorer {
                 area.width.min(1),
                 list_height,
             );
-            VerticalScrollbar::new(self.entries.len(), usize::from(list_height), self.scroll)
-                .track_style(self.theme.scrollbar_track)
-                .thumb_style(self.theme.scrollbar_thumb)
-                .render(scrollbar, buffer);
+            VerticalScrollbar::new(
+                self.entries.len(),
+                usize::from(list_height),
+                self.navigation.offset(),
+            )
+            .track_style(self.theme.scrollbar_track)
+            .thumb_style(self.theme.scrollbar_thumb)
+            .render(scrollbar, buffer);
         }
     }
 
-    fn entry_style(&self, entry: &ExplorerEntry, selected: bool) -> Style {
+    fn entry_style(&self, entry: &ExplorerEntry) -> Style {
         let kind = if entry.parent {
             self.theme.parent
         } else if entry.symlink {
@@ -1058,60 +1156,22 @@ impl Explorer {
         } else {
             self.theme.item
         };
-        let style = self.theme.style.patch(kind);
-        if selected {
-            style.patch(self.theme.selected)
-        } else {
-            style
-        }
+        self.theme.style.patch(kind)
     }
 
     fn entry_label(&self, entry: &ExplorerEntry, selected: bool, width: u16) -> String {
         if width == 0 {
             return String::new();
         }
-        let padding = " ".repeat(usize::from(self.theme.left_padding.min(width)));
         let symbol = self.theme.selected_symbol.as_deref().unwrap_or("");
         let marker = if selected {
             symbol.to_owned()
         } else {
             " ".repeat(display_width(symbol))
         };
-        let prefix = format!("{padding}{marker}");
+        let prefix = marker;
         let remaining = usize::from(width).saturating_sub(display_width(&prefix));
         format!("{prefix}{}", truncate_end(&entry.display_name(), remaining))
-    }
-
-    fn ensure_selected_visible(&mut self) {
-        let viewport = self.viewport_rows;
-        let total = self.entries.len();
-        if viewport == 0 || total == 0 {
-            self.scroll = 0;
-            return;
-        }
-        let padding = self
-            .theme
-            .scroll_padding
-            .min(viewport.saturating_sub(1) / 2);
-        if self.selected < self.scroll.saturating_add(padding) {
-            self.scroll = self.selected.saturating_sub(padding);
-        } else {
-            let protected_bottom = self.scroll.saturating_add(viewport).saturating_sub(padding);
-            if self.selected >= protected_bottom {
-                self.scroll = self
-                    .selected
-                    .saturating_add(padding)
-                    .saturating_add(1)
-                    .saturating_sub(viewport);
-            }
-        }
-        self.clamp_scroll();
-    }
-
-    fn clamp_scroll(&mut self) {
-        self.scroll = self
-            .scroll
-            .min(self.entries.len().saturating_sub(self.viewport_rows));
     }
 }
 
@@ -1354,6 +1414,50 @@ mod tests {
             .collect()
     }
 
+    fn legacy_row_buffer(explorer: &Explorer, area: Rect) -> Buffer {
+        let mut buffer = Buffer::empty(area);
+        buffer.set_style(area, explorer.theme.style);
+        let list = explorer.list_area;
+        let visible = usize::from(list.height);
+        for (slot, index) in (explorer.scroll_offset()..explorer.entries.len())
+            .take(visible)
+            .enumerate()
+        {
+            let row = Rect::new(list.x, list.y.saturating_add(slot as u16), list.width, 1);
+            let entry = &explorer.entries[index];
+            let selected = explorer.selected_index() == index;
+            let mut style = explorer.entry_style(entry);
+            if selected {
+                style = style.patch(explorer.theme.selected);
+            }
+            buffer.set_style(row, style);
+            let padding = " ".repeat(usize::from(explorer.theme.left_padding.min(row.width)));
+            let symbol = explorer.theme.selected_symbol.as_deref().unwrap_or("");
+            let marker = if selected {
+                symbol.to_owned()
+            } else {
+                " ".repeat(display_width(symbol))
+            };
+            let prefix = format!("{padding}{marker}");
+            let remaining = usize::from(row.width).saturating_sub(display_width(&prefix));
+            let label = format!("{prefix}{}", truncate_end(&entry.display_name(), remaining));
+            Line::styled(label, style).render(row, &mut buffer);
+        }
+        if list.height > 0 && explorer.entries.len() > visible {
+            let scrollbar = Rect::new(
+                area.right().saturating_sub(1),
+                list.y,
+                area.width.min(1),
+                list.height,
+            );
+            VerticalScrollbar::new(explorer.entries.len(), visible, explorer.scroll_offset())
+                .track_style(explorer.theme.scrollbar_track)
+                .thumb_style(explorer.theme.scrollbar_thumb)
+                .render(scrollbar, &mut buffer);
+        }
+        buffer
+    }
+
     #[test]
     fn flat_listing_hides_dotfiles_and_sorts_directories_first() {
         let temp = tempfile::tempdir().unwrap();
@@ -1590,6 +1694,71 @@ mod tests {
         assert_eq!(explorer.selected_index(), 0);
         explorer.handle(ExplorerInput::PageDown).unwrap();
         assert_eq!(explorer.selected_index(), 3);
+    }
+
+    #[test]
+    fn selectable_row_refactor_is_buffer_identical_to_legacy_explorer_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("folder")).unwrap();
+        for index in 0..8 {
+            fs::write(temp.path().join(format!("file-{index}.md")), "x").unwrap();
+        }
+        let theme = ExplorerTheme {
+            style: Style::new().bg(Color::Black),
+            selected: Style::new().fg(Color::White).bg(Color::Red),
+            selected_symbol: Some("› ".to_owned()),
+            left_padding: 2,
+            scroll_padding: 1,
+            ..ExplorerTheme::default()
+        };
+        let mut explorer = Explorer::new(temp.path()).unwrap().with_theme(theme);
+        let area = Rect::new(0, 0, 26, 6);
+        let mut drags = DragSurface::disabled();
+        let mut actual = Buffer::empty(area);
+        explorer.widget(&mut drags).render(area, &mut actual);
+        explorer.handle(ExplorerInput::PageDown).unwrap();
+        explorer.widget(&mut drags).render(area, &mut actual);
+
+        let expected = legacy_row_buffer(&explorer, area);
+        for y in explorer.list_area.y..explorer.list_area.bottom() {
+            for x in area.x..area.right() {
+                assert_eq!(
+                    actual[(x, y)],
+                    expected[(x, y)],
+                    "Explorer cell drifted at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explorer_keys_use_the_shared_row_decision_table_without_stealing_filter_text() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("folder")).unwrap();
+        fs::write(temp.path().join("note.md"), "x").unwrap();
+        let mut explorer = Explorer::scoped(temp.path()).unwrap();
+
+        assert_eq!(
+            explorer.input_for_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(ExplorerInput::Open)
+        );
+        assert_eq!(
+            explorer.input_for_key(&KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            Some(ExplorerInput::PageDown)
+        );
+        assert_eq!(
+            explorer.input_for_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(ExplorerInput::Parent)
+        );
+        assert_eq!(
+            explorer.input_for_key(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(ExplorerInput::FilterCharacter('j'))
+        );
+        explorer.set_filter_focused(true);
+        assert_eq!(
+            explorer.input_for_key(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            Some(ExplorerInput::FilterCharacter('k'))
+        );
     }
 
     #[test]

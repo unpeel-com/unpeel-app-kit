@@ -11,6 +11,8 @@ import {
   isPageNode,
   isRenderablePageNode,
   isSurfaceNode,
+  listItemPrimaryRole,
+  listNavigationDecision,
   negotiateUiProtocolVersion,
   applyUiDelta,
   resolveMediaPointSize,
@@ -33,7 +35,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(21);
+    expect(messages).toHaveLength(23);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -92,6 +94,7 @@ describe("shared protocol", () => {
       "list",
       "listItem",
       "input",
+      "listItemRole",
       "toggle",
       "listSelection",
     ]);
@@ -122,6 +125,7 @@ describe("shared protocol", () => {
       "pageBack",
       "listItemMetadata",
       "listItemActivate",
+      "listItemRole",
       "listItemPresentation",
       "statusSymbol",
       "badge",
@@ -152,6 +156,37 @@ describe("shared protocol", () => {
     if (!isCanvasPageNode(updatedCanvas.root)) throw new Error("expected updated CanvasPage");
     expect(updatedCanvas.root.surface.reference.streamId).toBe("canvas-planets-detail");
 
+    const rolesSnapshot = messages[21] as UiSnapshot;
+    if (!isRenderablePageNode(rolesSnapshot.root)) throw new Error("expected row-role Page");
+    expect(rolesSnapshot.root.body.items.map(listItemPrimaryRole)).toEqual([
+      "toggle",
+      "disclosure",
+      "checkmark",
+      "command",
+      "destructive",
+      "static",
+    ]);
+    expect(rolesSnapshot.root.body.items[4]?.actionRole).toBe("destructive");
+    expect(uiNodeCapabilities(rolesSnapshot.root)).toEqual([
+      "page",
+      "list",
+      "listItem",
+      "pageBack",
+      "listItemMetadata",
+      "listItemActivate",
+      "listItemRole",
+      "toggle",
+      "listItemPresentation",
+      "listSelection",
+    ]);
+    const updatedRoles = applyUiDelta(rolesSnapshot, messages[22] as UiDelta);
+    if (!isRenderablePageNode(updatedRoles.root)) throw new Error("expected updated role Page");
+    expect(updatedRoles.root.body.items[2]?.accessory).toMatchObject({
+      type: "checkmark",
+      value: false,
+    });
+    expect(updatedRoles.root.body.selectedId).toBe("row-destructive");
+
     const surfaceSnapshot = messages[16] as UiSnapshot;
     if (!isSurfaceNode(surfaceSnapshot.root)) throw new Error("expected planet Surface fixture");
     expect(surfaceSnapshot.root.reference).toEqual({
@@ -167,6 +202,14 @@ describe("shared protocol", () => {
     const updatedSurface = applyUiDelta(surfaceSnapshot, surfaceDelta);
     if (!isSurfaceNode(updatedSurface.root)) throw new Error("expected Surface delta result");
     expect(updatedSurface.root.reference.streamId).toBe("planets-detail");
+  });
+
+  test("uses one role-aware Enter and Space decision table", () => {
+    expect(listNavigationDecision("Enter", "disclosure")).toBe("invokePrimary");
+    expect(listNavigationDecision("Enter", "static")).toBeUndefined();
+    expect(listNavigationDecision(" ", "toggle")).toBe("invokePrimary");
+    expect(listNavigationDecision(" ", "checkmark")).toBe("pageDown");
+    expect(listNavigationDecision("Escape", "command")).toBe("back");
   });
 
   test("builds the same command envelope", () => {
