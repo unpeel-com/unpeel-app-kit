@@ -3,8 +3,9 @@
 use std::io::{BufReader, Cursor};
 
 use unpeel_app_kit::{
-    ButtonRole, CanvasControl, ListItemActionRole, ListItemSlot, MediaSource, RowPrimaryRole,
-    SurfaceInputPolicy, UiComponent, UiEventKind, UiEventValue, UiMessage, read_ui_message,
+    ButtonRole, CanvasControl, ListItemActionRole, ListItemSlot, MarkdownMenuTrigger, MediaSource,
+    RowPrimaryRole, SurfaceInputPolicy, UiComponent, UiEventKind, UiEventValue, UiMessage,
+    read_ui_message,
 };
 
 const STREAM: &str = include_str!("../protocol/unpeel-ui-v1.ndjson");
@@ -17,7 +18,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 31);
+    assert_eq!(messages.len(), 34);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -358,7 +359,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(content.selection.as_ref().unwrap().anchor_id, "line-1");
     assert!(content.context_menu.is_some());
     let UiMessage::Delta(content_delta) = &messages[30] else {
-        panic!("last fixture must be a Content delta");
+        panic!("thirty-first fixture must be a Content delta");
     };
     let updated = content_snapshot.applying(content_delta).unwrap();
     let UiComponent::Page(content_page) = updated.root.element else {
@@ -373,4 +374,42 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     };
     assert!(editor.insert_menu.is_none());
     assert!(editor.context_menu.is_some());
+
+    let UiMessage::Snapshot(hint_snapshot) = &messages[31] else {
+        panic!("thirty-second fixture must contain the spec-owned Markdown command hint");
+    };
+    let UiComponent::MarkdownEditor(editor) = &hint_snapshot.root.element else {
+        panic!("command-hint fixture must remain a MarkdownEditor");
+    };
+    assert!(editor.command_hint_visible());
+    assert_eq!(
+        editor.menu_trigger_for_text_input("/"),
+        Some(MarkdownMenuTrigger::Slash)
+    );
+    assert_eq!(
+        hint_snapshot.root.required_capabilities(),
+        vec!["markdownEditor", "markdownCommandHint"]
+    );
+
+    let UiMessage::Event(open_slash) = &messages[32] else {
+        panic!("thirty-third fixture must carry the semantic slash-menu intent");
+    };
+    assert_eq!(open_slash.action.action.as_str(), "open-menu");
+    assert_eq!(
+        open_slash.action.value,
+        UiEventValue::Text("slash".to_owned())
+    );
+
+    let UiMessage::Delta(hint_delta) = &messages[33] else {
+        panic!("last fixture must update the command hint through a compact delta");
+    };
+    let updated = hint_snapshot.applying(hint_delta).unwrap();
+    let UiComponent::MarkdownEditor(editor) = updated.root.element else {
+        panic!("command-hint delta must preserve MarkdownEditor");
+    };
+    assert_eq!(
+        editor.command_hint.as_ref().map(|hint| hint.text.as_str()),
+        Some("Type '/' for blocks")
+    );
+    assert!(!editor.command_hint_visible());
 }

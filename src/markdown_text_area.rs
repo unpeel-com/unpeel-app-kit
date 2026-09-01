@@ -9,15 +9,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tui_textarea::{CursorMove, CursorRenderMode, Input, Key, TextArea, WrapMode};
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::VerticalScrollbar;
 #[cfg(feature = "ui-bridge")]
 use crate::{
     ActionId, MarkdownEditorActions, MarkdownEditorSpec, MarkdownMenuTrigger, MarkdownPresentation,
-    NodeId, TextEdit, TextPosition, TextSelection, UI_PROTOCOL_MAX_VERSION,
+    NodeId, SemanticMenu, TextEdit, TextPosition, TextSelection, UI_PROTOCOL_MAX_VERSION,
     UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent, UiEventKind, UiEventValue, UiNode,
 };
+use crate::{MarkdownCommandHint, VerticalScrollbar};
 
 const DEFAULT_LEFT_PADDING: u16 = 1;
 const DEFAULT_TAB_LENGTH: u8 = 2;
@@ -65,6 +65,9 @@ pub struct MarkdownEditorConfig {
     read_only: bool,
     dirty: bool,
     title: Option<String>,
+    command_hint: Option<MarkdownCommandHint>,
+    insert_menu: Option<SemanticMenu>,
+    context_menu: Option<SemanticMenu>,
     actions: MarkdownEditorActions,
 }
 
@@ -79,6 +82,9 @@ impl MarkdownEditorConfig {
             read_only: false,
             dirty: false,
             title: None,
+            command_hint: None,
+            insert_menu: None,
+            context_menu: None,
             actions: MarkdownEditorActions::editable(),
         }
     }
@@ -103,6 +109,25 @@ impl MarkdownEditorConfig {
     #[must_use]
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// Adds App-owned empty-line command discovery to every renderer.
+    #[must_use]
+    pub fn command_hint(mut self, command_hint: MarkdownCommandHint) -> Self {
+        self.command_hint = Some(command_hint);
+        self
+    }
+
+    #[must_use]
+    pub fn insert_menu(mut self, insert_menu: Option<SemanticMenu>) -> Self {
+        self.insert_menu = insert_menu;
+        self
+    }
+
+    #[must_use]
+    pub fn context_menu(mut self, context_menu: SemanticMenu) -> Self {
+        self.context_menu = Some(context_menu);
         self
     }
 
@@ -289,6 +314,9 @@ impl<'a> MarkdownTextArea<'a> {
         .dirty(config.dirty)
         .read_only(config.read_only)
         .placeholder(self.text_area.placeholder_text());
+        editor.command_hint.clone_from(&config.command_hint);
+        editor.insert_menu.clone_from(&config.insert_menu);
+        editor.context_menu.clone_from(&config.context_menu);
         editor.actions = config.actions.clone();
         editor.title.clone_from(&config.title);
         UiNode::markdown_editor(config.node_id.clone(), editor)
@@ -553,6 +581,52 @@ impl<'a> MarkdownTextArea<'a> {
     /// `show_cursor` controls only placement of the terminal-native cursor;
     /// the editor's hidden cell cursor remains disabled in all modes.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, show_cursor: bool) {
+        self.render_internal(frame, area, show_cursor, None, false);
+    }
+
+    /// Renders the standalone editor with the same App-owned command-hint
+    /// contract used by hosted Swift and web interpreters.
+    pub fn render_with_command_hint(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        command_hint: Option<&MarkdownCommandHint>,
+        insert_menu_open: bool,
+    ) {
+        self.render_internal(frame, area, show_cursor, command_hint, insert_menu_open);
+    }
+
+    /// Renders directly from the same metadata used to build the semantic
+    /// projection. This keeps the terminal hint and nested Menu state on one
+    /// Rust-owned configuration path.
+    #[cfg(feature = "ui-bridge")]
+    pub fn render_with_config(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        config: &MarkdownEditorConfig,
+    ) {
+        self.render_internal(
+            frame,
+            area,
+            show_cursor,
+            (config.presentation != MarkdownPresentation::Preview)
+                .then_some(config.command_hint.as_ref())
+                .flatten(),
+            config.insert_menu.is_some(),
+        );
+    }
+
+    fn render_internal(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        show_cursor: bool,
+        command_hint: Option<&MarkdownCommandHint>,
+        insert_menu_open: bool,
+    ) {
         let left_padding = self.left_padding.min(area.width);
         let content = Rect {
             x: area.x.saturating_add(left_padding),
@@ -593,6 +667,7 @@ impl<'a> MarkdownTextArea<'a> {
         frame.render_widget(&self.text_area, text_area);
         self.sync_scroll();
         self.render_gutter(frame, gutter_area);
+        self.render_command_hint(frame, command_hint, insert_menu_open);
         if overflow {
             let scrollbar_area = Rect {
                 x: area.right().saturating_sub(1),
@@ -611,6 +686,38 @@ impl<'a> MarkdownTextArea<'a> {
         if show_cursor && let Some(position) = self.text_area.rendered_cursor_position() {
             frame.set_cursor_position(position);
         }
+    }
+
+    fn render_command_hint(
+        &self,
+        frame: &mut Frame,
+        command_hint: Option<&MarkdownCommandHint>,
+        insert_menu_open: bool,
+    ) {
+        let Some(hint) = command_hint else { return };
+        let document = markdown_document(self.text_area.lines());
+        if !hint.is_visible(
+            &document,
+            self.text_area.cursor().0,
+            !self.text_area.is_selecting(),
+            insert_menu_open,
+            self.text_area.placeholder_text(),
+        ) {
+            return;
+        }
+        let Some(position) = self.text_area.rendered_cursor_position() else {
+            return;
+        };
+        let width = u16::try_from(hint.text.width())
+            .unwrap_or(u16::MAX)
+            .min(self.area.right().saturating_sub(position.x));
+        if width < 4 {
+            return;
+        }
+        frame.render_widget(
+            Paragraph::new(hint.text.as_str()).style(self.style.gutter),
+            Rect::new(position.x, position.y, width, 1),
+        );
     }
 
     fn layout_rows(&self) -> Vec<VisualRow> {
@@ -706,7 +813,6 @@ impl DerefMut for MarkdownTextArea<'_> {
     }
 }
 
-#[cfg(feature = "ui-bridge")]
 fn markdown_document(lines: &[String]) -> String {
     lines.join("\n")
 }
@@ -1172,6 +1278,34 @@ mod tests {
             .draw(|frame| editor.render(frame, frame.area(), true))
             .unwrap();
         terminal
+    }
+
+    #[test]
+    fn terminal_command_hint_uses_the_shared_empty_line_rule() {
+        let mut editor = MarkdownTextArea::new(
+            ["title", "", "body"],
+            MarkdownTextAreaStyle {
+                gutter: Style::new().fg(Color::DarkGray),
+                ..MarkdownTextAreaStyle::default()
+            },
+        );
+        editor.text_area_mut().set_placeholder_text("");
+        editor.move_cursor(CursorMove::Jump(1, 0));
+        let hint = MarkdownCommandHint::new("Type '/' for commands");
+        let backend = TestBackend::new(50, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                editor.render_with_command_hint(frame, frame.area(), true, Some(&hint), false);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..buffer.area.width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect::<String>();
+        assert!(row.contains("Type '/' for commands"));
+        let start = row.find("Type").unwrap() as u16;
+        assert_eq!(buffer[(start, 1)].fg, Color::DarkGray);
     }
 
     #[cfg(feature = "ui-bridge")]

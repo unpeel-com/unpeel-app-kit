@@ -10,6 +10,7 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case markdownSetReadOnly(nodeID: String, readOnly: Bool)
     case markdownSetTitle(nodeID: String, title: String?)
     case markdownSetPlaceholder(nodeID: String, placeholder: String)
+    case markdownSetCommandHint(nodeID: String, commandHint: MarkdownCommandHint?)
     case markdownSetActions(nodeID: String, actions: MarkdownEditorActions)
     case markdownSetMenus(nodeID: String, insertMenu: UIMenuSpec?, contextMenu: UIMenuSpec?)
     case menuSetSelection(nodeID: String, selectedID: String?)
@@ -54,6 +55,7 @@ extension UIDeltaOperation: Codable {
         case readOnly
         case title
         case placeholder
+        case commandHint
         case actions
         case insertMenu
         case contextMenu
@@ -86,6 +88,7 @@ extension UIDeltaOperation: Codable {
         case markdownSetReadOnly
         case markdownSetTitle
         case markdownSetPlaceholder
+        case markdownSetCommandHint
         case markdownSetActions
         case markdownSetMenus
         case menuSetSelection
@@ -149,6 +152,14 @@ extension UIDeltaOperation: Codable {
             self = .markdownSetPlaceholder(
                 nodeID: try container.decode(String.self, forKey: .nodeID),
                 placeholder: try container.decode(String.self, forKey: .placeholder)
+            )
+        case .markdownSetCommandHint:
+            self = .markdownSetCommandHint(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                commandHint: try container.decodeIfPresent(
+                    MarkdownCommandHint.self,
+                    forKey: .commandHint
+                )
             )
         case .markdownSetActions:
             self = .markdownSetActions(
@@ -298,6 +309,14 @@ extension UIDeltaOperation: Codable {
             try container.encode(Operation.markdownSetPlaceholder, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
             try container.encode(placeholder, forKey: .placeholder)
+        case let .markdownSetCommandHint(nodeID, commandHint):
+            try container.encode(Operation.markdownSetCommandHint, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            if let commandHint {
+                try container.encode(commandHint, forKey: .commandHint)
+            } else {
+                try container.encodeNil(forKey: .commandHint)
+            }
         case let .markdownSetActions(nodeID, actions):
             try container.encode(Operation.markdownSetActions, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
@@ -542,6 +561,11 @@ private extension UINode {
             return UINode(id: id, component: .markdownEditor(editor))
         case let .markdownSetPlaceholder(nodeID, placeholder):
             let editor = try markdownEditor(nodeID: nodeID).copying(placeholder: placeholder)
+            return UINode(id: id, component: .markdownEditor(editor))
+        case let .markdownSetCommandHint(nodeID, commandHint):
+            let editor = try markdownEditor(nodeID: nodeID).copying(
+                commandHint: .set(commandHint)
+            )
             return UINode(id: id, component: .markdownEditor(editor))
         case let .markdownSetActions(nodeID, actions):
             let editor = try markdownEditor(nodeID: nodeID).copying(actions: actions)
@@ -917,6 +941,11 @@ private enum OptionalMenuChange {
     case set(UIMenuSpec?)
 }
 
+private enum OptionalCommandHintChange {
+    case unchanged
+    case set(MarkdownCommandHint?)
+}
+
 private extension MarkdownEditorSpec {
     func copying(
         text: String? = nil,
@@ -925,6 +954,7 @@ private extension MarkdownEditorSpec {
         readOnly: Bool? = nil,
         dirty: Bool? = nil,
         placeholder: String? = nil,
+        commandHint: OptionalCommandHintChange = .unchanged,
         title: OptionalStringChange = .unchanged,
         actions: MarkdownEditorActions? = nil,
         insertMenu: OptionalMenuChange = .unchanged,
@@ -947,6 +977,11 @@ private extension MarkdownEditorSpec {
         case .unchanged: nextContextMenu = self.contextMenu
         case let .set(value): nextContextMenu = value
         }
+        let nextCommandHint: MarkdownCommandHint?
+        switch commandHint {
+        case .unchanged: nextCommandHint = self.commandHint
+        case let .set(value): nextCommandHint = value
+        }
         return Self(
             text: text ?? self.text,
             selection: selection ?? self.selection,
@@ -954,6 +989,7 @@ private extension MarkdownEditorSpec {
             readOnly: readOnly ?? self.readOnly,
             dirty: dirty ?? self.dirty,
             placeholder: placeholder ?? self.placeholder,
+            commandHint: nextCommandHint,
             title: nextTitle,
             actions: actions ?? self.actions,
             insertMenu: nextInsertMenu,

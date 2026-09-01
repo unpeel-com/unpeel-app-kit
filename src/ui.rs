@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{ListItem, Page, PageBodySlot};
 use crate::content::{ContentLine, ContentSelection};
+use crate::markdown::MarkdownCommandHint;
 use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
 use crate::semantic_menu::SemanticMenu;
 use crate::surface::{CanvasPage, SurfaceReference, SurfaceSpec};
@@ -48,6 +49,8 @@ pub const UI_TOKEN_ENV: &str = "UNPEEL_UI_TOKEN";
 pub const UI_DELTA_CAPABILITY: &str = "serverDelta";
 /// Renderer capability for the v1 Markdown editor component.
 pub const UI_MARKDOWN_EDITOR_CAPABILITY: &str = "markdownEditor";
+/// Renderer capability for the App-owned Markdown empty-line command hint.
+pub const UI_MARKDOWN_COMMAND_HINT_CAPABILITY: &str = "markdownCommandHint";
 /// Largest individual JSON payload accepted by the protocol.
 pub const MAX_UI_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Largest integer represented exactly by Swift and JavaScript renderers.
@@ -499,6 +502,11 @@ impl TextSelection {
     pub fn range(self) -> TextRange {
         TextRange::ordered(self.anchor, self.head)
     }
+
+    #[must_use]
+    pub const fn is_caret(self) -> bool {
+        self.anchor.line == self.head.line && self.anchor.utf16_column == self.head.utf16_column
+    }
 }
 
 /// One renderer-originated replacement against a Markdown document.
@@ -665,6 +673,9 @@ pub struct MarkdownEditorSpec {
     pub dirty: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub placeholder: String,
+    /// App-owned ghost text with one closed visibility rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_hint: Option<MarkdownCommandHint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default)]
@@ -687,6 +698,7 @@ impl MarkdownEditorSpec {
             read_only: false,
             dirty: false,
             placeholder: String::new(),
+            command_hint: None,
             title: None,
             actions: MarkdownEditorActions::editable(),
             insert_menu: None,
@@ -730,6 +742,12 @@ impl MarkdownEditorSpec {
     }
 
     #[must_use]
+    pub fn command_hint(mut self, command_hint: MarkdownCommandHint) -> Self {
+        self.command_hint = Some(command_hint);
+        self
+    }
+
+    #[must_use]
     pub fn insert_menu(mut self, menu: SemanticMenu) -> Self {
         self.insert_menu = Some(menu);
         self
@@ -741,6 +759,38 @@ impl MarkdownEditorSpec {
         self
     }
 
+    /// Resolves command-hint visibility using only authoritative component
+    /// state and the closed rule carried by the hint.
+    #[must_use]
+    pub fn command_hint_visible(&self) -> bool {
+        self.presentation != MarkdownPresentation::Preview
+            && self.command_hint.as_ref().is_some_and(|hint| {
+                hint.is_visible(
+                    &self.text,
+                    self.selection.head.line as usize,
+                    self.selection.is_caret(),
+                    self.insert_menu.is_some(),
+                    &self.placeholder,
+                )
+            })
+    }
+
+    /// Maps the closed Markdown text triggers to the App-owned Menu action.
+    /// Eligibility is deliberately not decided here by a renderer; the Rust
+    /// App reducer receives the intent and decides whether to open a Menu or
+    /// insert the literal character at its authoritative selection.
+    #[must_use]
+    pub fn menu_trigger_for_text_input(&self, input: &str) -> Option<MarkdownMenuTrigger> {
+        if self.read_only || self.insert_menu.is_some() || self.actions.open_menu.is_none() {
+            return None;
+        }
+        match input {
+            "/" => Some(MarkdownMenuTrigger::Slash),
+            "\\" => Some(MarkdownMenuTrigger::Palette),
+            _ => None,
+        }
+    }
+
     fn validate(&self, path: &str) -> Result<(), UiValidationError> {
         validate_position(&self.text, self.selection.anchor).map_err(|message| {
             UiValidationError::new(format!("{path}.selection.anchor"), message)
@@ -748,6 +798,15 @@ impl MarkdownEditorSpec {
         validate_position(&self.text, self.selection.head)
             .map_err(|message| UiValidationError::new(format!("{path}.selection.head"), message))?;
         validate_action_set(&self.actions, self.read_only, path)?;
+        if let Some(hint) = &self.command_hint {
+            validate_markdown_command_hint(hint, &format!("{path}.commandHint"))?;
+            if self.actions.open_menu.is_none() {
+                return Err(UiValidationError::new(
+                    format!("{path}.commandHint"),
+                    "requires actions.openMenu",
+                ));
+            }
+        }
         for (slot, menu) in [
             ("insertMenu", self.insert_menu.as_ref()),
             ("contextMenu", self.context_menu.as_ref()),
@@ -814,6 +873,9 @@ impl UiComponent {
             Self::CanvasPage(page) => page.required_capabilities(),
             Self::MarkdownEditor(editor) => {
                 let mut capabilities = vec![UI_MARKDOWN_EDITOR_CAPABILITY];
+                if editor.command_hint.is_some() {
+                    capabilities.push(UI_MARKDOWN_COMMAND_HINT_CAPABILITY);
+                }
                 if editor.insert_menu.is_some() || editor.context_menu.is_some() {
                     capabilities.extend([
                         crate::MENU_COMPONENT_CAPABILITY,
@@ -993,6 +1055,12 @@ pub fn markdown_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDelt
         operations.push(UiDeltaOperation::MarkdownSetPlaceholder {
             node_id: next.id.clone(),
             placeholder: next_editor.placeholder.clone(),
+        });
+    }
+    if previous_editor.command_hint != next_editor.command_hint {
+        operations.push(UiDeltaOperation::MarkdownSetCommandHint {
+            node_id: next.id.clone(),
+            command_hint: next_editor.command_hint.clone(),
         });
     }
     if previous_editor.actions != next_editor.actions {
@@ -1320,6 +1388,10 @@ pub enum UiDeltaOperation {
     MarkdownSetPlaceholder {
         node_id: NodeId,
         placeholder: String,
+    },
+    MarkdownSetCommandHint {
+        node_id: NodeId,
+        command_hint: Option<MarkdownCommandHint>,
     },
     MarkdownSetActions {
         node_id: NodeId,
@@ -1721,6 +1793,18 @@ impl UiDeltaOperation {
                 validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
                     .map_err(UiProtocolError::InvalidView)
             }
+            Self::MarkdownSetCommandHint {
+                node_id,
+                command_hint,
+            } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if let Some(hint) = command_hint {
+                    validate_markdown_command_hint(hint, &format!("{path}.commandHint"))
+                        .map_err(UiProtocolError::InvalidView)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1763,6 +1847,12 @@ impl UiNode {
                     placeholder,
                 } => {
                     self.markdown_editor_mut(node_id, index)?.placeholder = placeholder.clone();
+                }
+                UiDeltaOperation::MarkdownSetCommandHint {
+                    node_id,
+                    command_hint,
+                } => {
+                    self.markdown_editor_mut(node_id, index)?.command_hint = command_hint.clone();
                 }
                 UiDeltaOperation::MarkdownSetActions { node_id, actions } => {
                     self.markdown_editor_mut(node_id, index)?.actions = actions.clone();
@@ -3037,6 +3127,21 @@ fn validate_action_set(
     Ok(())
 }
 
+fn validate_markdown_command_hint(
+    hint: &MarkdownCommandHint,
+    path: &str,
+) -> Result<(), UiValidationError> {
+    crate::components::validate_text(&hint.text, 4 * 1024, &format!("{path}.text"))
+        .map_err(|error| UiValidationError::new(error.path, error.message))?;
+    if hint.text.is_empty() || hint.text.contains('\n') {
+        return Err(UiValidationError::new(
+            format!("{path}.text"),
+            "must be a non-empty single line",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_position(text: &str, position: TextPosition) -> Result<(), String> {
     let Some(line) = text.split('\n').nth(position.line as usize) else {
         return Err(format!("line {} is outside the document", position.line));
@@ -3246,6 +3351,21 @@ mod tests {
         let mut applied = previous;
         applied.apply_delta_operations(&operations).unwrap();
         assert_eq!(applied, next);
+    }
+
+    #[test]
+    fn markdown_command_hint_visibility_includes_source_presentation() {
+        let editor = MarkdownEditorSpec::new(
+            "title\n\nbody",
+            TextSelection::caret(TextPosition::new(1, 0)),
+        )
+        .command_hint(MarkdownCommandHint::new("Type '/' for commands"));
+        assert!(editor.command_hint_visible());
+        assert!(
+            !editor
+                .presentation(MarkdownPresentation::Preview)
+                .command_hint_visible()
+        );
     }
 
     #[test]

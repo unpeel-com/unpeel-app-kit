@@ -7,6 +7,7 @@ public enum UnpeelUIProtocol {
     public static let version = maximumVersion
     public static let deltaCapability = "serverDelta"
     public static let markdownEditorCapability = "markdownEditor"
+    public static let markdownCommandHintCapability = "markdownCommandHint"
     public static let menuCapability = "menu"
     public static let menuAnchorCapability = "menuAnchor"
     public static let mediaCapability = "media"
@@ -37,6 +38,7 @@ public enum UnpeelUIProtocol {
     /// route to unpeel-surface's local-GPU presenter.
     public static let supportedComponentCapabilities = [
         markdownEditorCapability,
+        markdownCommandHintCapability,
         menuCapability,
         menuAnchorCapability,
         mediaCapability,
@@ -485,6 +487,34 @@ public struct UIMenuSpec: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+public enum MarkdownCommandHintVisibility: String, Codable, Equatable, Sendable {
+    case cursorOnEmptyLineOutsideCodeFence
+}
+
+public struct MarkdownCommandHint: Codable, Equatable, Sendable {
+    public let text: String
+    public let visibility: MarkdownCommandHintVisibility
+
+    public init(
+        text: String,
+        visibility: MarkdownCommandHintVisibility = .cursorOnEmptyLineOutsideCodeFence
+    ) {
+        self.text = text
+        self.visibility = visibility
+    }
+
+    var isValid: Bool {
+        !text.isEmpty
+            && text.utf8.count <= 4_096
+            && !text.contains(where: { $0 == "\0" || $0 == "\r" || $0 == "\n" })
+    }
+}
+
+public enum MarkdownMenuTrigger: String, Codable, Equatable, Sendable {
+    case slash
+    case palette
+}
+
 public struct MarkdownEditorActions: Codable, Equatable, Sendable {
     public let replaceRange: String?
     public let setSelection: String?
@@ -520,6 +550,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
     public let readOnly: Bool
     public let dirty: Bool
     public let placeholder: String
+    public let commandHint: MarkdownCommandHint?
     public let title: String?
     public let actions: MarkdownEditorActions
     public let insertMenu: UIMenuSpec?
@@ -532,6 +563,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         readOnly: Bool = false,
         dirty: Bool = false,
         placeholder: String = "",
+        commandHint: MarkdownCommandHint? = nil,
         title: String? = nil,
         actions: MarkdownEditorActions = .init(),
         insertMenu: UIMenuSpec? = nil,
@@ -543,6 +575,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         self.readOnly = readOnly
         self.dirty = dirty
         self.placeholder = placeholder
+        self.commandHint = commandHint
         self.title = title
         self.actions = actions
         self.insertMenu = insertMenu
@@ -556,6 +589,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         case readOnly
         case dirty
         case placeholder
+        case commandHint
         case title
         case actions
         case insertMenu
@@ -573,6 +607,10 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
         dirty = try container.decodeIfPresent(Bool.self, forKey: .dirty) ?? false
         placeholder = try container.decodeIfPresent(String.self, forKey: .placeholder) ?? ""
+        commandHint = try container.decodeIfPresent(
+            MarkdownCommandHint.self,
+            forKey: .commandHint
+        )
         title = try container.decodeIfPresent(String.self, forKey: .title)
         actions = try container.decodeIfPresent(
             MarkdownEditorActions.self,
@@ -580,6 +618,41 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         ) ?? .init()
         insertMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .insertMenu)
         contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
+    }
+
+    /// Pure interpretation of the closed Rust visibility rule.
+    public var commandHintVisible: Bool {
+        guard let commandHint, commandHint.isValid,
+              presentation != .preview,
+              selection.anchor == selection.head,
+              insertMenu == nil,
+              !(text.isEmpty && !placeholder.isEmpty)
+        else { return false }
+        let lines = text.components(separatedBy: "\n")
+        let line = selection.head.line
+        guard lines.indices.contains(line), lines[line].isEmpty else { return false }
+        switch commandHint.visibility {
+        case .cursorOnEmptyLineOutsideCodeFence:
+            var insideFence = false
+            for index in 0...line {
+                if lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                    if index == line { return false }
+                    insideFence.toggle()
+                }
+            }
+            return !insideFence
+        }
+    }
+
+    /// Closed text-input triggers for the App-owned Menu action. The App
+    /// reducer, not this renderer, decides whether the current line is eligible.
+    public func menuTrigger(forTextInput input: String) -> MarkdownMenuTrigger? {
+        guard !readOnly, insertMenu == nil, actions.openMenu != nil else { return nil }
+        switch input {
+        case "/": return .slash
+        case "\\": return .palette
+        default: return nil
+        }
     }
 }
 
@@ -2347,9 +2420,14 @@ public enum UIComponent: Equatable, Sendable {
             return page.requiredCapabilities
         case let .markdownEditor(editor):
             guard editor.insertMenu?.requiredCapabilities != nil || editor.insertMenu == nil,
-                  editor.contextMenu?.requiredCapabilities != nil || editor.contextMenu == nil
+                  editor.contextMenu?.requiredCapabilities != nil || editor.contextMenu == nil,
+                  editor.commandHint?.isValid ?? true,
+                  editor.commandHint == nil || editor.actions.openMenu != nil
             else { return nil }
             var capabilities = [UnpeelUIProtocol.markdownEditorCapability]
+            if editor.commandHint != nil {
+                capabilities.append(UnpeelUIProtocol.markdownCommandHintCapability)
+            }
             if editor.insertMenu != nil || editor.contextMenu != nil {
                 capabilities += [
                     UnpeelUIProtocol.menuCapability,

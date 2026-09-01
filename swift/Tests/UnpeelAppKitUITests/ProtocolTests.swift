@@ -53,7 +53,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 31)
+    #expect(messages.count == 34)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -316,6 +316,26 @@ func sharedProtocolFixturesDecode() throws {
     ])
     #expect(updatedContent.lines[2].id == "line-2-next")
     #expect(updatedContent.selection?.headID == "line-2-next")
+
+    guard case let .snapshot(hintSnapshot) = messages[31],
+          case let .markdownEditor(hintEditor) = hintSnapshot.root.component,
+          case let .event(openSlash) = messages[32],
+          case let .delta(hintDelta) = messages[33],
+          case let .markdownEditor(updatedHintEditor) = try hintSnapshot
+            .applying(hintDelta).root.component
+    else {
+        Issue.record("final fixtures must carry one spec-owned Markdown hint vector")
+        return
+    }
+    #expect(hintEditor.commandHintVisible)
+    #expect(hintEditor.menuTrigger(forTextInput: "/") == .slash)
+    #expect(hintSnapshot.root.component.requiredCapabilities == [
+        "markdownEditor", "markdownCommandHint",
+    ])
+    #expect(openSlash.action.action == "open-menu")
+    #expect(openSlash.action.value == .text("slash"))
+    #expect(updatedHintEditor.commandHint?.text == "Type '/' for blocks")
+    #expect(!updatedHintEditor.commandHintVisible)
 }
 
 @Test

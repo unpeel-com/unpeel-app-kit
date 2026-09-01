@@ -23,6 +23,7 @@ mod host;
 mod input;
 mod keyboard;
 mod list_navigation;
+mod markdown;
 #[cfg(feature = "markdown-text-area")]
 mod markdown_interaction;
 #[cfg(feature = "markdown-text-area")]
@@ -91,6 +92,7 @@ pub use list_navigation::{
     ListKeymap, ListNavigationAction, ListNavigationOutcome, ListPageBehavior, ListState,
     RowBoundaryBehavior, RowKeyDecision, RowNavigationState, RowPrimaryRole,
 };
+pub use markdown::{MarkdownCommandHint, MarkdownCommandHintVisibility};
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_interaction::{
     MARKDOWN_INSERT_ITEMS, MarkdownBlockKind, MarkdownEditorInteraction, MarkdownInsertItem,
@@ -141,13 +143,14 @@ pub use ui::{
     ActionId, AppInstanceId, AppMetadata, ClientId, EventId, MAX_SAFE_UI_INTEGER,
     MAX_UI_FRAME_BYTES, MarkdownEditorActions, MarkdownEditorSpec, MarkdownMenuTrigger,
     MarkdownPresentation, NodeId, ParticipantId, RendererId, TextEdit, TextPosition, TextRange,
-    TextSelection, UI_DELTA_CAPABILITY, UI_MARKDOWN_EDITOR_CAPABILITY, UI_PROTOCOL_MAX_VERSION,
-    UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UI_PROTOCOL_VERSION, UI_SOCKET_ENV, UI_TOKEN_ENV,
-    UiAck, UiAckStatus, UiAction, UiAttach, UiAttached, UiComponent, UiDelta, UiDeltaOperation,
-    UiErrorMessage, UiEvent, UiEventKind, UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode,
-    UiParticipant, UiParticipantKind, UiPresence, UiPresenceMember, UiProtocolError,
-    UiRendererMetadata, UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId,
-    decode_ui_frame, encode_ui_frame, markdown_delta_operations, negotiate_ui_protocol_version,
+    TextSelection, UI_DELTA_CAPABILITY, UI_MARKDOWN_COMMAND_HINT_CAPABILITY,
+    UI_MARKDOWN_EDITOR_CAPABILITY, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION,
+    UI_PROTOCOL_NAME, UI_PROTOCOL_VERSION, UI_SOCKET_ENV, UI_TOKEN_ENV, UiAck, UiAckStatus,
+    UiAction, UiAttach, UiAttached, UiComponent, UiDelta, UiDeltaOperation, UiErrorMessage,
+    UiEvent, UiEventKind, UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode, UiParticipant,
+    UiParticipantKind, UiPresence, UiPresenceMember, UiProtocolError, UiRendererMetadata,
+    UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId, decode_ui_frame,
+    encode_ui_frame, markdown_delta_operations, negotiate_ui_protocol_version,
     page_delta_operations, read_ui_message, tree_delta_operations, write_ui_message,
 };
 #[cfg(feature = "ui-bridge")]

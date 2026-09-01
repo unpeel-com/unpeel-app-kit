@@ -4,6 +4,7 @@ export const UI_PROTOCOL_MAX_VERSION = 1 as const;
 export const UI_PROTOCOL_VERSION = UI_PROTOCOL_MAX_VERSION;
 export const UI_DELTA_CAPABILITY = "serverDelta" as const;
 export const UI_MARKDOWN_EDITOR_CAPABILITY = "markdownEditor" as const;
+export const UI_MARKDOWN_COMMAND_HINT_CAPABILITY = "markdownCommandHint" as const;
 export const UI_MENU_CAPABILITY = "menu" as const;
 export const UI_MENU_ANCHOR_CAPABILITY = "menuAnchor" as const;
 export const UI_MEDIA_CAPABILITY = "media" as const;
@@ -32,6 +33,7 @@ export const UI_TREE_PARENT_CAPABILITY = "treeParent" as const;
 /** Built-in renderers that need no Host-injected presenter adapter. */
 export const UI_COMPONENT_CAPABILITIES = [
   UI_MARKDOWN_EDITOR_CAPABILITY,
+  UI_MARKDOWN_COMMAND_HINT_CAPABILITY,
   UI_MENU_CAPABILITY,
   UI_MENU_ANCHOR_CAPABILITY,
   UI_MEDIA_CAPABILITY,
@@ -175,6 +177,15 @@ export interface MarkdownEditorActions {
   openMenu?: string;
 }
 
+export type MarkdownCommandHintVisibility = "cursorOnEmptyLineOutsideCodeFence";
+
+export interface MarkdownCommandHint {
+  text: string;
+  visibility: MarkdownCommandHintVisibility;
+}
+
+export type MarkdownMenuTrigger = "slash" | "palette";
+
 export interface MarkdownEditorNode {
   id: string;
   type: "markdownEditor";
@@ -184,6 +195,7 @@ export interface MarkdownEditorNode {
   readOnly?: boolean;
   dirty?: boolean;
   placeholder?: string;
+  commandHint?: MarkdownCommandHint;
   title?: string;
   actions?: MarkdownEditorActions;
   insertMenu?: MenuSpec;
@@ -517,6 +529,46 @@ export function isMarkdownEditorNode(node: UiNode): node is MarkdownEditorNode {
   return node.type === "markdownEditor";
 }
 
+/** Pure interpretation of the closed Rust command-hint visibility rule. */
+export function isMarkdownCommandHintVisible(editor: MarkdownEditorNode): boolean {
+  const hint = editor.commandHint;
+  const presentation = editor.presentation ?? "source";
+  if (hint === undefined
+    || presentation === "preview"
+    || editor.selection.anchor.line !== editor.selection.head.line
+    || editor.selection.anchor.utf16Column !== editor.selection.head.utf16Column
+    || editor.insertMenu !== undefined
+    || (editor.text === "" && (editor.placeholder ?? "") !== "")) return false;
+  const lines = editor.text.split("\n");
+  const line = editor.selection.head.line;
+  if (lines[line] !== "") return false;
+  switch (hint.visibility) {
+    case "cursorOnEmptyLineOutsideCodeFence": {
+      let insideFence = false;
+      for (let index = 0; index <= line; index += 1) {
+        if (lines[index]!.trimStart().startsWith("```")) {
+          if (index === line) return false;
+          insideFence = !insideFence;
+        }
+      }
+      return !insideFence;
+    }
+  }
+}
+
+/** Closed text triggers for the App-owned Menu intent. */
+export function markdownMenuTriggerForTextInput(
+  editor: MarkdownEditorNode,
+  input: string,
+): MarkdownMenuTrigger | undefined {
+  if (editor.readOnly === true
+    || editor.insertMenu !== undefined
+    || editor.actions?.openMenu === undefined) return undefined;
+  if (input === "/") return "slash";
+  if (input === "\\") return "palette";
+  return undefined;
+}
+
 export function isMediaNode(node: UiNode): node is MediaNode {
   return node.type === "media";
 }
@@ -638,8 +690,14 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
   }
   if (isMarkdownEditorNode(node)) {
     if ((node.insertMenu !== undefined && !isValidMenu(node.insertMenu))
-      || (node.contextMenu !== undefined && !isValidMenu(node.contextMenu))) return undefined;
+      || (node.contextMenu !== undefined && !isValidMenu(node.contextMenu))
+      || (node.commandHint !== undefined
+        && (!isValidMarkdownCommandHint(node.commandHint)
+          || node.actions?.openMenu === undefined))) return undefined;
     const capabilities: string[] = [UI_MARKDOWN_EDITOR_CAPABILITY];
+    if (node.commandHint !== undefined) {
+      capabilities.push(UI_MARKDOWN_COMMAND_HINT_CAPABILITY);
+    }
     if (node.insertMenu !== undefined || node.contextMenu !== undefined) {
       capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
     }
@@ -812,6 +870,7 @@ export type UiDeltaOperation =
   | { op: "markdownSetReadOnly"; nodeId: string; readOnly: boolean }
   | { op: "markdownSetTitle"; nodeId: string; title: string | null }
   | { op: "markdownSetPlaceholder"; nodeId: string; placeholder: string }
+  | { op: "markdownSetCommandHint"; nodeId: string; commandHint: MarkdownCommandHint | null }
   | { op: "markdownSetActions"; nodeId: string; actions: MarkdownEditorActions }
   | {
     op: "markdownSetMenus";
@@ -1416,6 +1475,12 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     }
     case "markdownSetPlaceholder":
       return { ...root, placeholder: operation.placeholder };
+    case "markdownSetCommandHint": {
+      const { commandHint: _oldHint, ...withoutHint } = root;
+      return operation.commandHint === null
+        ? withoutHint
+        : { ...withoutHint, commandHint: operation.commandHint };
+    }
     case "markdownSetActions":
       return { ...root, actions: operation.actions };
     case "markdownSetMenus":
@@ -1629,6 +1694,13 @@ function validateNode(value: unknown, path: string): void {
     if (root[field] !== undefined) requireString(root[field], `${path}.${field}`, true);
   }
   if (root.actions !== undefined) validateMarkdownActions(root.actions, `${path}.actions`);
+  if (root.commandHint !== undefined) {
+    validateMarkdownCommandHint(root.commandHint, `${path}.commandHint`);
+    const actions = root.actions === undefined ? undefined : record(root.actions, `${path}.actions`);
+    if (actions?.openMenu === undefined) {
+      throw new Error(`${path}.commandHint requires actions.openMenu`);
+    }
+  }
   if (root.insertMenu !== undefined) validateMenuSpec(root.insertMenu, `${path}.insertMenu`);
   if (root.contextMenu !== undefined) validateMenuSpec(root.contextMenu, `${path}.contextMenu`);
 }
@@ -2205,6 +2277,28 @@ function validateMarkdownActions(value: unknown, path: string): void {
   }
 }
 
+function validateMarkdownCommandHint(value: unknown, path: string): void {
+  const hint = record(value, path);
+  requireString(hint.text, `${path}.text`);
+  const text = hint.text as string;
+  if (new TextEncoder().encode(text).length > 4_096
+    || text.includes("\0") || text.includes("\r") || text.includes("\n")) {
+    throw new Error(`${path}.text must be a non-empty single line of at most 4096 bytes`);
+  }
+  if (hint.visibility !== "cursorOnEmptyLineOutsideCodeFence") {
+    throw new Error(`${path}.visibility is unsupported`);
+  }
+}
+
+function isValidMarkdownCommandHint(hint: MarkdownCommandHint): boolean {
+  try {
+    validateMarkdownCommandHint(hint, "commandHint");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validateDeltaOperation(value: unknown, path: string): void {
   const operation = record(value, path);
   switch (operation.op) {
@@ -2254,6 +2348,12 @@ function validateDeltaOperation(value: unknown, path: string): void {
     case "markdownSetPlaceholder":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       requireString(operation.placeholder, `${path}.placeholder`, true);
+      return;
+    case "markdownSetCommandHint":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (operation.commandHint !== null) {
+        validateMarkdownCommandHint(operation.commandHint, `${path}.commandHint`);
+      }
       return;
     case "markdownSetActions":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);

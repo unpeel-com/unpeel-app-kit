@@ -264,10 +264,27 @@
         "readOnly": { "type": "boolean", "default": false },
         "dirty": { "type": "boolean", "default": false },
         "placeholder": { "type": "string", "default": "" },
+        "commandHint": { "$ref": "#/$defs/markdownCommandHint" },
         "title": { "type": "string" },
         "actions": { "$ref": "#/$defs/markdownActions" },
         "insertMenu": { "$ref": "#/$defs/semanticMenu" },
         "contextMenu": { "$ref": "#/$defs/semanticMenu" }
+      }
+    },
+    "markdownCommandHint": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["text", "visibility"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[^\\u0000\\r\\n]+$"
+        },
+        "visibility": {
+          "const": "cursorOnEmptyLineOutsideCodeFence"
+        }
       }
     },
     "mediaSource": {
@@ -970,6 +987,21 @@
             "op": { "const": "markdownSetPlaceholder" },
             "nodeId": { "$ref": "#/$defs/identifier" },
             "placeholder": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "commandHint"],
+          "properties": {
+            "op": { "const": "markdownSetCommandHint" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "commandHint": {
+              "oneOf": [
+                { "$ref": "#/$defs/markdownCommandHint" },
+                { "type": "null" }
+              ]
+            }
           }
         },
         {

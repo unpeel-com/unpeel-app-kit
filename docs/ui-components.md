@@ -738,12 +738,13 @@ Markdown changes both nested menu descriptors with `markdownSetMenus`, so
 snapshots remain small and menu state follows the App revision.
 
 Markdown declares an optional `openMenu` action with a closed `slash` or
-`palette` value. Native and web intercept `/` or `\` only on a blank,
-unselected, unfenced line and request that action; the Rust reducer rechecks
-authoritative state, inserts the slash only for the slash flow, and publishes
-the Menu. No renderer owns routing or smuggles a palette trigger through a
-text edit. Context actions likewise return the declared item id/action to the
-same reducer.
+`palette` value. Native and web translate `/` or `\` into that declared intent
+whenever the action is available; they do not decide blank-line or code-fence
+eligibility. The Rust App reducer alone checks the authoritative document,
+inserts a literal character when the trigger is ineligible, or publishes the
+semantic Menu when it is eligible. No renderer owns routing, menu vocabulary,
+filtering, replacements, or eligibility rules. Context actions likewise
+return the declared item id/action to the same reducer.
 
 `menu` and `menuAnchor` are explicit capabilities. If either is absent, a
 renderer keeps the attachment and uses the complete terminal pane rather than
@@ -790,7 +791,20 @@ in Rust, Swift, and web.
 The first component reuses `tui-textarea-2` rather than introducing another
 text engine. Its complete snapshot contains the Markdown document, selection,
 presentation (`source`, `preview`, or `split`), dirty/read-only state, title,
-placeholder, and declared actions.
+document placeholder, optional command hint, and declared actions.
+
+`placeholder` is whole-document empty-state text. `commandHint` is a separate
+closed value containing text plus the
+`cursorOnEmptyLineOutsideCodeFence` visibility rule. The rule resolves from
+the same snapshot in every renderer: show the hint only while the source pane
+is visible, beside a collapsed caret on an exactly empty logical line, outside
+fenced code, while no insert Menu is open. A non-empty document placeholder
+wins for a completely empty document. The terminal paints faint ghost text at
+its cursor, AppKit draws the
+same text through the `NSTextView` layout manager, and web positions the same
+text with a hidden textarea mirror. `markdownCommandHint` is an explicit
+capability, and `markdownSetCommandHint` updates it without replacing the
+document snapshot.
 
 Renderer-to-App actions are:
 
@@ -815,6 +829,9 @@ revision; a renderer never floods several range edits carrying the same stale
 base revision. The native editor also preserves its local caret/selection
 across unrelated presence, ack, and projection redraws; it reapplies an App
 selection only on initial attach or a genuine external document replacement.
+Neither renderer contains a fallback slash-command list or a local visibility
+rule for command discovery. Both emit the spec-declared menu intent; the Rust
+reducer returns the resulting document and `SemanticMenu` state.
 
 `MarkdownEditorInteraction` is the standalone terminal interaction layer. It
 adds drag selection, double-click word selection, triple-click line selection,
@@ -881,7 +898,8 @@ The active navigation and editing surface graph is now fully projected:
   selection, open actions, location, and new-note primary action;
 - new-note naming is a Page with Input and an App-owned back action;
 - editing is MarkdownEditor with text, oriented selection, dirty/title,
-  presentation, save/undo/redo, and compact deltas; and
+  presentation, document placeholder, command hint, save/undo/redo, and
+  compact deltas; and
 - slash, backslash command palette, and selection context menus are
   SemanticMenu descriptors handled by the same reducer in every renderer.
 
@@ -893,6 +911,12 @@ the same text reducer; and trusted-local drops become semantic text edits
 (browser sandboxing intentionally exposes filenames when it withholds paths).
 The slash and context menus are closed SemanticMenu values, not renderer-owned
 commands.
+
+The editor-affordance sweep found no second terminal-only hint, status label,
+or ghost placeholder: document-empty guidance is `placeholder`, current-line
+command discovery is `commandHint`, and save/cursor/transient status is the
+App-owned `title`. Shared NDJSON snapshot/event/delta vectors assert the same
+hint visibility and slash intent in Rust, Swift, and web.
 
 Caret/drop-hover visuals, local drag maps, and syntax colors remain
 platform-specific presentation rather than alternate App state surfaces.

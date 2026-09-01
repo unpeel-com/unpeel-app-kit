@@ -3,9 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   decodeUiMessage,
   diffText,
+  isMarkdownCommandHintVisible,
+  markdownMenuTriggerForTextInput,
   markdownTaskToggleAtOffset,
-  markdownBlockReplacement,
-  visibleMarkdownInsertItems,
   isMarkdownEditorNode,
   isCanvasPageNode,
   isMediaNode,
@@ -39,7 +39,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(31);
+    expect(messages).toHaveLength(34);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -266,6 +266,26 @@ describe("shared protocol", () => {
     const updatedSurface = applyUiDelta(surfaceSnapshot, surfaceDelta);
     if (!isSurfaceNode(updatedSurface.root)) throw new Error("expected Surface delta result");
     expect(updatedSurface.root.reference.streamId).toBe("planets-detail");
+
+    const hintSnapshot = messages[31] as UiSnapshot;
+    if (!isMarkdownEditorNode(hintSnapshot.root)) {
+      throw new Error("expected spec-owned Markdown command hint fixture");
+    }
+    expect(isMarkdownCommandHintVisible(hintSnapshot.root)).toBe(true);
+    expect(markdownMenuTriggerForTextInput(hintSnapshot.root, "/")).toBe("slash");
+    expect(uiNodeCapabilities(hintSnapshot.root)).toEqual([
+      "markdownEditor",
+      "markdownCommandHint",
+    ]);
+    expect(messages[32]).toMatchObject({
+      type: "event",
+      action: "open-menu",
+      value: { type: "text", value: "slash" },
+    });
+    const updatedHint = applyUiDelta(hintSnapshot, messages[33] as UiDelta);
+    if (!isMarkdownEditorNode(updatedHint.root)) throw new Error("expected updated Markdown hint");
+    expect(updatedHint.root.commandHint?.text).toBe("Type '/' for blocks");
+    expect(isMarkdownCommandHintVisible(updatedHint.root)).toBe(false);
   });
 
   test("uses one role-aware Enter and Space decision table", () => {
@@ -825,16 +845,33 @@ describe("WorkspaceUiSession", () => {
 });
 
 describe("MarkdownEditor", () => {
-  test("uses the closed insert vocabulary across renderers", () => {
-    expect(visibleMarkdownInsertItems("todo").map((item) => item.kind)).toEqual(["todo"]);
-    expect(markdownBlockReplacement("heading2", "  ")).toEqual({
-      text: "  ## ",
-      caretOffset: 5,
-    });
-    expect(markdownBlockReplacement("codeBlock", "")).toEqual({
-      text: "```\n\n```",
-      caretOffset: 4,
-    });
+  test("takes command hints and slash intents from the spec", () => {
+    const editor = {
+      id: "editor",
+      type: "markdownEditor" as const,
+      text: "title\n\nbody",
+      selection: {
+        anchor: { line: 1, utf16Column: 0 },
+        head: { line: 1, utf16Column: 0 },
+      },
+      commandHint: {
+        text: "Type '/' for commands",
+        visibility: "cursorOnEmptyLineOutsideCodeFence" as const,
+      },
+      actions: { openMenu: "open-menu" },
+    };
+    expect(isMarkdownCommandHintVisible(editor)).toBe(true);
+    expect(isMarkdownCommandHintVisible({ ...editor, presentation: "preview" })).toBe(false);
+    expect(markdownMenuTriggerForTextInput(editor, "/")).toBe("slash");
+    expect(markdownMenuTriggerForTextInput(editor, "\\")).toBe("palette");
+    expect(markdownMenuTriggerForTextInput({
+      ...editor,
+      text: "not blank",
+      selection: {
+        anchor: { line: 0, utf16Column: 9 },
+        head: { line: 0, utf16Column: 9 },
+      },
+    }, "/")).toBe("slash");
   });
 
   test("produces a Unicode-safe minimal range edit", () => {
