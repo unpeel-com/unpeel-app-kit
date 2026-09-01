@@ -6,6 +6,7 @@ import {
   isTreeNode,
   uiAction,
 } from "./protocol";
+import { renderSemanticMenu } from "./menu";
 
 interface VisibleItem {
   item: TreeItem;
@@ -162,6 +163,24 @@ export class TreeRenderer {
     }
     item.addEventListener("click", () => this.select(tree, row.item.id));
     item.addEventListener("dblclick", () => this.activate(tree, row.item));
+    if (tree.contextMenu !== undefined) {
+      item.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        this.select(tree, row.item.id);
+        const host = document.createElement("div");
+        host.className = "unpeel-context-menu";
+        host.style.position = "fixed";
+        host.style.left = `${event.clientX}px`;
+        host.style.top = `${event.clientY}px`;
+        host.style.zIndex = "50";
+        renderSemanticMenu(host, tree.contextMenu!, row.item.id, (action) => {
+          this.onAction({ ...action, value: { type: "text", value: row.item.id } });
+          host.remove();
+        });
+        document.body.append(host);
+        host.focus();
+      });
+    }
     return item;
   }
 

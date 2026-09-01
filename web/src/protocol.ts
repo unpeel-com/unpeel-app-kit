@@ -21,6 +21,8 @@ export const UI_TOGGLE_CAPABILITY = "toggle" as const;
 export const UI_INPUT_CAPABILITY = "input" as const;
 export const UI_BUTTON_CAPABILITY = "button" as const;
 export const UI_PAGE_BACK_CAPABILITY = "pageBack" as const;
+export const UI_CONTENT_CAPABILITY = "content" as const;
+export const UI_CONTENT_SELECTION_CAPABILITY = "contentSelection" as const;
 export const UI_SURFACE_CAPABILITY = "surface" as const;
 export const UI_CANVAS_PAGE_CAPABILITY = "canvasPage" as const;
 export const UI_TREE_CAPABILITY = "tree" as const;
@@ -47,6 +49,8 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_INPUT_CAPABILITY,
   UI_BUTTON_CAPABILITY,
   UI_PAGE_BACK_CAPABILITY,
+  UI_CONTENT_CAPABILITY,
+  UI_CONTENT_SELECTION_CAPABILITY,
   UI_TREE_CAPABILITY,
   UI_TREE_HIERARCHY_CAPABILITY,
   UI_TREE_FILTER_CAPABILITY,
@@ -384,6 +388,43 @@ export interface ListSpec {
   pageOverlap?: number;
   pageBehavior?: ListPageBehavior;
   spacePagesDown?: boolean;
+  contextMenu?: MenuSpec;
+}
+
+export type ContentFont = "body" | "monospace";
+export type ContentTone = "default" | "muted" | "accent" | "info" | "success" | "warning"
+  | "danger";
+export type ContentEmphasis = "regular" | "strong" | "italic";
+export type ContentLineTone = "default" | "muted" | "header" | "added" | "removed";
+
+export interface ContentRun {
+  text: string;
+  tone?: ContentTone;
+  emphasis?: ContentEmphasis;
+}
+
+export interface ContentLine {
+  id: string;
+  runs: ContentRun[];
+  tone?: ContentLineTone;
+}
+
+export interface ContentSelection {
+  anchorId: string;
+  headId: string;
+}
+
+export interface ContentSpec {
+  type: "content";
+  id: string;
+  label: string;
+  lines: ContentLine[];
+  wrap?: boolean;
+  font?: ContentFont;
+  emptyMessage?: string;
+  selection?: ContentSelection;
+  select?: string;
+  contextMenu?: MenuSpec;
 }
 
 export interface InputSpec {
@@ -402,7 +443,7 @@ export interface PageNode {
   title: string;
   back?: string;
   header?: InputSpec | UnsupportedComponentSlot;
-  body: ListSpec | UnsupportedComponentSlot;
+  body: ListSpec | ContentSpec | UnsupportedComponentSlot;
 }
 
 export type TreePresentation = "drillDown" | "outline";
@@ -453,6 +494,7 @@ export interface TreeNode {
   selectedId?: string;
   emptyMessage?: string;
   primaryAction?: TreePrimaryAction;
+  contextMenu?: MenuSpec;
   actions: TreeActions;
 }
 
@@ -543,8 +585,16 @@ export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
   return "static";
 }
 
-export function isListSpec(slot: ListSpec | UnsupportedComponentSlot): slot is ListSpec {
+export function isListSpec(
+  slot: ListSpec | ContentSpec | UnsupportedComponentSlot,
+): slot is ListSpec {
   return slot.type === "list" && Array.isArray(slot.items);
+}
+
+export function isContentSpec(
+  slot: ListSpec | ContentSpec | UnsupportedComponentSlot,
+): slot is ContentSpec {
+  return slot.type === "content" && Array.isArray(slot.lines);
 }
 
 export function isInputSpec(slot: InputSpec | UnsupportedComponentSlot): slot is InputSpec {
@@ -558,8 +608,19 @@ export function isRenderablePageNode(node: UiNode): node is PageNode & {
 } {
   if (!isPageNode(node) || !isListSpec(node.body)) return false;
   if (node.header !== undefined && !isInputSpec(node.header)) return false;
-  return node.body.items.every((item) => [item.leading, item.trailing, item.accessory]
-    .every((slot) => slot === undefined || isKnownListItemSlot(slot)));
+  return (node.body.contextMenu === undefined || isValidMenu(node.body.contextMenu))
+    && node.body.items.every((item) => [item.leading, item.trailing, item.accessory]
+      .every((slot) => slot === undefined || isKnownListItemSlot(slot)));
+}
+
+export function isRenderableContentPageNode(node: UiNode): node is PageNode & {
+  header?: InputSpec;
+  body: ContentSpec;
+} {
+  return isPageNode(node)
+    && isContentSpec(node.body)
+    && (node.header === undefined || isInputSpec(node.header))
+    && isValidContent(node.body);
 }
 
 /** Capability required for a known root, or undefined for an unknown kind. */
@@ -602,14 +663,27 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
       capabilities.push(UI_TREE_PARENT_CAPABILITY);
     }
     if (node.primaryAction !== undefined) capabilities.push(UI_BUTTON_CAPABILITY);
+    if (node.contextMenu !== undefined) {
+      capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
+    }
+    return capabilities;
+  }
+  if (!isRenderablePageNode(node) && !isRenderableContentPageNode(node)) return undefined;
+  const capabilities: string[] = [UI_PAGE_CAPABILITY];
+  if (isRenderableContentPageNode(node)) {
+    capabilities.push(UI_CONTENT_CAPABILITY);
+    if (node.header !== undefined) capabilities.push(UI_INPUT_CAPABILITY);
+    if (node.back !== undefined) capabilities.push(UI_PAGE_BACK_CAPABILITY);
+    if (node.body.selection !== undefined || node.body.select !== undefined) {
+      capabilities.push(UI_CONTENT_SELECTION_CAPABILITY);
+    }
+    if (node.body.contextMenu !== undefined) {
+      capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
+    }
     return capabilities;
   }
   if (!isRenderablePageNode(node)) return undefined;
-  const capabilities: string[] = [
-    UI_PAGE_CAPABILITY,
-    UI_LIST_CAPABILITY,
-    UI_LIST_ITEM_CAPABILITY,
-  ];
+  capabilities.push(UI_LIST_CAPABILITY, UI_LIST_ITEM_CAPABILITY);
   if (node.header !== undefined) capabilities.push(UI_INPUT_CAPABILITY);
   if (node.back !== undefined) capabilities.push(UI_PAGE_BACK_CAPABILITY);
   if (node.body.items.some((item) => item.detail !== undefined || item.value !== undefined)) {
@@ -648,7 +722,23 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
     || node.body.spacePagesDown === true) {
     capabilities.push(UI_LIST_SELECTION_CAPABILITY);
   }
+  if (node.body.contextMenu !== undefined) {
+    capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
+  }
   return capabilities;
+}
+
+function isValidContent(content: ContentSpec): boolean {
+  if (content.lines.length > 100_000) return false;
+  const ids = new Set<string>();
+  for (const line of content.lines) {
+    if (ids.has(line.id) || line.runs.some((run) => /[\n\r\0]/u.test(run.text))) return false;
+    ids.add(line.id);
+  }
+  if (content.selection !== undefined
+    && (!ids.has(content.selection.anchorId) || !ids.has(content.selection.headId)
+      || content.select === undefined)) return false;
+  return content.contextMenu === undefined || isValidMenu(content.contextMenu);
 }
 
 export function flattenTreeItems(items: readonly TreeItem[]): TreeItem[] {
@@ -693,7 +783,8 @@ function isValidTree(node: TreeNode): boolean {
   return visit(node.items, 0) && parents <= 1
     && (node.selectedId === undefined || ids.has(node.selectedId))
     && ((node.presentation ?? "drillDown") !== "outline"
-      || node.actions.setExpanded !== undefined);
+      || node.actions.setExpanded !== undefined)
+    && (node.contextMenu === undefined || isValidMenu(node.contextMenu));
 }
 
 /** Filesystem paths must be translated by the Host before entering a browser. */
@@ -742,6 +833,14 @@ export type UiDeltaOperation =
   | { op: "listInsertItem"; listId: string; index: number; item: ListItemSpec }
   | { op: "listSetSelection"; listId: string; selectedId: string | null }
   | { op: "listRemoveItem"; listId: string; itemId: string }
+  | { op: "contentSetSelection"; contentId: string; selection: ContentSelection | null }
+  | {
+    op: "contentSpliceLines";
+    contentId: string;
+    index: number;
+    deleteCount: number;
+    lines: ContentLine[];
+  }
   | { op: "treeSetSelection"; nodeId: string; selectedId: string | null }
   | { op: "treeSetFilter"; filterId: string; value: string }
   | { op: "treeSetLocation"; nodeId: string; location: string }
@@ -1097,7 +1196,7 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     throw new Error("Delta targets an unavailable Surface node");
   }
   if (operation.op === "toggleSetValue") {
-    const page = requireRenderablePage(root);
+    const page = requireListPage(root);
     let matched = false;
     const items = page.body.items.map((item) => {
       let itemMatched = false;
@@ -1119,7 +1218,7 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     return { ...page, body: { ...page.body, items } };
   }
   if (operation.op === "checkmarkSetValue") {
-    const page = requireRenderablePage(root);
+    const page = requireListPage(root);
     let matched = false;
     const items = page.body.items.map((item) => {
       const update = (slot: ListItemSlot | undefined): ListItemSlot | undefined => {
@@ -1147,7 +1246,7 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     return { ...page, header: { ...page.header, value: operation.value } };
   }
   if (operation.op === "listInsertItem") {
-    const page = requireRenderablePage(root);
+    const page = requireListPage(root);
     if (page.body.id !== operation.listId
       || operation.index < 0
       || operation.index > page.body.items.length) {
@@ -1158,7 +1257,7 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     return { ...page, body: { ...page.body, items } };
   }
   if (operation.op === "listRemoveItem") {
-    const page = requireRenderablePage(root);
+    const page = requireListPage(root);
     if (page.body.id !== operation.listId) {
       throw new Error("Delta targets an unavailable List");
     }
@@ -1169,7 +1268,7 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     return { ...page, body: { ...page.body, items } };
   }
   if (operation.op === "listSetSelection") {
-    const page = requireRenderablePage(root);
+    const page = requireListPage(root);
     if (page.body.id !== operation.listId
       || (operation.selectedId !== null
         && !page.body.items.some((item) => item.id === operation.selectedId))) {
@@ -1179,6 +1278,30 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       ...page,
       body: { ...page.body, selectedId: operation.selectedId ?? undefined },
     };
+  }
+  if (operation.op === "contentSetSelection") {
+    const page = requireContentPage(root);
+    if (page.body.id !== operation.contentId
+      || (operation.selection !== null
+        && (!page.body.lines.some((line) => line.id === operation.selection!.anchorId)
+          || !page.body.lines.some((line) => line.id === operation.selection!.headId)))) {
+      throw new Error("Delta targets an unavailable Content selection");
+    }
+    return {
+      ...page,
+      body: { ...page.body, selection: operation.selection ?? undefined },
+    };
+  }
+  if (operation.op === "contentSpliceLines") {
+    const page = requireContentPage(root);
+    if (page.body.id !== operation.contentId || operation.index < 0
+      || operation.deleteCount < 0 || operation.index > page.body.lines.length
+      || operation.deleteCount > page.body.lines.length - operation.index) {
+      throw new Error("Content splice is outside its collection");
+    }
+    const lines = page.body.lines.slice();
+    lines.splice(operation.index, operation.deleteCount, ...operation.lines);
+    return { ...page, body: { ...page.body, lines } };
   }
   if (operation.op === "menuSetSelection") {
     if (!isMenuNode(root) || root.id !== operation.nodeId) {
@@ -1338,9 +1461,27 @@ function updateTreeItem(
   return { items: next, found, invalid };
 }
 
-function requireRenderablePage(root: UiNode): PageNode & { header?: InputSpec; body: ListSpec } {
-  if (!isRenderablePageNode(root)) throw new Error("Delta targets an unavailable Page");
+function requireRenderablePage(root: UiNode): PageNode & {
+  header?: InputSpec;
+  body: ListSpec | ContentSpec;
+} {
+  if (!isRenderablePageNode(root) && !isRenderableContentPageNode(root)) {
+    throw new Error("Delta targets an unavailable Page");
+  }
   return root;
+}
+
+function requireListPage(root: UiNode): PageNode & { header?: InputSpec; body: ListSpec } {
+  const page = requireRenderablePage(root);
+  if (!isListSpec(page.body)) throw new Error("Delta targets an unavailable List Page");
+  return page as PageNode & { header?: InputSpec; body: ListSpec };
+}
+
+function requireContentPage(root: UiNode): PageNode & { header?: InputSpec; body: ContentSpec } {
+  if (!isPageNode(root) || !isContentSpec(root.body)) {
+    throw new Error("Delta targets an unavailable Content Page");
+  }
+  return root as PageNode & { header?: InputSpec; body: ContentSpec };
 }
 
 function utf16PositionOffset(text: string, position: TextPosition): number {
@@ -1634,6 +1775,9 @@ function validateTreeNode(root: Record<string, unknown>, path: string): void {
       throw new Error(`${path}.primaryAction.role is unsupported`);
     }
   }
+  if (root.contextMenu !== undefined) {
+    validateMenuSpec(root.contextMenu, `${path}.contextMenu`);
+  }
 }
 
 function validateCanvasPageNode(root: Record<string, unknown>, path: string): void {
@@ -1694,6 +1838,10 @@ function validatePageNode(root: Record<string, unknown>, path: string): void {
   }
   const body = record(root.body, `${path}.body`);
   requireIdentifier(body.type, `${path}.body.type`);
+  if (body.type === "content") {
+    validateContentSpec(body, `${path}.body`, register);
+    return;
+  }
   if (body.type !== "list") return;
   register(body.id, `${path}.body.id`);
   if (body.emptyMessage !== undefined) {
@@ -1715,6 +1863,9 @@ function validatePageNode(root: Record<string, unknown>, path: string): void {
   if (body.spacePagesDown !== undefined && typeof body.spacePagesDown !== "boolean") {
     throw new Error(`${path}.body.spacePagesDown must be a boolean`);
   }
+  if (body.contextMenu !== undefined) {
+    validateMenuSpec(body.contextMenu, `${path}.body.contextMenu`);
+  }
   if (!Array.isArray(body.items) || body.items.length > 100_000) {
     throw new Error(`${path}.body.items must contain at most 100000 rows`);
   }
@@ -1724,6 +1875,60 @@ function validatePageNode(root: Record<string, unknown>, path: string): void {
   if (body.selectedId !== undefined
     && !body.items.some((value) => record(value, `${path}.body.items`).id === body.selectedId)) {
     throw new Error(`${path}.body.selectedId must identify one of its items`);
+  }
+}
+
+function validateContentSpec(
+  body: Record<string, unknown>,
+  path: string,
+  register: (value: unknown, valuePath: string) => void,
+): void {
+  register(body.id, `${path}.id`);
+  requireString(body.label, `${path}.label`, true);
+  if (body.wrap !== undefined && typeof body.wrap !== "boolean") {
+    throw new Error(`${path}.wrap must be boolean`);
+  }
+  if (body.font !== undefined && !["body", "monospace"].includes(String(body.font))) {
+    throw new Error(`${path}.font is unsupported`);
+  }
+  if (body.emptyMessage !== undefined) requireString(body.emptyMessage, `${path}.emptyMessage`, true);
+  if (body.select !== undefined) requireIdentifier(body.select, `${path}.select`);
+  if (body.contextMenu !== undefined) validateMenuSpec(body.contextMenu, `${path}.contextMenu`);
+  if (!Array.isArray(body.lines) || body.lines.length > 100_000) {
+    throw new Error(`${path}.lines must contain at most 100000 lines`);
+  }
+  const lineIDs = new Set<string>();
+  for (const [index, value] of body.lines.entries()) {
+    const linePath = `${path}.lines[${index}]`;
+    const line = record(value, linePath);
+    requireIdentifier(line.id, `${linePath}.id`);
+    if (lineIDs.has(line.id as string)) throw new Error(`${linePath}.id must be unique`);
+    lineIDs.add(line.id as string);
+    if (line.tone !== undefined
+      && !["default", "muted", "header", "added", "removed"].includes(String(line.tone))) {
+      throw new Error(`${linePath}.tone is unsupported`);
+    }
+    if (!Array.isArray(line.runs)) throw new Error(`${linePath}.runs must be an array`);
+    for (const [runIndex, runValue] of line.runs.entries()) {
+      const runPath = `${linePath}.runs[${runIndex}]`;
+      const run = record(runValue, runPath);
+      requireString(run.text, `${runPath}.text`, true);
+      requireSingleLine(run.text, `${runPath}.text`);
+      if (run.tone !== undefined && ![
+        "default", "muted", "accent", "info", "success", "warning", "danger",
+      ].includes(String(run.tone))) throw new Error(`${runPath}.tone is unsupported`);
+      if (run.emphasis !== undefined
+        && !["regular", "strong", "italic"].includes(String(run.emphasis))) {
+        throw new Error(`${runPath}.emphasis is unsupported`);
+      }
+    }
+  }
+  if (body.selection !== undefined) {
+    const selection = record(body.selection, `${path}.selection`);
+    requireIdentifier(selection.anchorId, `${path}.selection.anchorId`);
+    requireIdentifier(selection.headId, `${path}.selection.headId`);
+    if (!lineIDs.has(selection.anchorId as string) || !lineIDs.has(selection.headId as string)
+      || body.select === undefined) throw new Error(`${path}.selection is invalid`);
   }
 }
 
@@ -2102,6 +2307,31 @@ function validateDeltaOperation(value: unknown, path: string): void {
         requireIdentifier(operation.selectedId, `${path}.selectedId`);
       }
       return;
+    case "contentSetSelection":
+      requireIdentifier(operation.contentId, `${path}.contentId`);
+      if (operation.selection !== null) {
+        const selection = record(operation.selection, `${path}.selection`);
+        requireIdentifier(selection.anchorId, `${path}.selection.anchorId`);
+        requireIdentifier(selection.headId, `${path}.selection.headId`);
+      }
+      return;
+    case "contentSpliceLines": {
+      requireIdentifier(operation.contentId, `${path}.contentId`);
+      requireSafeInteger(operation.index, `${path}.index`);
+      requireSafeInteger(operation.deleteCount, `${path}.deleteCount`);
+      const fixture = {
+        type: "content",
+        id: "validation-content",
+        label: "Content",
+        lines: operation.lines,
+      };
+      validateContentSpec(
+        fixture,
+        `${path}.lines`,
+        (value, valuePath) => requireIdentifier(value, valuePath),
+      );
+      return;
+    }
     case "treeSetSelection":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       if (operation.selectedId !== null) {

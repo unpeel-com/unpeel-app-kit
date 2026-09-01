@@ -122,6 +122,10 @@ private struct PageContent: View {
                     }
                 }
             }
+            if case let .content(content) = page.body {
+                ReadOnlyContentBody(content: content, onAction: onAction)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 
@@ -314,6 +318,25 @@ private struct PageContent: View {
                 }
             } else {
                 itemRowContent(item, list: list, value: nil)
+            }
+        }
+        .contextMenu {
+            if let menu = list.contextMenu {
+                ForEach(menu.items) { menuItem in
+                    Button(
+                        menuItem.label,
+                        role: menuItem.role == .danger ? .destructive : nil
+                    ) {
+                        select(item.id, in: list)
+                        onAction(UIAction(
+                            nodeID: menuItem.id,
+                            action: menuItem.action,
+                            kind: .activate,
+                            value: .text(item.id)
+                        ))
+                    }
+                    .disabled(menuItem.disabled)
+                }
             }
         }
     }

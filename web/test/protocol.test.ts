@@ -11,6 +11,7 @@ import {
   isMenuNode,
   isPageNode,
   isRenderablePageNode,
+  isRenderableContentPageNode,
   isSurfaceNode,
   isTreeNode,
   listItemPrimaryRole,
@@ -37,7 +38,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(29);
+    expect(messages).toHaveLength(31);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -234,6 +235,20 @@ describe("shared protocol", () => {
     if (!isMarkdownEditorNode(markdownWithoutInsert.root)) throw new Error("expected Markdown");
     expect(markdownWithoutInsert.root.insertMenu).toBeUndefined();
     expect(markdownWithoutInsert.root.contextMenu).toBeDefined();
+
+    const contentSnapshot = messages[29] as UiSnapshot;
+    if (!isRenderableContentPageNode(contentSnapshot.root)) {
+      throw new Error("expected read-only Content Page");
+    }
+    expect(contentSnapshot.root.body.lines).toHaveLength(3);
+    expect(contentSnapshot.root.body.selection?.anchorId).toBe("line-1");
+    expect(uiNodeCapabilities(contentSnapshot.root)).toEqual([
+      "page", "content", "pageBack", "contentSelection", "menu", "menuAnchor",
+    ]);
+    const updatedContent = applyUiDelta(contentSnapshot, messages[30] as UiDelta);
+    if (!isRenderableContentPageNode(updatedContent.root)) throw new Error("expected Content");
+    expect(updatedContent.root.body.lines[2]?.id).toBe("line-2-next");
+    expect(updatedContent.root.body.selection?.headId).toBe("line-2-next");
 
     const surfaceSnapshot = messages[16] as UiSnapshot;
     if (!isSurfaceNode(surfaceSnapshot.root)) throw new Error("expected planet Surface fixture");

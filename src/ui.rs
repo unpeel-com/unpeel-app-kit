@@ -16,7 +16,8 @@ use std::io::{self, BufRead, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
-use crate::components::{ListItem, Page};
+use crate::components::{ListItem, Page, PageBodySlot};
+use crate::content::{ContentLine, ContentSelection};
 use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
 use crate::semantic_menu::SemanticMenu;
 use crate::surface::{CanvasPage, SurfaceReference, SurfaceSpec};
@@ -1029,6 +1030,7 @@ pub fn tree_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
         || previous_tree.presentation != next_tree.presentation
         || previous_tree.empty_message != next_tree.empty_message
         || previous_tree.primary_action != next_tree.primary_action
+        || previous_tree.context_menu != next_tree.context_menu
         || previous_tree.actions != next_tree.actions
         || previous_tree.filter.as_ref().map(|filter| {
             (
@@ -1081,6 +1083,80 @@ pub fn tree_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
         });
     }
     operations
+}
+
+/// Builds compact operations for one stable Page projection.
+///
+/// List focus and Content line ranges remain independent. Content collection
+/// changes use one splice so large issue bodies and patches never require a
+/// snapshot-per-change fallback.
+#[must_use]
+pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOperation> {
+    let (UiComponent::Page(previous_page), UiComponent::Page(next_page)) =
+        (&previous.element, &next.element)
+    else {
+        return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+    };
+    if previous.id != next.id
+        || previous_page.title != next_page.title
+        || previous_page.back != next_page.back
+        || previous_page.header != next_page.header
+    {
+        return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+    }
+    match (&previous_page.body, &next_page.body) {
+        (PageBodySlot::List(previous_list), PageBodySlot::List(next_list)) => {
+            if previous_list.id != next_list.id
+                || previous_list.items != next_list.items
+                || previous_list.empty_message != next_list.empty_message
+                || previous_list.select != next_list.select
+                || previous_list.scroll_padding != next_list.scroll_padding
+                || previous_list.page_overlap != next_list.page_overlap
+                || previous_list.page_behavior != next_list.page_behavior
+                || previous_list.space_pages_down != next_list.space_pages_down
+                || previous_list.context_menu != next_list.context_menu
+            {
+                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+            }
+            if previous_list.selected_id != next_list.selected_id {
+                vec![UiDeltaOperation::ListSetSelection {
+                    list_id: next_list.id.clone(),
+                    selected_id: next_list.selected_id.clone(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        (PageBodySlot::Content(previous_content), PageBodySlot::Content(next_content)) => {
+            if previous_content.id != next_content.id
+                || previous_content.label != next_content.label
+                || previous_content.wrap != next_content.wrap
+                || previous_content.font != next_content.font
+                || previous_content.empty_message != next_content.empty_message
+                || previous_content.select != next_content.select
+                || previous_content.context_menu != next_content.context_menu
+            {
+                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+            }
+            let mut operations = Vec::new();
+            if previous_content.lines != next_content.lines {
+                operations.push(UiDeltaOperation::ContentSpliceLines {
+                    content_id: next_content.id.clone(),
+                    index: 0,
+                    delete_count: u64::try_from(previous_content.lines.len()).unwrap_or(u64::MAX),
+                    lines: next_content.lines.clone(),
+                });
+            }
+            if previous_content.selection != next_content.selection {
+                operations.push(UiDeltaOperation::ContentSetSelection {
+                    content_id: next_content.id.clone(),
+                    selection: next_content.selection.clone(),
+                });
+            }
+            operations
+        }
+        _ => vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }],
+    }
 }
 
 fn contiguous_text_edit(previous: &str, next: &str) -> TextEdit {
@@ -1276,6 +1352,17 @@ pub enum UiDeltaOperation {
         list_id: String,
         item_id: String,
     },
+    ContentSetSelection {
+        content_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection: Option<ContentSelection>,
+    },
+    ContentSpliceLines {
+        content_id: String,
+        index: u64,
+        delete_count: u64,
+        lines: Vec<ContentLine>,
+    },
     TreeSetSelection {
         node_id: NodeId,
         selected_id: Option<String>,
@@ -1396,6 +1483,17 @@ impl UiDeltaOperation {
     }
 
     #[must_use]
+    pub fn content_set_selection(
+        content_id: impl Into<String>,
+        selection: Option<ContentSelection>,
+    ) -> Self {
+        Self::ContentSetSelection {
+            content_id: content_id.into(),
+            selection,
+        }
+    }
+
+    #[must_use]
     pub fn tree_set_selection(node_id: impl Into<NodeId>, selected_id: Option<String>) -> Self {
         Self::TreeSetSelection {
             node_id: node_id.into(),
@@ -1491,6 +1589,41 @@ impl UiDeltaOperation {
                         .map_err(UiProtocolError::InvalidView)?;
                 }
                 Ok(())
+            }
+            Self::ContentSetSelection {
+                content_id,
+                selection,
+            } => {
+                validate_identifier(content_id, &format!("{path}.contentId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if let Some(selection) = selection {
+                    validate_identifier(
+                        &selection.anchor_id,
+                        &format!("{path}.selection.anchorId"),
+                    )
+                    .map_err(UiProtocolError::InvalidView)?;
+                    validate_identifier(&selection.head_id, &format!("{path}.selection.headId"))
+                        .map_err(UiProtocolError::InvalidView)?;
+                }
+                Ok(())
+            }
+            Self::ContentSpliceLines {
+                content_id,
+                index,
+                delete_count,
+                lines,
+            } => {
+                validate_identifier(content_id, &format!("{path}.contentId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if *index > MAX_SAFE_UI_INTEGER || *delete_count > MAX_SAFE_UI_INTEGER {
+                    return Err(UiProtocolError::InvalidMessage(format!(
+                        "{path} Content splice exceeds the cross-platform safe integer {MAX_SAFE_UI_INTEGER}"
+                    )));
+                }
+                let probe = crate::Content::new("content-probe", "Content", lines.clone());
+                probe.validate("contentSplice.lines").map_err(|error| {
+                    UiProtocolError::InvalidView(UiValidationError::new(error.path, error.message))
+                })
             }
             Self::TreeSetSelection {
                 node_id,
@@ -1681,6 +1814,36 @@ impl UiNode {
                 } => {
                     self.page_mut(index)?
                         .set_list_selection(list_id, selected_id.clone())
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::ContentSetSelection {
+                    content_id,
+                    selection,
+                } => {
+                    self.page_mut(index)?
+                        .set_content_selection(content_id, selection.clone())
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::ContentSpliceLines {
+                    content_id,
+                    index: line_index,
+                    delete_count,
+                    lines,
+                } => {
+                    let line_index = usize::try_from(*line_index).map_err(|_| {
+                        UiValidationError::new(
+                            format!("delta.operations[{index}].index"),
+                            "Content line index does not fit this renderer",
+                        )
+                    })?;
+                    let delete_count = usize::try_from(*delete_count).map_err(|_| {
+                        UiValidationError::new(
+                            format!("delta.operations[{index}].deleteCount"),
+                            "Content delete count does not fit this renderer",
+                        )
+                    })?;
+                    self.page_mut(index)?
+                        .splice_content_lines(content_id, line_index, delete_count, lines.clone())
                         .map_err(|error| component_delta_error(index, error))?;
                 }
                 UiDeltaOperation::TreeSetSelection {

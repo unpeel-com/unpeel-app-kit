@@ -21,6 +21,13 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
     case listSetSelection(listID: String, selectedID: String?)
     case listRemoveItem(listID: String, itemID: String)
+    case contentSetSelection(contentID: String, selection: UIContentSelection?)
+    case contentSpliceLines(
+        contentID: String,
+        index: Int,
+        deleteCount: Int,
+        lines: [UIContentLine]
+    )
     case treeSetSelection(nodeID: String, selectedID: String?)
     case treeSetFilter(filterID: String, value: String)
     case treeSetLocation(nodeID: String, location: String)
@@ -55,6 +62,7 @@ extension UIDeltaOperation: Codable {
         case reference
         case value
         case listID = "listId"
+        case contentID = "contentId"
         case index
         case item
         case itemID = "itemId"
@@ -64,6 +72,7 @@ extension UIDeltaOperation: Codable {
         case parentID = "parentId"
         case deleteCount
         case items
+        case lines
         case childState
         case expanded
     }
@@ -88,6 +97,8 @@ extension UIDeltaOperation: Codable {
         case listInsertItem
         case listSetSelection
         case listRemoveItem
+        case contentSetSelection
+        case contentSpliceLines
         case treeSetSelection
         case treeSetFilter
         case treeSetLocation
@@ -196,6 +207,21 @@ extension UIDeltaOperation: Codable {
             self = .listSetSelection(
                 listID: try container.decode(String.self, forKey: .listID),
                 selectedID: try container.decodeIfPresent(String.self, forKey: .selectedID)
+            )
+        case .contentSetSelection:
+            self = .contentSetSelection(
+                contentID: try container.decode(String.self, forKey: .contentID),
+                selection: try container.decodeIfPresent(
+                    UIContentSelection.self,
+                    forKey: .selection
+                )
+            )
+        case .contentSpliceLines:
+            self = .contentSpliceLines(
+                contentID: try container.decode(String.self, forKey: .contentID),
+                index: try container.decode(Int.self, forKey: .index),
+                deleteCount: try container.decode(Int.self, forKey: .deleteCount),
+                lines: try container.decode([UIContentLine].self, forKey: .lines)
             )
         case .treeSetSelection:
             self = .treeSetSelection(
@@ -327,6 +353,20 @@ extension UIDeltaOperation: Codable {
             } else {
                 try container.encodeNil(forKey: .selectedID)
             }
+        case let .contentSetSelection(contentID, selection):
+            try container.encode(Operation.contentSetSelection, forKey: .op)
+            try container.encode(contentID, forKey: .contentID)
+            if let selection {
+                try container.encode(selection, forKey: .selection)
+            } else {
+                try container.encodeNil(forKey: .selection)
+            }
+        case let .contentSpliceLines(contentID, index, deleteCount, lines):
+            try container.encode(Operation.contentSpliceLines, forKey: .op)
+            try container.encode(contentID, forKey: .contentID)
+            try container.encode(index, forKey: .index)
+            try container.encode(deleteCount, forKey: .deleteCount)
+            try container.encode(lines, forKey: .lines)
         case let .treeSetSelection(nodeID, selectedID):
             try container.encode(Operation.treeSetSelection, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
@@ -647,6 +687,35 @@ private extension UINode {
             }
             list.selectedID = selectedID
             page.body = .list(list)
+            return UINode(id: id, component: .page(page))
+        case let .contentSetSelection(contentID, selection):
+            var page = try page()
+            guard case var .content(content) = page.body,
+                  content.id == contentID
+            else {
+                throw UIDeltaApplicationError("Delta targets unavailable Content selection")
+            }
+            let ids = Set(content.lines.map(\.id))
+            guard selection.map({ ids.contains($0.anchorID) && ids.contains($0.headID) }) ?? true
+            else {
+                throw UIDeltaApplicationError("Delta selects an unavailable Content line")
+            }
+            content.selection = selection
+            page.body = .content(content)
+            return UINode(id: id, component: .page(page))
+        case let .contentSpliceLines(contentID, index, deleteCount, lines):
+            var page = try page()
+            guard case var .content(content) = page.body,
+                  content.id == contentID,
+                  index >= 0,
+                  deleteCount >= 0,
+                  index <= content.lines.count,
+                  deleteCount <= content.lines.count - index
+            else {
+                throw UIDeltaApplicationError("Content splice is outside its collection")
+            }
+            content.lines.replaceSubrange(index..<(index + deleteCount), with: lines)
+            page.body = .content(content)
             return UINode(id: id, component: .page(page))
         case let .treeSetSelection(nodeID, selectedID):
             var tree = try tree(nodeID: nodeID)

@@ -631,7 +631,66 @@
         "scrollPadding": { "type": "integer", "minimum": 0, "maximum": 65535 },
         "pageOverlap": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 1 },
         "pageBehavior": { "enum": ["selection", "scroll"], "default": "selection" },
-        "spacePagesDown": { "type": "boolean", "default": false }
+        "spacePagesDown": { "type": "boolean", "default": false },
+        "contextMenu": { "$ref": "#/$defs/semanticMenu" }
+      }
+    },
+    "contentTone": {
+      "enum": ["default", "muted", "accent", "info", "success", "warning", "danger"]
+    },
+    "contentEmphasis": { "enum": ["regular", "strong", "italic"] },
+    "contentRun": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 262144, "pattern": "^[^\\r\\n]*$" },
+        "tone": { "$ref": "#/$defs/contentTone", "default": "default" },
+        "emphasis": { "$ref": "#/$defs/contentEmphasis", "default": "regular" }
+      }
+    },
+    "contentLine": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "runs"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "runs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/contentRun" }
+        },
+        "tone": { "enum": ["default", "muted", "header", "added", "removed"], "default": "default" }
+      }
+    },
+    "contentSelection": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["anchorId", "headId"],
+      "properties": {
+        "anchorId": { "$ref": "#/$defs/identifier" },
+        "headId": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "content": {
+      "description": "Read-only scrollable styled document content; not an editor.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "id", "label", "lines"],
+      "properties": {
+        "type": { "const": "content" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "maxLength": 16384 },
+        "lines": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": { "$ref": "#/$defs/contentLine" }
+        },
+        "wrap": { "type": "boolean", "default": true },
+        "font": { "enum": ["body", "monospace"], "default": "body" },
+        "emptyMessage": { "type": "string", "maxLength": 16384 },
+        "selection": { "$ref": "#/$defs/contentSelection" },
+        "select": { "$ref": "#/$defs/identifier" },
+        "contextMenu": { "$ref": "#/$defs/semanticMenu" }
       }
     },
     "input": {
@@ -665,7 +724,7 @@
       "properties": { "type": { "$ref": "#/$defs/identifier" } },
       "not": {
         "required": ["type"],
-        "properties": { "type": { "const": "list" } }
+        "properties": { "type": { "enum": ["list", "content"] } }
       }
     },
     "page": {
@@ -686,6 +745,7 @@
         "body": {
           "oneOf": [
             { "$ref": "#/$defs/list" },
+            { "$ref": "#/$defs/content" },
             { "$ref": "#/$defs/unsupportedBodySlot" }
           ]
         }
@@ -765,6 +825,7 @@
         "selectedId": { "$ref": "#/$defs/identifier" },
         "emptyMessage": { "type": "string", "maxLength": 16384 },
         "primaryAction": { "$ref": "#/$defs/treePrimaryAction" },
+        "contextMenu": { "$ref": "#/$defs/semanticMenu" },
         "actions": { "$ref": "#/$defs/treeActions" }
       }
     },
@@ -1042,6 +1103,37 @@
             "op": { "const": "listRemoveItem" },
             "listId": { "$ref": "#/$defs/identifier" },
             "itemId": { "$ref": "#/$defs/identifier" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "contentId", "selection"],
+          "properties": {
+            "op": { "const": "contentSetSelection" },
+            "contentId": { "$ref": "#/$defs/identifier" },
+            "selection": {
+              "oneOf": [
+                { "$ref": "#/$defs/contentSelection" },
+                { "type": "null" }
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "contentId", "index", "deleteCount", "lines"],
+          "properties": {
+            "op": { "const": "contentSpliceLines" },
+            "contentId": { "$ref": "#/$defs/identifier" },
+            "index": { "$ref": "#/$defs/revision" },
+            "deleteCount": { "$ref": "#/$defs/revision" },
+            "lines": {
+              "type": "array",
+              "maxItems": 100000,
+              "items": { "$ref": "#/$defs/contentLine" }
+            }
           }
         },
         {

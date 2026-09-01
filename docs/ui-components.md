@@ -694,6 +694,40 @@ rejecting the App. The shared NDJSON stream covers a root context Menu,
 selection delta, and Markdown-nested insert/context menus across Rust, Swift,
 and web.
 
+## Content v1
+
+`Content` is the deliberate detail-screen primitive for read-only issue
+bodies, comments, patches, logs, and prose. It is a closed Page body slot, not
+a generic child container and not a code editor. An App publishes keyed
+logical lines made from styled runs. Runs use only the shared
+default/muted/accent/info/success/warning/danger tones plus
+regular/strong/italic emphasis; whole lines may be default, muted, header,
+added, or removed. The component also declares body or monospace typography,
+wrap/no-wrap intent, an accessibility label, and empty-state text.
+
+Scrolling and platform text selection are renderer-local presentation. When
+an App needs selection as durable collaborative state, it declares one
+idempotent `select` action and publishes an inclusive keyed anchor/head line
+range. Context actions use one bounded `SemanticMenu`; renderers return the
+selected menu action together with the target line id. Filesystem paths,
+arbitrary colors, source-language services, editing commands, and opaque view
+children are intentionally absent.
+
+The terminal interpretation is `ContentWidget`, using Ratatui styled lines,
+wrap/horizontal scroll, diff row backgrounds, synchronized selection, and the
+shared vertical scrollbar. SwiftUI renders a selectable scrolling document
+with native context menus. Web renders an accessible `role=document` surface
+whose styled DOM lines support browser selection, drag line ranges, and the
+same menu actions. `contentSpliceLines` changes a keyed line collection by
+delta and `contentSetSelection` synchronizes its range, so large details do
+not fall back to snapshot-per-change.
+
+Renderers advertise `content`, plus `contentSelection` and Menu capabilities
+only when the exact projection uses them. A renderer missing any required
+capability keeps the connection and shows the complete terminal pane. The
+shared NDJSON fixtures cover a styled diff Page and both Content delta forms
+in Rust, Swift, and web.
+
 ## MarkdownEditor v1
 
 The first component reuses `tui-textarea-2` rather than introducing another

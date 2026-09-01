@@ -176,7 +176,8 @@ The standalone component layer currently provides:
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
 | `Tree` / `TreeWidget` | Closed drill-down/outline hierarchy with opaque ids, parent/filter semantics, bounded children, and the same `SelectableRow`/scrollbar foundation |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
-| `Page` | Top-level standalone Ratatui presentation with constrained Input header/List body slots and one optional back action |
+| `Page` | Top-level standalone Ratatui presentation with a constrained Input header and either a List or read-only Content body, plus one optional back action |
+| `Content` / `ContentWidget` | Read-only scrollable styled lines for issue, diff, and document detail screens; keyed range selection and bounded context actions without editor semantics |
 | `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and named closed slots |
 | `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
@@ -221,7 +222,8 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
-| Page semantic projection | Closed Page/List/ListItem/Toggle/Input trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
+| Page semantic projection | Closed Page/List/ListItem/Toggle/Input or read-only Content trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
+| Content semantic projection | Keyed styled lines, wrap/monospace intent, inclusive line-range selection, bounded context menus, and line-splice/selection deltas for native detail views |
 | Tree semantic projection | Closed Explorer/Tree hierarchy preserving filter focus, wrap/page navigation, the synthetic parent action, opaque path-free ids, compact keyed deltas, and SwiftUI/ARIA-tree wrappers |
 | Menu semantic projection | Root or Markdown-nested action menus with disabled/danger roles, renderer-local anchors, keyboard navigation, native `NSMenu`/popover and web menu interpretations |
 | Surface semantic projection | Opaque session/stream reference, sizing, background, and input policy only; Swift/web wrappers inject existing USRF local-GPU presenters and never consume frames |

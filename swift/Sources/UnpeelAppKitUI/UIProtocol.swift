@@ -24,6 +24,8 @@ public enum UnpeelUIProtocol {
     public static let inputCapability = "input"
     public static let buttonCapability = "button"
     public static let pageBackCapability = "pageBack"
+    public static let contentCapability = "content"
+    public static let contentSelectionCapability = "contentSelection"
     public static let surfaceCapability = "surface"
     public static let canvasPageCapability = "canvasPage"
     public static let treeCapability = "tree"
@@ -52,6 +54,8 @@ public enum UnpeelUIProtocol {
         inputCapability,
         buttonCapability,
         pageBackCapability,
+        contentCapability,
+        contentSelectionCapability,
         treeCapability,
         treeHierarchyCapability,
         treeFilterCapability,
@@ -1635,6 +1639,7 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
     public let pageOverlap: Int
     public let pageBehavior: UIListPageBehavior
     public let spacePagesDown: Bool
+    public let contextMenu: UIMenuSpec?
 
     public init(
         id: String,
@@ -1645,7 +1650,8 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
         scrollPadding: Int = 0,
         pageOverlap: Int = 1,
         pageBehavior: UIListPageBehavior = .selection,
-        spacePagesDown: Bool = false
+        spacePagesDown: Bool = false,
+        contextMenu: UIMenuSpec? = nil
     ) {
         self.id = id
         self.items = items
@@ -1656,11 +1662,12 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
         self.pageOverlap = pageOverlap
         self.pageBehavior = pageBehavior
         self.spacePagesDown = spacePagesDown
+        self.contextMenu = contextMenu
     }
 
     enum CodingKeys: String, CodingKey {
         case id, items, emptyMessage, selectedID = "selectedId", select, scrollPadding
-        case pageOverlap, pageBehavior, spacePagesDown
+        case pageOverlap, pageBehavior, spacePagesDown, contextMenu
     }
 
     public init(from decoder: Decoder) throws {
@@ -1674,6 +1681,7 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
         pageOverlap = try container.decodeIfPresent(Int.self, forKey: .pageOverlap) ?? 1
         pageBehavior = try container.decodeIfPresent(UIListPageBehavior.self, forKey: .pageBehavior) ?? .selection
         spacePagesDown = try container.decodeIfPresent(Bool.self, forKey: .spacePagesDown) ?? false
+        contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
         guard (0...Int(UInt16.max)).contains(scrollPadding),
               (0...Int(UInt16.max)).contains(pageOverlap)
         else {
@@ -1688,6 +1696,169 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
                 forKey: .selectedID,
                 in: container,
                 debugDescription: "List selectedId must identify one of its items"
+            )
+        }
+    }
+}
+
+public enum UIContentFont: String, Codable, Equatable, Hashable, Sendable {
+    case body
+    case monospace
+}
+
+public enum UIContentTone: String, Codable, Equatable, Hashable, Sendable {
+    case `default`
+    case muted
+    case accent
+    case info
+    case success
+    case warning
+    case danger
+}
+
+public enum UIContentEmphasis: String, Codable, Equatable, Hashable, Sendable {
+    case regular
+    case strong
+    case italic
+}
+
+public enum UIContentLineTone: String, Codable, Equatable, Hashable, Sendable {
+    case `default`
+    case muted
+    case header
+    case added
+    case removed
+}
+
+public struct UIContentRun: Codable, Equatable, Hashable, Sendable {
+    public let text: String
+    public let tone: UIContentTone
+    public let emphasis: UIContentEmphasis
+
+    public init(
+        text: String,
+        tone: UIContentTone = .default,
+        emphasis: UIContentEmphasis = .regular
+    ) {
+        self.text = text
+        self.tone = tone
+        self.emphasis = emphasis
+    }
+
+    enum CodingKeys: String, CodingKey { case text, tone, emphasis }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decode(String.self, forKey: .text)
+        tone = try container.decodeIfPresent(UIContentTone.self, forKey: .tone) ?? .default
+        emphasis = try container.decodeIfPresent(
+            UIContentEmphasis.self,
+            forKey: .emphasis
+        ) ?? .regular
+        guard !text.contains("\n"), !text.contains("\r"), !text.contains("\0") else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .text,
+                in: container,
+                debugDescription: "Content runs must stay within one logical line"
+            )
+        }
+    }
+}
+
+public struct UIContentLine: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let runs: [UIContentRun]
+    public let tone: UIContentLineTone
+
+    public init(
+        id: String,
+        runs: [UIContentRun],
+        tone: UIContentLineTone = .default
+    ) {
+        self.id = id
+        self.runs = runs
+        self.tone = tone
+    }
+
+    enum CodingKeys: String, CodingKey { case id, runs, tone }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        runs = try container.decode([UIContentRun].self, forKey: .runs)
+        tone = try container.decodeIfPresent(UIContentLineTone.self, forKey: .tone) ?? .default
+    }
+}
+
+public struct UIContentSelection: Codable, Equatable, Hashable, Sendable {
+    public let anchorID: String
+    public let headID: String
+
+    public init(anchorID: String, headID: String) {
+        self.anchorID = anchorID
+        self.headID = headID
+    }
+
+    enum CodingKeys: String, CodingKey { case anchorID = "anchorId", headID = "headId" }
+}
+
+public struct UIContentSpec: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let label: String
+    public var lines: [UIContentLine]
+    public let wrap: Bool
+    public let font: UIContentFont
+    public let emptyMessage: String
+    public var selection: UIContentSelection?
+    public let select: String?
+    public let contextMenu: UIMenuSpec?
+
+    public init(
+        id: String,
+        label: String,
+        lines: [UIContentLine],
+        wrap: Bool = true,
+        font: UIContentFont = .body,
+        emptyMessage: String = "",
+        selection: UIContentSelection? = nil,
+        select: String? = nil,
+        contextMenu: UIMenuSpec? = nil
+    ) {
+        self.id = id
+        self.label = label
+        self.lines = lines
+        self.wrap = wrap
+        self.font = font
+        self.emptyMessage = emptyMessage
+        self.selection = selection
+        self.select = select
+        self.contextMenu = contextMenu
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, lines, wrap, font, emptyMessage, selection, select, contextMenu
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        lines = try container.decodeIfPresent([UIContentLine].self, forKey: .lines) ?? []
+        wrap = try container.decodeIfPresent(Bool.self, forKey: .wrap) ?? true
+        font = try container.decodeIfPresent(UIContentFont.self, forKey: .font) ?? .body
+        emptyMessage = try container.decodeIfPresent(String.self, forKey: .emptyMessage) ?? ""
+        selection = try container.decodeIfPresent(UIContentSelection.self, forKey: .selection)
+        select = try container.decodeIfPresent(String.self, forKey: .select)
+        contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
+        let ids = Set(lines.map(\.id))
+        guard ids.count == lines.count,
+              selection.map({ ids.contains($0.anchorID) && ids.contains($0.headID) }) ?? true,
+              selection == nil || select != nil
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .lines,
+                in: container,
+                debugDescription: "Content line ids and selection must be valid"
             )
         }
     }
@@ -1761,6 +1932,7 @@ extension UIPageHeaderSlot: Codable {
 
 public enum UIPageBodySlot: Equatable, Hashable, Sendable {
     case list(UIListSpec)
+    case content(UIContentSpec)
     case unsupported(kind: String)
 }
 
@@ -1772,6 +1944,7 @@ extension UIPageBodySlot: Codable {
         let kind = try container.decode(String.self, forKey: .type)
         switch kind {
         case "list": self = .list(try UIListSpec(from: decoder))
+        case "content": self = .content(try UIContentSpec(from: decoder))
         default: self = .unsupported(kind: kind)
         }
     }
@@ -1782,6 +1955,9 @@ extension UIPageBodySlot: Codable {
         case let .list(list):
             try container.encode("list", forKey: .type)
             try list.encode(to: encoder)
+        case let .content(content):
+            try container.encode("content", forKey: .type)
+            try content.encode(to: encoder)
         case let .unsupported(kind):
             try container.encode(kind, forKey: .type)
         }
@@ -1807,8 +1983,27 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
     }
 
     public var requiredCapabilities: [String]? {
-        var capabilities = [
-            UnpeelUIProtocol.pageCapability,
+        var capabilities = [UnpeelUIProtocol.pageCapability]
+        if case let .content(content) = body {
+            capabilities.append(UnpeelUIProtocol.contentCapability)
+            if let header {
+                guard case .input = header else { return nil }
+                capabilities.append(UnpeelUIProtocol.inputCapability)
+            }
+            if back != nil { capabilities.append(UnpeelUIProtocol.pageBackCapability) }
+            if content.selection != nil || content.select != nil {
+                capabilities.append(UnpeelUIProtocol.contentSelectionCapability)
+            }
+            if content.contextMenu != nil {
+                capabilities += [
+                    UnpeelUIProtocol.menuCapability,
+                    UnpeelUIProtocol.menuAnchorCapability,
+                ]
+            }
+            return capabilities
+        }
+        guard case let .list(list) = body else { return nil }
+        capabilities += [
             UnpeelUIProtocol.listCapability,
             UnpeelUIProtocol.listItemCapability,
         ]
@@ -1816,7 +2011,6 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
             guard case .input = header else { return nil }
             capabilities.append(UnpeelUIProtocol.inputCapability)
         }
-        guard case let .list(list) = body else { return nil }
         if back != nil { capabilities.append(UnpeelUIProtocol.pageBackCapability) }
         if list.items.contains(where: { $0.detail != nil || $0.value != nil }) {
             capabilities.append(UnpeelUIProtocol.listItemMetadataCapability)
@@ -1857,6 +2051,12 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
             || list.pageOverlap != 1 || list.pageBehavior != .selection || list.spacePagesDown
         {
             capabilities.append(UnpeelUIProtocol.listSelectionCapability)
+        }
+        if list.contextMenu != nil {
+            capabilities += [
+                UnpeelUIProtocol.menuCapability,
+                UnpeelUIProtocol.menuAnchorCapability,
+            ]
         }
         return capabilities
     }
@@ -1992,6 +2192,7 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
     public var selectedID: String?
     public let emptyMessage: String?
     public let primaryAction: UIButtonSpec?
+    public let contextMenu: UIMenuSpec?
     public let actions: UITreeActions
 
     public init(
@@ -2003,6 +2204,7 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
         selectedID: String? = nil,
         emptyMessage: String? = nil,
         primaryAction: UIButtonSpec? = nil,
+        contextMenu: UIMenuSpec? = nil,
         actions: UITreeActions = .init()
     ) {
         self.label = label
@@ -2013,12 +2215,13 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
         self.selectedID = selectedID
         self.emptyMessage = emptyMessage
         self.primaryAction = primaryAction
+        self.contextMenu = contextMenu
         self.actions = actions
     }
 
     enum CodingKeys: String, CodingKey {
         case label, location, presentation, filter, items, selectedID = "selectedId"
-        case emptyMessage, primaryAction, actions
+        case emptyMessage, primaryAction, contextMenu, actions
     }
 
     public init(from decoder: Decoder) throws {
@@ -2034,6 +2237,7 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
         selectedID = try container.decodeIfPresent(String.self, forKey: .selectedID)
         emptyMessage = try container.decodeIfPresent(String.self, forKey: .emptyMessage)
         primaryAction = try container.decodeIfPresent(UIButtonSpec.self, forKey: .primaryAction)
+        contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
         actions = try container.decodeIfPresent(UITreeActions.self, forKey: .actions) ?? .init()
     }
 
@@ -2058,6 +2262,12 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
         if filter != nil { capabilities.append(UnpeelUIProtocol.treeFilterCapability) }
         if parentCount > 0 { capabilities.append(UnpeelUIProtocol.treeParentCapability) }
         if primaryAction != nil { capabilities.append(UnpeelUIProtocol.buttonCapability) }
+        if contextMenu != nil {
+            capabilities += [
+                UnpeelUIProtocol.menuCapability,
+                UnpeelUIProtocol.menuAnchorCapability,
+            ]
+        }
         return capabilities
     }
 }

@@ -17,7 +17,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 29);
+    assert_eq!(messages.len(), 31);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -346,6 +346,27 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     let UiMessage::Delta(markdown_menu_delta) = &messages[28] else {
         panic!("twenty-ninth fixture must update nested Markdown menus");
     };
+
+    let UiMessage::Snapshot(content_snapshot) = &messages[29] else {
+        panic!("thirtieth fixture must contain a read-only Content Page");
+    };
+    let UiComponent::Page(content_page) = &content_snapshot.root.element else {
+        panic!("Content fixture must remain inside Page");
+    };
+    let content = content_page.content().expect("Page body must be Content");
+    assert_eq!(content.lines.len(), 3);
+    assert_eq!(content.selection.as_ref().unwrap().anchor_id, "line-1");
+    assert!(content.context_menu.is_some());
+    let UiMessage::Delta(content_delta) = &messages[30] else {
+        panic!("last fixture must be a Content delta");
+    };
+    let updated = content_snapshot.applying(content_delta).unwrap();
+    let UiComponent::Page(content_page) = updated.root.element else {
+        panic!("Content delta must preserve Page");
+    };
+    let content = content_page.content().unwrap();
+    assert_eq!(content.lines[2].id, "line-2-next");
+    assert_eq!(content.selection.as_ref().unwrap().head_id, "line-2-next");
     let updated = markdown_snapshot.applying(markdown_menu_delta).unwrap();
     let UiComponent::MarkdownEditor(editor) = updated.root.element else {
         panic!("nested Menu delta must preserve MarkdownEditor");

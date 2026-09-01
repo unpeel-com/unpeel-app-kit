@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    InputField, KitTheme, ListPageBehavior, ListState, RowPrimaryRole, SELECTABLE_LEFT_PADDING,
-    SelectableRow, VerticalScrollbar,
+    Content, ContentState, InputField, KitTheme, ListPageBehavior, ListState, RowPrimaryRole,
+    SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, VerticalScrollbar,
 };
 
 /// Renderer capability for the v1 Page container.
@@ -815,6 +815,10 @@ pub struct List {
     pub page_behavior: ListPageBehavior,
     #[serde(default)]
     pub space_pages_down: bool,
+    /// One bounded action vocabulary presented for the focused/pointed row.
+    /// Renderers return the target row id with the selected menu action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_menu: Option<SemanticMenu>,
 }
 
 impl List {
@@ -830,6 +834,7 @@ impl List {
             page_overlap: default_page_overlap(),
             page_behavior: ListPageBehavior::Selection,
             space_pages_down: false,
+            context_menu: None,
         }
     }
 
@@ -870,6 +875,12 @@ impl List {
         self
     }
 
+    #[must_use]
+    pub fn context_menu(mut self, menu: SemanticMenu) -> Self {
+        self.context_menu = Some(menu);
+        self
+    }
+
     /// Renders the same single-line row language used by the sibling Apps.
     #[must_use]
     pub fn widget<'a>(&'a self, state: &'a mut ListState) -> ListWidget<'a> {
@@ -903,6 +914,17 @@ impl List {
         }
         if let Some(select) = &self.select {
             validate_identifier(select, &format!("{path}.select"))?;
+        }
+        if let Some(menu) = &self.context_menu {
+            menu.validate().map_err(|error| {
+                ComponentValidationError::new(
+                    format!(
+                        "{path}.contextMenu.{}",
+                        error.path.trim_start_matches("menu.")
+                    ),
+                    error.message,
+                )
+            })?;
         }
         for (index, item) in self.items.iter().enumerate() {
             item.validate(&format!("{path}.items[{index}]"))?;
@@ -1062,6 +1084,7 @@ impl PageHeaderSlot {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PageBodySlot {
     List(List),
+    Content(Content),
 }
 
 impl PageBodySlot {
@@ -1071,21 +1094,44 @@ impl PageBodySlot {
     }
 
     #[must_use]
+    pub const fn content(content: Content) -> Self {
+        Self::Content(content)
+    }
+
+    #[must_use]
     pub const fn as_list(&self) -> &List {
         match self {
             Self::List(list) => list,
+            Self::Content(_) => panic!("Page body is Content, not List"),
         }
     }
 
-    fn as_list_mut(&mut self) -> &mut List {
+    fn as_list_mut(&mut self) -> Option<&mut List> {
         match self {
-            Self::List(list) => list,
+            Self::List(list) => Some(list),
+            Self::Content(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_content(&self) -> Option<&Content> {
+        match self {
+            Self::Content(content) => Some(content),
+            Self::List(_) => None,
+        }
+    }
+
+    fn as_content_mut(&mut self) -> Option<&mut Content> {
+        match self {
+            Self::Content(content) => Some(content),
+            Self::List(_) => None,
         }
     }
 
     fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
         match self {
             Self::List(list) => list.validate(path),
+            Self::Content(content) => content.validate(path),
         }
     }
 }
@@ -1113,6 +1159,17 @@ impl Page {
         }
     }
 
+    /// Creates a document/detail Page whose body is deliberately read-only.
+    #[must_use]
+    pub fn with_content(title: impl Into<String>, content: Content) -> Self {
+        Self {
+            title: title.into(),
+            back: None,
+            header: None,
+            body: PageBodySlot::Content(content),
+        }
+    }
+
     #[must_use]
     pub fn input(mut self, input: Input) -> Self {
         self.header = Some(PageHeaderSlot::Input(input));
@@ -1132,6 +1189,11 @@ impl Page {
     }
 
     #[must_use]
+    pub const fn content(&self) -> Option<&Content> {
+        self.body.as_content()
+    }
+
+    #[must_use]
     pub fn input_spec(&self) -> Option<&Input> {
         self.header.as_ref().map(PageHeaderSlot::as_input)
     }
@@ -1139,43 +1201,59 @@ impl Page {
     /// Capabilities a renderer needs for this exact closed tree.
     #[must_use]
     pub fn required_capabilities(&self) -> Vec<&'static str> {
-        let mut capabilities = vec![
-            PAGE_COMPONENT_CAPABILITY,
-            LIST_COMPONENT_CAPABILITY,
-            LIST_ITEM_COMPONENT_CAPABILITY,
-        ];
+        let mut capabilities = vec![PAGE_COMPONENT_CAPABILITY];
+        let PageBodySlot::List(list) = &self.body else {
+            capabilities.push(crate::CONTENT_COMPONENT_CAPABILITY);
+            if self.header.is_some() {
+                capabilities.push(INPUT_COMPONENT_CAPABILITY);
+            }
+            if self.back.is_some() {
+                capabilities.push(PAGE_BACK_CAPABILITY);
+            }
+            if let PageBodySlot::Content(content) = &self.body {
+                if content.selection.is_some() || content.select.is_some() {
+                    capabilities.push(crate::CONTENT_SELECTION_CAPABILITY);
+                }
+                if content.context_menu.is_some() {
+                    capabilities.extend([
+                        crate::MENU_COMPONENT_CAPABILITY,
+                        crate::MENU_ANCHOR_CAPABILITY,
+                    ]);
+                }
+            }
+            return capabilities;
+        };
+        capabilities.extend([LIST_COMPONENT_CAPABILITY, LIST_ITEM_COMPONENT_CAPABILITY]);
         if self.header.is_some() {
             capabilities.push(INPUT_COMPONENT_CAPABILITY);
         }
         if self.back.is_some() {
             capabilities.push(PAGE_BACK_CAPABILITY);
         }
-        if self
-            .list()
+        if list
             .items
             .iter()
             .any(|item| item.detail.is_some() || item.value.is_some())
         {
             capabilities.push(LIST_ITEM_METADATA_CAPABILITY);
         }
-        if self.list().items.iter().any(|item| item.activate.is_some()) {
+        if list.items.iter().any(|item| item.activate.is_some()) {
             capabilities.push(LIST_ITEM_ACTIVATE_CAPABILITY);
         }
-        if self
-            .list()
+        if list
             .items
             .iter()
             .any(|item| item.primary_role().is_interactive())
         {
             capabilities.push(LIST_ITEM_ROLE_CAPABILITY);
         }
-        if self.list().items.iter().any(|item| {
+        if list.items.iter().any(|item| {
             item.slots()
                 .any(|slot| matches!(slot, ListItemSlot::Toggle(_)))
         }) {
             capabilities.push(TOGGLE_COMPONENT_CAPABILITY);
         }
-        if self.list().items.iter().any(|item| {
+        if list.items.iter().any(|item| {
             item.busy
                 || item.label_tone != ListItemTone::Default
                 || item.value_tone != ListItemTone::Muted
@@ -1187,19 +1265,18 @@ impl Page {
         }) {
             capabilities.push(LIST_ITEM_PRESENTATION_CAPABILITY);
         }
-        if self.list().items.iter().any(|item| {
+        if list.items.iter().any(|item| {
             item.slots()
                 .any(|slot| matches!(slot, ListItemSlot::Status(_)))
         }) {
             capabilities.push(STATUS_SYMBOL_COMPONENT_CAPABILITY);
         }
-        if self.list().items.iter().any(|item| {
+        if list.items.iter().any(|item| {
             item.slots()
                 .any(|slot| matches!(slot, ListItemSlot::Badge(_)))
         }) {
             capabilities.push(BADGE_COMPONENT_CAPABILITY);
         }
-        let list = self.list();
         if list.selected_id.is_some()
             || list.select.is_some()
             || list.scroll_padding != 0
@@ -1208,6 +1285,12 @@ impl Page {
             || list.space_pages_down
         {
             capabilities.push(LIST_SELECTION_CAPABILITY);
+        }
+        if list.context_menu.is_some() {
+            capabilities.extend([
+                crate::MENU_COMPONENT_CAPABILITY,
+                crate::MENU_ANCHOR_CAPABILITY,
+            ]);
         }
         capabilities
     }
@@ -1227,12 +1310,26 @@ impl Page {
         if let Some(input) = self.input_spec() {
             register_unique(&mut ids, &input.id, "page.header.id")?;
         }
-        register_unique(&mut ids, &self.list().id, "page.body.id")?;
-        for (index, item) in self.list().items.iter().enumerate() {
-            register_unique(&mut ids, &item.id, &format!("page.body.items[{index}].id"))?;
-            for slot in item.slots() {
-                if let Some(id) = slot.id() {
-                    register_unique(&mut ids, id, &format!("page.body.items[{index}].slot.id"))?;
+        match &self.body {
+            PageBodySlot::List(list) => {
+                register_unique(&mut ids, &list.id, "page.body.id")?;
+                for (index, item) in list.items.iter().enumerate() {
+                    register_unique(&mut ids, &item.id, &format!("page.body.items[{index}].id"))?;
+                    for slot in item.slots() {
+                        if let Some(id) = slot.id() {
+                            register_unique(
+                                &mut ids,
+                                id,
+                                &format!("page.body.items[{index}].slot.id"),
+                            )?;
+                        }
+                    }
+                }
+            }
+            PageBodySlot::Content(content) => {
+                register_unique(&mut ids, &content.id, "page.body.id")?;
+                for (index, line) in content.lines.iter().enumerate() {
+                    register_unique(&mut ids, &line.id, &format!("page.body.lines[{index}].id"))?;
                 }
             }
         }
@@ -1250,6 +1347,7 @@ impl Page {
             page: self,
             input,
             list_state,
+            content_state: ContentState::new(),
             theme: PageTheme::default(),
         }
     }
@@ -1316,7 +1414,13 @@ impl Page {
         toggle_id: &str,
         value: bool,
     ) -> Result<(), ComponentValidationError> {
-        for item in &mut self.body.as_list_mut().items {
+        let Some(list) = self.body.as_list_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                "Page body is not a List",
+            ));
+        };
+        for item in &mut list.items {
             if item.set_toggle_value(toggle_id, value) {
                 return Ok(());
             }
@@ -1332,7 +1436,13 @@ impl Page {
         checkmark_id: &str,
         value: bool,
     ) -> Result<(), ComponentValidationError> {
-        for item in &mut self.body.as_list_mut().items {
+        let Some(list) = self.body.as_list_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.nodeId",
+                "Page body is not a List",
+            ));
+        };
+        for item in &mut list.items {
             if item.set_checkmark_value(checkmark_id, value) {
                 return Ok(());
             }
@@ -1349,7 +1459,12 @@ impl Page {
         index: usize,
         item: ListItem,
     ) -> Result<(), ComponentValidationError> {
-        let list = self.body.as_list_mut();
+        let Some(list) = self.body.as_list_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.listId",
+                "Page body is not a List",
+            ));
+        };
         if list.id != list_id {
             return Err(ComponentValidationError::new(
                 "delta.listId",
@@ -1364,7 +1479,12 @@ impl Page {
         list_id: &str,
         selected_id: Option<String>,
     ) -> Result<(), ComponentValidationError> {
-        let list = self.body.as_list_mut();
+        let Some(list) = self.body.as_list_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.listId",
+                "Page body is not a List",
+            ));
+        };
         if list.id != list_id {
             return Err(ComponentValidationError::new(
                 "delta.listId",
@@ -1388,7 +1508,12 @@ impl Page {
         list_id: &str,
         item_id: &str,
     ) -> Result<(), ComponentValidationError> {
-        let list = self.body.as_list_mut();
+        let Some(list) = self.body.as_list_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.listId",
+                "Page body is not a List",
+            ));
+        };
         if list.id != list_id {
             return Err(ComponentValidationError::new(
                 "delta.listId",
@@ -1396,6 +1521,48 @@ impl Page {
             ));
         }
         list.remove(item_id)
+    }
+
+    pub(crate) fn set_content_selection(
+        &mut self,
+        content_id: &str,
+        selection: Option<crate::ContentSelection>,
+    ) -> Result<(), ComponentValidationError> {
+        let Some(content) = self.body.as_content_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.contentId",
+                "Page body is not Content",
+            ));
+        };
+        if content.id != content_id {
+            return Err(ComponentValidationError::new(
+                "delta.contentId",
+                format!("Content {content_id:?} is not present"),
+            ));
+        }
+        content.set_selection(selection)
+    }
+
+    pub(crate) fn splice_content_lines(
+        &mut self,
+        content_id: &str,
+        index: usize,
+        delete_count: usize,
+        lines: Vec<crate::ContentLine>,
+    ) -> Result<(), ComponentValidationError> {
+        let Some(content) = self.body.as_content_mut() else {
+            return Err(ComponentValidationError::new(
+                "delta.contentId",
+                "Page body is not Content",
+            ));
+        };
+        if content.id != content_id {
+            return Err(ComponentValidationError::new(
+                "delta.contentId",
+                format!("Content {content_id:?} is not present"),
+            ));
+        }
+        content.splice_lines(index, delete_count, lines)
     }
 }
 
@@ -1896,6 +2063,7 @@ pub struct PageWidget<'a> {
     page: &'a Page,
     input: &'a mut InputField,
     list_state: &'a mut ListState,
+    content_state: ContentState,
     theme: PageTheme,
 }
 
@@ -1908,7 +2076,7 @@ impl PageWidget<'_> {
 }
 
 impl Widget for PageWidget<'_> {
-    fn render(self, area: Rect, buffer: &mut Buffer) {
+    fn render(mut self, area: Rect, buffer: &mut Buffer) {
         if area.is_empty() {
             return;
         }
@@ -1934,11 +2102,17 @@ impl Widget for PageWidget<'_> {
                 .widget()
                 .render(layout.input.expect("Page input layout"), buffer);
         }
-        self.page
-            .list()
-            .widget(self.list_state)
-            .theme(self.theme)
-            .render(layout.list, buffer);
+        match &self.page.body {
+            PageBodySlot::List(list) => list
+                .widget(self.list_state)
+                .theme(self.theme)
+                .render(layout.list, buffer),
+            PageBodySlot::Content(content) => {
+                content
+                    .widget(&mut self.content_state)
+                    .render(layout.list, buffer);
+            }
+        }
     }
 }
 
@@ -2071,7 +2245,7 @@ mod tests {
         );
 
         let mut duplicate = page;
-        duplicate.body.as_list_mut().items[0]
+        duplicate.body.as_list_mut().unwrap().items[0]
             .trailing
             .as_mut()
             .unwrap()

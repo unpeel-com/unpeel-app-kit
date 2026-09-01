@@ -13,6 +13,7 @@
 mod agent;
 mod click;
 mod components;
+mod content;
 mod context;
 mod drag;
 mod drop_target;
@@ -65,6 +66,11 @@ pub use components::{
     PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page, PageBodySlot, PageHeaderSlot,
     PageLayout, PageTheme, PageWidget, STATUS_SYMBOL_COMPONENT_CAPABILITY, StatusSymbol,
     TOGGLE_COMPONENT_CAPABILITY, Toggle,
+};
+pub use content::{
+    CONTENT_COMPONENT_CAPABILITY, CONTENT_SELECTION_CAPABILITY, Content, ContentEmphasis,
+    ContentFont, ContentLine, ContentLineTone, ContentRun, ContentSelection, ContentState,
+    ContentTheme, ContentTone, ContentWidget, MAX_CONTENT_LINES,
 };
 pub use context::{
     AppContext, AppMode, ProjectContext, UnpeelUser, WorkspaceContext, WorktreeContext,
@@ -142,7 +148,7 @@ pub use ui::{
     UiParticipant, UiParticipantKind, UiPresence, UiPresenceMember, UiProtocolError,
     UiRendererMetadata, UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId,
     decode_ui_frame, encode_ui_frame, markdown_delta_operations, negotiate_ui_protocol_version,
-    read_ui_message, tree_delta_operations, write_ui_message,
+    page_delta_operations, read_ui_message, tree_delta_operations, write_ui_message,
 };
 #[cfg(feature = "ui-bridge")]
 pub use ui_auth::{

@@ -53,7 +53,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 29)
+    #expect(messages.count == 31)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -297,6 +297,25 @@ func sharedProtocolFixturesDecode() throws {
     ])
     #expect(markdownWithoutInsert.insertMenu == nil)
     #expect(markdownWithoutInsert.contextMenu != nil)
+
+    guard case let .snapshot(contentSnapshot) = messages[29],
+          case let .page(contentPage) = contentSnapshot.root.component,
+          case let .content(content) = contentPage.body,
+          case let .delta(contentDelta) = messages[30],
+          case let .page(updatedContentPage) = try contentSnapshot
+            .applying(contentDelta).root.component,
+          case let .content(updatedContent) = updatedContentPage.body
+    else {
+        Issue.record("final fixtures must contain read-only Content and compact deltas")
+        return
+    }
+    #expect(content.lines.count == 3)
+    #expect(content.selection?.anchorID == "line-1")
+    #expect(contentPage.requiredCapabilities == [
+        "page", "content", "pageBack", "contentSelection", "menu", "menuAnchor",
+    ])
+    #expect(updatedContent.lines[2].id == "line-2-next")
+    #expect(updatedContent.selection?.headID == "line-2-next")
 }
 
 @Test

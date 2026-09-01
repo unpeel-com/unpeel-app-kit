@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, KitTheme, ListPageBehavior,
-    RowBoundaryBehavior, RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow,
+    RowBoundaryBehavior, RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu,
     VerticalScrollbar,
 };
 
@@ -236,6 +236,10 @@ pub struct Tree {
     /// child container.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_action: Option<Button>,
+    /// Bounded actions for the selected/pointed entry. Renderers include that
+    /// entry id with the chosen action; paths never enter the component tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_menu: Option<SemanticMenu>,
     #[serde(default)]
     pub actions: TreeActions,
 }
@@ -256,6 +260,7 @@ impl Tree {
             selected_id: None,
             empty_message: None,
             primary_action: None,
+            context_menu: None,
             actions: TreeActions::drill_down(),
         }
     }
@@ -302,6 +307,12 @@ impl Tree {
     }
 
     #[must_use]
+    pub fn context_menu(mut self, menu: SemanticMenu) -> Self {
+        self.context_menu = Some(menu);
+        self
+    }
+
+    #[must_use]
     pub fn actions(mut self, actions: TreeActions) -> Self {
         self.actions = actions;
         self
@@ -328,6 +339,12 @@ impl Tree {
         if self.primary_action.is_some() {
             capabilities.push(BUTTON_COMPONENT_CAPABILITY);
         }
+        if self.context_menu.is_some() {
+            capabilities.extend([
+                crate::MENU_COMPONENT_CAPABILITY,
+                crate::MENU_ANCHOR_CAPABILITY,
+            ]);
+        }
         capabilities
     }
 
@@ -341,6 +358,17 @@ impl Tree {
             action
                 .validate("tree.primaryAction")
                 .map_err(|error| TreeValidationError::new(error.path, error.message))?;
+        }
+        if let Some(menu) = &self.context_menu {
+            menu.validate().map_err(|error| {
+                TreeValidationError::new(
+                    format!(
+                        "tree.contextMenu.{}",
+                        error.path.trim_start_matches("menu.")
+                    ),
+                    error.message,
+                )
+            })?;
         }
         validate_identifier(&self.actions.select, "tree.actions.select")?;
         validate_identifier(&self.actions.open, "tree.actions.open")?;

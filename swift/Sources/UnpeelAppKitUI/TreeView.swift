@@ -169,6 +169,25 @@ private struct TreeContent: View {
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { activate(row.item) }
         .onTapGesture { select(row.id) }
+        .contextMenu {
+            if let menu = tree.contextMenu {
+                ForEach(menu.items) { menuItem in
+                    Button(
+                        menuItem.label,
+                        role: menuItem.role == .danger ? .destructive : nil
+                    ) {
+                        select(row.id)
+                        onAction(UIAction(
+                            nodeID: menuItem.id,
+                            action: menuItem.action,
+                            kind: .activate,
+                            value: .text(row.id)
+                        ))
+                    }
+                    .disabled(menuItem.disabled)
+                }
+            }
+        }
         .accessibilityLabel(accessibilityLabel(row.item))
         .accessibilityAddTraits(selectedID == row.id ? .isSelected : [])
     }

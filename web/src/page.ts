@@ -1,6 +1,9 @@
 import {
   type BadgeSpec,
   type CheckmarkSpec,
+  type ContentLine,
+  type ContentSelection,
+  type ContentSpec,
   type InputSpec,
   type ListItemSlot,
   type ListItemSpec,
@@ -12,14 +15,18 @@ import {
   type UiSnapshot,
   isBadgeSlot,
   isCheckmarkSlot,
+  isContentSpec,
+  isListSpec,
   isDisclosureSlot,
   isRenderablePageNode,
+  isRenderableContentPageNode,
   isStatusSlot,
   isToggleSlot,
   listItemPrimaryRole,
   uiAction,
 } from "./protocol";
 import { listNavigationDecision } from "./list_navigation";
+import { renderSemanticMenu } from "./menu";
 
 /** Native DOM interpretation of Page, List, ListItem, Toggle, and Input. */
 export class PageRenderer {
@@ -31,6 +38,8 @@ export class PageRenderer {
   private readonly selections = new Map<string, string | undefined>();
   private readonly serverSelections = new Map<string, string | undefined>();
   private readonly resizeObservers: ResizeObserver[] = [];
+  private contentSelection: ContentSelection | undefined;
+  private contentAnchor: string | undefined;
 
   constructor(container: HTMLElement, onAction: (action: UiAction) => void) {
     this.onAction = onAction;
@@ -40,7 +49,7 @@ export class PageRenderer {
   }
 
   render(snapshot: UiSnapshot): void {
-    if (!isRenderablePageNode(snapshot.root)) {
+    if (!isRenderablePageNode(snapshot.root) && !isRenderableContentPageNode(snapshot.root)) {
       throw new Error(`PageRenderer cannot render ${snapshot.root.type}`);
     }
     this.renderPage(snapshot.root);
@@ -57,7 +66,7 @@ export class PageRenderer {
 
   private renderPage(page: PageNode & {
     header?: InputSpec;
-    body: ListSpec;
+    body: ListSpec | ContentSpec;
   }): void {
     const focusedID = document.activeElement instanceof HTMLElement
       ? document.activeElement.id
@@ -83,30 +92,149 @@ export class PageRenderer {
 
     if (page.header !== undefined) this.element.append(this.input(page.header));
 
+    if (isContentSpec(page.body)) {
+      this.element.append(this.content(page.body));
+      this.restoreFocus(focusedID);
+      return;
+    }
+
+    const body = page.body;
+    if (!isListSpec(body)) return;
     const list = document.createElement("ul");
     list.className = "unpeel-list";
-    list.id = `unpeel-list-${page.body.id}`;
+    list.id = `unpeel-list-${body.id}`;
     list.tabIndex = 0;
     list.setAttribute("role", "listbox");
     list.setAttribute("aria-label", page.title);
-    this.reconcileSelection(page.body);
-    list.addEventListener("keydown", (event) => this.handleListKey(event, page, page.body, list));
-    if (page.body.items.length === 0) {
+    this.reconcileSelection(body);
+    list.addEventListener("keydown", (event) => this.handleListKey(event, page, body, list));
+    if (body.items.length === 0) {
       const empty = document.createElement("li");
       empty.className = "unpeel-list__empty";
-      empty.textContent = page.body.emptyMessage ?? "";
+      empty.textContent = body.emptyMessage ?? "";
       list.append(empty);
     } else {
-      for (const item of page.body.items) list.append(this.item(item, page.body));
+      for (const item of body.items) list.append(this.item(item, body));
     }
     this.element.append(list);
-    this.configureValueVisibility(list, page.body);
-    if (focusedID !== "") {
-      const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
-        ? CSS.escape(focusedID)
-        : focusedID.replace(/[^A-Za-z0-9_-]/g, "\\$&");
-      this.element.querySelector<HTMLElement>(`#${escaped}`)?.focus();
+    this.configureValueVisibility(list, body);
+    this.restoreFocus(focusedID);
+  }
+
+  private content(content: ContentSpec): HTMLElement {
+    const viewport = document.createElement("div");
+    viewport.className = "unpeel-content";
+    viewport.dataset.wrap = String(content.wrap ?? true);
+    viewport.dataset.font = content.font ?? "body";
+    viewport.tabIndex = 0;
+    viewport.setAttribute("role", "document");
+    viewport.setAttribute("aria-label", content.label);
+    this.contentSelection = content.selection;
+    if (content.lines.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "unpeel-content__empty";
+      empty.textContent = content.emptyMessage ?? "";
+      viewport.append(empty);
+      return viewport;
     }
+    for (const line of content.lines) viewport.append(this.contentLine(content, line));
+    return viewport;
+  }
+
+  private contentLine(content: ContentSpec, line: ContentLine): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "unpeel-content__line";
+    row.dataset.id = line.id;
+    row.dataset.tone = line.tone ?? "default";
+    row.dataset.selected = String(this.contentLineSelected(content, line.id));
+    for (const run of line.runs) {
+      const span = document.createElement("span");
+      span.textContent = run.text;
+      span.dataset.tone = run.tone ?? "default";
+      span.dataset.emphasis = run.emphasis ?? "regular";
+      row.append(span);
+    }
+    row.addEventListener("pointerdown", () => {
+      this.contentAnchor = line.id;
+      this.setContentSelection(content, line.id, line.id, false);
+    });
+    row.addEventListener("pointerenter", (event) => {
+      if ((event.buttons & 1) === 0 || this.contentAnchor === undefined) return;
+      this.setContentSelection(content, this.contentAnchor, line.id, false);
+    });
+    row.addEventListener("pointerup", () => {
+      const selection = this.contentSelection;
+      if (selection !== undefined) {
+        this.setContentSelection(content, selection.anchorId, selection.headId, true);
+      }
+      this.contentAnchor = undefined;
+    });
+    if (content.contextMenu !== undefined) {
+      row.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        this.setContentSelection(content, line.id, line.id, true);
+        this.showContextMenu(event, content.contextMenu!, line.id);
+      });
+    }
+    return row;
+  }
+
+  private contentLineSelected(content: ContentSpec, id: string): boolean {
+    const selection = this.contentSelection;
+    if (selection === undefined) return false;
+    const anchor = content.lines.findIndex((line) => line.id === selection.anchorId);
+    const head = content.lines.findIndex((line) => line.id === selection.headId);
+    const index = content.lines.findIndex((line) => line.id === id);
+    return index >= Math.min(anchor, head) && index <= Math.max(anchor, head);
+  }
+
+  private setContentSelection(
+    content: ContentSpec,
+    anchorId: string,
+    headId: string,
+    publish: boolean,
+  ): void {
+    const next = { anchorId, headId };
+    this.contentSelection = next;
+    for (const row of this.element.querySelectorAll<HTMLElement>(".unpeel-content__line")) {
+      row.dataset.selected = String(this.contentLineSelected(content, row.dataset.id ?? ""));
+    }
+    if (publish && content.select !== undefined) {
+      this.onAction(uiAction(
+        content.id,
+        content.select,
+        "select",
+        { type: "textList", value: [anchorId, headId] },
+      ));
+    }
+  }
+
+  private showContextMenu(event: MouseEvent, menu: NonNullable<ContentSpec["contextMenu"]>, target: string): void {
+    const host = document.createElement("div");
+    host.className = "unpeel-context-menu";
+    host.style.position = "fixed";
+    host.style.left = `${event.clientX}px`;
+    host.style.top = `${event.clientY}px`;
+    host.style.zIndex = "50";
+    renderSemanticMenu(host, menu, target, (action) => {
+      this.onAction({ ...action, value: { type: "text", value: target } });
+      host.remove();
+    });
+    document.body.append(host);
+    host.focus();
+    const dismiss = (pointer: PointerEvent): void => {
+      if (!host.contains(pointer.target as Node)) host.remove();
+      document.removeEventListener("pointerdown", dismiss, true);
+    };
+    queueMicrotask(() => document.addEventListener("pointerdown", dismiss, true));
+  }
+
+  private restoreFocus(focusedID: string): void {
+    if (focusedID === "") return;
+    const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(focusedID)
+      : focusedID.replace(/[^A-Za-z0-9_-]/g, "\\$&");
+    this.element.querySelector<HTMLElement>(`#${escaped}`)?.focus();
   }
 
   private input(input: InputSpec): HTMLFormElement {
@@ -177,6 +305,13 @@ export class PageRenderer {
       row.parentElement?.focus();
       this.invokePrimary(item);
     });
+    if (list.contextMenu !== undefined) {
+      row.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        this.select(list, item.id);
+        this.showContextMenu(event, list.contextMenu!, item.id);
+      });
+    }
     if (item.busy === true) {
       const busy = document.createElement("span");
       busy.className = "unpeel-list-item__busy";
