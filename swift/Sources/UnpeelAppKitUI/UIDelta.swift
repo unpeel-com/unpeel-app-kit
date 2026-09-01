@@ -22,6 +22,7 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case barChartSetData(UIBarChartSpec)
     case lineChartSetData(UILineChartSpec)
     case gaugeSetData(UIGaugeSpec)
+    case footerSetActions(nodeID: String, actions: [UIFooterActionSpec])
     case inputSetValue(nodeID: String, value: String)
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
     case listSetSelection(listID: String, selectedID: String?)
@@ -115,6 +116,7 @@ extension UIDeltaOperation: Codable {
         case barChartSetData
         case lineChartSetData
         case gaugeSetData
+        case footerSetActions
         case inputSetValue
         case listInsertItem
         case listSetSelection
@@ -281,6 +283,19 @@ extension UIDeltaOperation: Codable {
                 )
             }
             self = .gaugeSetData(gauge)
+        case .footerSetActions:
+            let actions = try container.decode([UIFooterActionSpec].self, forKey: .actions)
+            guard UIFooterActionsSpec(actions: actions).isValid else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .actions,
+                    in: container,
+                    debugDescription: "FooterActions delta data is invalid"
+                )
+            }
+            self = .footerSetActions(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                actions: actions
+            )
         case .inputSetValue:
             self = .inputSetValue(
                 nodeID: try container.decode(String.self, forKey: .nodeID),
@@ -467,6 +482,10 @@ extension UIDeltaOperation: Codable {
             try container.encodeIfPresent(gauge.caption, forKey: .caption)
             if gauge.caption == nil { try container.encodeNil(forKey: .caption) }
             try container.encode(gauge.accessibilityText, forKey: .accessibilityText)
+        case let .footerSetActions(nodeID, actions):
+            try container.encode(Operation.footerSetActions, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(actions, forKey: .actions)
         case let .inputSetValue(nodeID, value):
             try container.encode(Operation.inputSetValue, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
@@ -894,6 +913,29 @@ private extension UINode {
             }
             page.body = .list(list)
             return UINode(id: id, component: .page(page))
+        case let .footerSetActions(nodeID, actions):
+            guard id == nodeID else {
+                throw UIDeltaApplicationError("Delta targets an unavailable footer root")
+            }
+            let footer = UIFooterActionsSpec(actions: actions)
+            guard footer.isValid else {
+                throw UIDeltaApplicationError("Delta carries invalid FooterActions")
+            }
+            switch component {
+            case var .page(page):
+                page.footer = footer
+                return UINode(id: id, component: .page(page))
+            case var .tree(tree):
+                tree.footer = footer
+                return UINode(id: id, component: .tree(tree))
+            case let .markdownEditor(editor):
+                return UINode(
+                    id: id,
+                    component: .markdownEditor(editor.copying(footer: footer))
+                )
+            default:
+                throw UIDeltaApplicationError("Delta root has no FooterActions slot")
+            }
         case let .inputSetValue(nodeID, value):
             var page = try page()
             guard case var .input(input) = page.header, input.id == nodeID else {
@@ -1185,6 +1227,7 @@ private extension MarkdownEditorSpec {
         actions: MarkdownEditorActions? = nil,
         insertMenu: OptionalMenuChange = .unchanged,
         contextMenu: OptionalMenuChange = .unchanged
+        , footer: UIFooterActionsSpec? = nil
     ) -> Self {
         let nextTitle: String?
         switch title {
@@ -1219,7 +1262,8 @@ private extension MarkdownEditorSpec {
             title: nextTitle,
             actions: actions ?? self.actions,
             insertMenu: nextInsertMenu,
-            contextMenu: nextContextMenu
+            contextMenu: nextContextMenu,
+            footer: footer ?? self.footer
         )
     }
 }

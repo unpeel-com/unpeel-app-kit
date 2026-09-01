@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tui_textarea::{CursorMove, CursorRenderMode, Input, Key, TextArea, WrapMode};
@@ -13,9 +13,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[cfg(feature = "ui-bridge")]
 use crate::{
-    ActionId, MarkdownEditorActions, MarkdownEditorSpec, MarkdownMenuTrigger, MarkdownPresentation,
-    NodeId, SemanticMenu, TextEdit, TextPosition, TextSelection, UI_PROTOCOL_MAX_VERSION,
-    UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent, UiEventKind, UiEventValue, UiNode,
+    ActionId, FooterAction, FooterActions, MarkdownEditorActions, MarkdownEditorSpec,
+    MarkdownMenuTrigger, MarkdownPresentation, NodeId, SemanticMenu, TextEdit, TextPosition,
+    TextSelection, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent,
+    UiEventKind, UiEventValue, UiNode,
 };
 use crate::{MarkdownCommandHint, VerticalScrollbar};
 
@@ -71,6 +72,7 @@ pub struct MarkdownEditorConfig {
     insert_menu: Option<SemanticMenu>,
     context_menu: Option<SemanticMenu>,
     actions: MarkdownEditorActions,
+    footer: FooterActions,
 }
 
 #[cfg(feature = "ui-bridge")]
@@ -88,6 +90,7 @@ impl MarkdownEditorConfig {
             insert_menu: None,
             context_menu: None,
             actions: MarkdownEditorActions::editable(),
+            footer: FooterActions::default(),
         }
     }
 
@@ -148,6 +151,12 @@ impl MarkdownEditorConfig {
     #[must_use]
     pub fn actions(mut self, actions: MarkdownEditorActions) -> Self {
         self.actions = actions;
+        self
+    }
+
+    #[must_use]
+    pub fn footer_actions(mut self, actions: impl IntoIterator<Item = FooterAction>) -> Self {
+        self.footer = FooterActions::new(actions);
         self
     }
 
@@ -249,6 +258,7 @@ pub type MarkdownEditor<'a> = MarkdownTextArea<'a>;
 pub struct MarkdownEditorTerminalLayout {
     pub body: Rect,
     pub status: Rect,
+    pub footer: Rect,
 }
 
 impl<'a> MarkdownTextArea<'a> {
@@ -329,6 +339,7 @@ impl<'a> MarkdownTextArea<'a> {
         editor.context_menu.clone_from(&config.context_menu);
         editor.actions = config.actions.clone();
         editor.title.clone_from(&config.title);
+        editor.footer.clone_from(&config.footer);
         UiNode::markdown_editor(config.node_id.clone(), editor)
     }
 
@@ -618,15 +629,40 @@ impl<'a> MarkdownTextArea<'a> {
         show_cursor: bool,
         config: &MarkdownEditorConfig,
     ) {
+        let footer_height = u16::from(!config.footer.is_empty() && area.height > 0);
+        let body = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height.saturating_sub(footer_height),
+        );
         self.render_internal(
             frame,
-            area,
+            body,
             show_cursor,
             (config.presentation != MarkdownPresentation::Preview)
                 .then_some(config.command_hint.as_ref())
                 .flatten(),
             config.insert_menu.is_some(),
         );
+        if footer_height > 0 {
+            let footer = Rect::new(
+                area.x,
+                area.bottom().saturating_sub(footer_height),
+                area.width,
+                footer_height,
+            );
+            frame.render_widget(
+                config.footer.widget().styles(
+                    self.style.status,
+                    self.style.status.add_modifier(Modifier::BOLD),
+                    self.style.status,
+                    Style::new().fg(Color::Red),
+                    self.style.status.add_modifier(Modifier::DIM),
+                ),
+                footer,
+            );
+        }
     }
 
     /// Renders the complete terminal component from the exact published spec.
@@ -642,18 +678,28 @@ impl<'a> MarkdownTextArea<'a> {
         show_cursor: bool,
         spec: &MarkdownEditorSpec,
     ) -> MarkdownEditorTerminalLayout {
-        let status_height = u16::from(spec.title.is_some() && area.height > 1);
+        let footer_height = u16::from(!spec.footer.is_empty() && area.height > 0);
+        let status_height =
+            u16::from(spec.title.is_some() && area.height.saturating_sub(footer_height) > 1);
         let body = Rect::new(
             area.x,
             area.y,
             area.width,
-            area.height.saturating_sub(status_height),
+            area.height
+                .saturating_sub(status_height.saturating_add(footer_height)),
         );
         let status = Rect::new(
             area.x,
-            area.bottom().saturating_sub(status_height),
+            area.bottom()
+                .saturating_sub(footer_height.saturating_add(status_height)),
             area.width,
             status_height,
+        );
+        let footer = Rect::new(
+            area.x,
+            area.bottom().saturating_sub(footer_height),
+            area.width,
+            footer_height,
         );
         self.render_internal(
             frame,
@@ -670,7 +716,23 @@ impl<'a> MarkdownTextArea<'a> {
                 status,
             );
         }
-        MarkdownEditorTerminalLayout { body, status }
+        if footer_height > 0 {
+            frame.render_widget(
+                spec.footer.widget().styles(
+                    self.style.status,
+                    self.style.status.add_modifier(Modifier::BOLD),
+                    self.style.status,
+                    Style::new().fg(Color::Red),
+                    self.style.status.add_modifier(Modifier::DIM),
+                ),
+                footer,
+            );
+        }
+        MarkdownEditorTerminalLayout {
+            body,
+            status,
+            footer,
+        }
     }
 
     fn render_internal(

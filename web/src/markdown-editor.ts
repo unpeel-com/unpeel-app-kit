@@ -1,4 +1,5 @@
 import {
+  type FooterActionsSpec,
   type MarkdownEditorNode,
   type MarkdownPresentation,
   type MenuSpec,
@@ -12,6 +13,7 @@ import {
   markdownMenuTriggerForTextInput,
   uiAction,
 } from "./protocol";
+import { handleFooterAccelerator, renderFooterActions } from "./footer";
 import { renderSemanticMenu } from "./menu";
 
 export interface MarkdownEditorRendererOptions {
@@ -75,6 +77,7 @@ export class MarkdownEditorRenderer {
 
   private readonly toolbar: HTMLElement;
   private readonly body: HTMLElement;
+  private readonly footerElement: HTMLElement;
   private readonly textarea: HTMLTextAreaElement;
   private readonly commandHint: HTMLElement;
   private readonly preview: HTMLElement;
@@ -94,6 +97,7 @@ export class MarkdownEditorRenderer {
   private inFlightText: string | undefined;
   private flushTimer: number | undefined;
   private semanticSelectedId: string | undefined;
+  private footer: FooterActionsSpec | undefined;
 
   constructor(
     container: HTMLElement,
@@ -108,6 +112,8 @@ export class MarkdownEditorRenderer {
     this.toolbar.className = "unpeel-markdown-editor__toolbar";
     this.body = document.createElement("div");
     this.body.className = "unpeel-markdown-editor__body";
+    this.footerElement = document.createElement("footer");
+    this.footerElement.className = "unpeel-footer-actions";
     this.textarea = document.createElement("textarea");
     this.textarea.className = "unpeel-markdown-editor__source";
     this.textarea.spellcheck = false;
@@ -157,7 +163,10 @@ export class MarkdownEditorRenderer {
     this.body.style.position = "relative";
     this.body.append(this.textarea, this.commandHint, this.preview);
     this.body.append(this.insertMenu, this.contextMenu);
-    this.element.append(this.toolbar, this.body);
+    this.element.append(this.toolbar, this.body, this.footerElement);
+    this.element.addEventListener("keydown", (event) => {
+      handleFooterAccelerator(event, this.footer, this.onAction);
+    });
     container.replaceChildren(this.element);
 
     this.textarea.addEventListener("keydown", (event) => {
@@ -249,6 +258,7 @@ export class MarkdownEditorRenderer {
       this.authoritativeSelection = editor.selection;
       this.snapshot = snapshot;
       this.editor = editor;
+      this.footer = editor.footer;
       if (editor.contextMenu === undefined) this.contextMenu.hidden = true;
       this.textarea.readOnly = editor.readOnly ?? false;
       this.textarea.placeholder = editor.placeholder ?? "";
@@ -265,6 +275,7 @@ export class MarkdownEditorRenderer {
         );
       }
       this.renderToolbar(editor);
+      renderFooterActions(this.footerElement, editor.footer, this.onAction);
       this.renderPreview(editor.text);
       this.applyPresentation(editor.presentation ?? "source");
       this.renderCommandHint();

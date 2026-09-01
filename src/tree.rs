@@ -16,9 +16,9 @@ use ratatui::widgets::Widget;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, InputField, InputFieldTheme, KitTheme,
-    ListPageBehavior, RowBoundaryBehavior, RowNavigationState, SELECTABLE_LEFT_PADDING,
-    SelectableRow, SemanticMenu, VerticalScrollbar,
+    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, FOOTER_ACTIONS_CAPABILITY, FooterAction,
+    FooterActions, InputField, InputFieldTheme, KitTheme, ListPageBehavior, RowBoundaryBehavior,
+    RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, VerticalScrollbar,
 };
 
 pub const TREE_COMPONENT_CAPABILITY: &str = "tree";
@@ -242,6 +242,8 @@ pub struct Tree {
     pub context_menu: Option<SemanticMenu>,
     #[serde(default)]
     pub actions: TreeActions,
+    #[serde(default, skip_serializing_if = "FooterActions::is_empty")]
+    pub footer: FooterActions,
 }
 
 impl Tree {
@@ -262,6 +264,7 @@ impl Tree {
             primary_action: None,
             context_menu: None,
             actions: TreeActions::drill_down(),
+            footer: FooterActions::default(),
         }
     }
 
@@ -319,6 +322,12 @@ impl Tree {
     }
 
     #[must_use]
+    pub fn footer_actions(mut self, actions: impl IntoIterator<Item = FooterAction>) -> Self {
+        self.footer = FooterActions::new(actions);
+        self
+    }
+
+    #[must_use]
     pub fn required_capabilities(&self) -> Vec<&'static str> {
         let mut capabilities = vec![TREE_COMPONENT_CAPABILITY];
         if self.presentation == TreePresentation::Outline
@@ -345,6 +354,9 @@ impl Tree {
                 crate::MENU_ANCHOR_CAPABILITY,
             ]);
         }
+        if !self.footer.is_empty() {
+            capabilities.push(FOOTER_ACTIONS_CAPABILITY);
+        }
         capabilities
     }
 
@@ -370,6 +382,9 @@ impl Tree {
                 )
             })?;
         }
+        self.footer
+            .validate("tree.footer")
+            .map_err(|error| TreeValidationError::new(error.path, error.message))?;
         validate_identifier(&self.actions.select, "tree.actions.select")?;
         validate_identifier(&self.actions.open, "tree.actions.open")?;
         validate_identifier(&self.actions.parent, "tree.actions.parent")?;
@@ -405,6 +420,14 @@ impl Tree {
             &mut count,
             &mut parent_count,
         )?;
+        for (index, action) in self.footer.actions.iter().enumerate() {
+            if !ids.insert(action.id.clone()) {
+                return Err(TreeValidationError::new(
+                    format!("tree.footer.actions[{index}].id"),
+                    format!("duplicate Tree id {:?}", action.id),
+                ));
+            }
+        }
         if parent_count > 1 {
             return Err(TreeValidationError::new(
                 "tree.items",
@@ -626,6 +649,7 @@ pub struct TreeState {
     navigation: RowNavigationState,
     rows_area: Rect,
     primary_action_area: Rect,
+    footer_area: Rect,
     visible_ids: Vec<String>,
 }
 
@@ -638,6 +662,7 @@ impl Default for TreeState {
             navigation,
             rows_area: Rect::default(),
             primary_action_area: Rect::default(),
+            footer_area: Rect::default(),
             visible_ids: Vec::new(),
         }
     }
@@ -668,6 +693,20 @@ impl TreeState {
     #[must_use]
     pub const fn primary_action_area(&self) -> Rect {
         self.primary_action_area
+    }
+
+    #[must_use]
+    pub fn footer_action_at<'a>(
+        &self,
+        tree: &'a Tree,
+        position: ratatui::layout::Position,
+    ) -> Option<&'a FooterAction> {
+        tree.footer.action_at(position, self.footer_area)
+    }
+
+    #[must_use]
+    pub const fn footer_area(&self) -> Rect {
+        self.footer_area
     }
 
     #[must_use]
@@ -715,6 +754,7 @@ impl Widget for TreeWidget<'_> {
         if area.is_empty() {
             self.state.rows_area = Rect::default();
             self.state.primary_action_area = Rect::default();
+            self.state.footer_area = Rect::default();
             self.state.visible_ids.clear();
             return;
         }
@@ -775,9 +815,10 @@ impl Widget for TreeWidget<'_> {
             .saturating_add(filter_height)
             .saturating_add(location_height);
         let action_height = u16::from(self.tree.primary_action.is_some());
+        let footer_height = u16::from(!self.tree.footer.is_empty());
         let rows_height = area
             .height
-            .saturating_sub(filter_height + location_height + action_height);
+            .saturating_sub(filter_height + location_height + action_height + footer_height);
         let overflow = visible.len() > usize::from(rows_height);
         self.state.rows_area = Rect::new(
             area.x,
@@ -798,7 +839,7 @@ impl Widget for TreeWidget<'_> {
         self.state.primary_action_area = if let Some(action) = &self.tree.primary_action {
             let action_area = Rect::new(
                 area.x,
-                area.bottom().saturating_sub(1),
+                area.bottom().saturating_sub(footer_height + 1),
                 area.width,
                 action_height,
             );
@@ -817,6 +858,28 @@ impl Widget for TreeWidget<'_> {
             )
             .render(action_area, buffer);
             action_area
+        } else {
+            Rect::default()
+        };
+        self.state.footer_area = if footer_height > 0 {
+            let footer_area = Rect::new(
+                area.x,
+                area.bottom().saturating_sub(footer_height),
+                area.width,
+                footer_height,
+            );
+            self.tree
+                .footer
+                .widget()
+                .styles(
+                    self.theme.style,
+                    self.theme.directory.bold(),
+                    self.theme.filter,
+                    Style::new().fg(Color::Red),
+                    self.theme.empty,
+                )
+                .render(footer_area, buffer);
+            footer_area
         } else {
             Rect::default()
         };

@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -52,6 +53,8 @@ pub const INPUT_COMPONENT_CAPABILITY: &str = "input";
 pub const BUTTON_COMPONENT_CAPABILITY: &str = "button";
 /// Renderer capability for Page-level back navigation.
 pub const PAGE_BACK_CAPABILITY: &str = "pageBack";
+/// Renderer capability for an ordered screen-level action footer.
+pub const FOOTER_ACTIONS_CAPABILITY: &str = "footerActions";
 
 const MAX_ITEMS: usize = 100_000;
 const MAX_SHORT_TEXT_BYTES: usize = 4 * 1024;
@@ -106,6 +109,303 @@ impl Button {
 
 const fn is_default_button_role(role: &ButtonRole) -> bool {
     matches!(role, ButtonRole::Default)
+}
+
+/// Visual intent for a screen-level footer action.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FooterActionRole {
+    #[default]
+    Default,
+    Danger,
+}
+
+const fn is_default_footer_action_role(role: &FooterActionRole) -> bool {
+    matches!(role, FooterActionRole::Default)
+}
+
+/// One App-owned action in an ordered screen footer.
+///
+/// `accelerator` uses App Kit's closed one-key grammar: one printable ASCII
+/// character, `ctrl+<alphanumeric>`, or `escape`, `enter`, and `space`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FooterAction {
+    pub id: String,
+    pub label: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accelerator: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_footer_action_role")]
+    pub role: FooterActionRole,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+}
+
+impl FooterAction {
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>, action: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            action: action.into(),
+            accelerator: None,
+            role: FooterActionRole::Default,
+            disabled: false,
+        }
+    }
+
+    #[must_use]
+    pub fn accelerator(mut self, accelerator: impl Into<String>) -> Self {
+        self.accelerator = Some(accelerator.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn role(mut self, role: FooterActionRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    #[must_use]
+    pub const fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    #[must_use]
+    pub fn accelerator_label(&self) -> Option<String> {
+        self.accelerator.as_deref().map(|accelerator| {
+            accelerator.strip_prefix("ctrl+").map_or_else(
+                || match accelerator {
+                    "escape" => "Esc".to_owned(),
+                    "enter" => "Enter".to_owned(),
+                    "space" => "Space".to_owned(),
+                    _ => accelerator.to_owned(),
+                },
+                |key| format!("^{}", key.to_ascii_uppercase()),
+            )
+        })
+    }
+
+    /// Matches one terminal key without introducing an App-side keymap.
+    #[must_use]
+    pub fn matches_key(&self, key: &KeyEvent) -> bool {
+        if self.disabled || key.kind != KeyEventKind::Press {
+            return false;
+        }
+        let Some(accelerator) = self.accelerator.as_deref() else {
+            return false;
+        };
+        let command_modifiers = KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::HYPER
+            | KeyModifiers::META;
+        if let Some(character) = accelerator.strip_prefix("ctrl+") {
+            return key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key
+                    .modifiers
+                    .intersects(command_modifiers - KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char(candidate) if character.chars().next().is_some_and(|expected| candidate.eq_ignore_ascii_case(&expected)));
+        }
+        if key.modifiers.intersects(command_modifiers) {
+            return false;
+        }
+        match accelerator {
+            "escape" => key.code == KeyCode::Esc,
+            "enter" => key.code == KeyCode::Enter,
+            "space" => key.code == KeyCode::Char(' '),
+            character => {
+                matches!(key.code, KeyCode::Char(candidate) if character.starts_with(candidate))
+            }
+        }
+    }
+
+    fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
+        validate_identifier(&self.id, &format!("{path}.id"))?;
+        validate_text(&self.label, MAX_SHORT_TEXT_BYTES, &format!("{path}.label"))?;
+        validate_single_line(&self.label, &format!("{path}.label"))?;
+        validate_identifier(&self.action, &format!("{path}.action"))?;
+        if let Some(accelerator) = &self.accelerator
+            && !valid_footer_accelerator(accelerator)
+        {
+            return Err(ComponentValidationError::new(
+                format!("{path}.accelerator"),
+                "must be one printable ASCII character, ctrl+<alphanumeric>, escape, enter, or space",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn valid_footer_accelerator(accelerator: &str) -> bool {
+    matches!(accelerator, "escape" | "enter" | "space")
+        || accelerator
+            .strip_prefix("ctrl+")
+            .is_some_and(|key| key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric())
+        || (accelerator.len() == 1 && accelerator.as_bytes()[0].is_ascii_graphic())
+}
+
+/// Ordered Page-level controls shared by terminal, Swift, and web.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FooterActions {
+    #[serde(default)]
+    pub actions: Vec<FooterAction>,
+}
+
+impl FooterActions {
+    #[must_use]
+    pub fn new(actions: impl IntoIterator<Item = FooterAction>) -> Self {
+        Self {
+            actions: actions.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.actions.is_empty()
+    }
+
+    #[must_use]
+    pub fn action_for_key(&self, key: &KeyEvent) -> Option<&FooterAction> {
+        self.actions.iter().find(|action| action.matches_key(key))
+    }
+
+    /// Resolves a pointer against the exact compact terminal hint geometry.
+    #[must_use]
+    pub fn action_at(
+        &self,
+        position: ratatui::layout::Position,
+        area: Rect,
+    ) -> Option<&FooterAction> {
+        if !area.contains(position) {
+            return None;
+        }
+        let mut x = area.x.saturating_add(2);
+        for action in &self.actions {
+            let key_width = action
+                .accelerator_label()
+                .as_deref()
+                .map_or(0, UnicodeWidthStr::width);
+            let separator = usize::from(key_width > 0);
+            let width = key_width
+                .saturating_add(separator)
+                .saturating_add(UnicodeWidthStr::width(action.label.as_str()));
+            let end = x.saturating_add(u16::try_from(width).unwrap_or(u16::MAX));
+            if position.x >= x && position.x < end && !action.disabled {
+                return Some(action);
+            }
+            x = end.saturating_add(2);
+        }
+        None
+    }
+
+    pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
+        if self.actions.len() > MAX_ITEMS {
+            return Err(ComponentValidationError::new(
+                path,
+                format!("footer action count exceeds {MAX_ITEMS}"),
+            ));
+        }
+        let mut ids = HashSet::new();
+        let mut accelerators = HashSet::new();
+        for (index, action) in self.actions.iter().enumerate() {
+            action.validate(&format!("{path}.actions[{index}]"))?;
+            if !ids.insert(action.id.as_str()) {
+                return Err(ComponentValidationError::new(
+                    format!("{path}.actions[{index}].id"),
+                    format!("duplicate FooterAction id {:?}", action.id),
+                ));
+            }
+            if let Some(accelerator) = &action.accelerator
+                && !accelerators.insert(accelerator.as_str())
+            {
+                return Err(ComponentValidationError::new(
+                    format!("{path}.actions[{index}].accelerator"),
+                    format!("duplicate footer accelerator {accelerator:?}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn widget(&self) -> FooterActionsWidget<'_> {
+        FooterActionsWidget {
+            footer: self,
+            style: Style::new(),
+            key_style: Style::new().add_modifier(Modifier::BOLD),
+            label_style: Style::new(),
+            danger_style: Style::new(),
+            disabled_style: Style::new().add_modifier(Modifier::DIM),
+        }
+    }
+}
+
+/// Compact key-hint bar used by every Ratatui screen-root interpreter.
+pub struct FooterActionsWidget<'a> {
+    footer: &'a FooterActions,
+    style: Style,
+    key_style: Style,
+    label_style: Style,
+    danger_style: Style,
+    disabled_style: Style,
+}
+
+impl FooterActionsWidget<'_> {
+    #[must_use]
+    pub const fn styles(
+        mut self,
+        style: Style,
+        key_style: Style,
+        label_style: Style,
+        danger_style: Style,
+        disabled_style: Style,
+    ) -> Self {
+        self.style = style;
+        self.key_style = key_style;
+        self.label_style = label_style;
+        self.danger_style = danger_style;
+        self.disabled_style = disabled_style;
+        self
+    }
+}
+
+impl Widget for FooterActionsWidget<'_> {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        if area.is_empty() {
+            return;
+        }
+        buffer.set_style(area, self.style);
+        let mut spans = vec![Span::raw("  ")];
+        for (index, action) in self.footer.actions.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("  "));
+            }
+            let action_style = if action.disabled {
+                self.disabled_style
+            } else if action.role == FooterActionRole::Danger {
+                self.danger_style
+            } else {
+                self.label_style
+            };
+            if let Some(accelerator) = action.accelerator_label() {
+                spans.push(Span::styled(
+                    accelerator,
+                    if action.disabled {
+                        self.disabled_style
+                    } else {
+                        self.key_style
+                    },
+                ));
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(action.label.clone(), action_style));
+        }
+        Line::from(spans).render(area, buffer);
+    }
 }
 
 /// Boolean control embeddable in an explicitly declared row slot.
@@ -1302,6 +1602,8 @@ pub struct Page {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<PageHeaderSlot>,
     pub body: PageBodySlot,
+    #[serde(default, skip_serializing_if = "FooterActions::is_empty")]
+    pub footer: FooterActions,
 }
 
 impl Page {
@@ -1312,6 +1614,7 @@ impl Page {
             back: None,
             header: None,
             body: PageBodySlot::List(list),
+            footer: FooterActions::default(),
         }
     }
 
@@ -1323,6 +1626,7 @@ impl Page {
             back: None,
             header: None,
             body: PageBodySlot::Content(content),
+            footer: FooterActions::default(),
         }
     }
 
@@ -1333,6 +1637,7 @@ impl Page {
             back: None,
             header: None,
             body: PageBodySlot::Sparkline(sparkline),
+            footer: FooterActions::default(),
         }
     }
 
@@ -1343,6 +1648,7 @@ impl Page {
             back: None,
             header: None,
             body: PageBodySlot::BarChart(chart),
+            footer: FooterActions::default(),
         }
     }
 
@@ -1353,6 +1659,7 @@ impl Page {
             back: None,
             header: None,
             body: PageBodySlot::LineChart(chart),
+            footer: FooterActions::default(),
         }
     }
 
@@ -1363,6 +1670,7 @@ impl Page {
             back: None,
             header: None,
             body: PageBodySlot::Gauge(gauge),
+            footer: FooterActions::default(),
         }
     }
 
@@ -1376,6 +1684,13 @@ impl Page {
     #[must_use]
     pub fn back_action(mut self, action: impl Into<String>) -> Self {
         self.back = Some(action.into());
+        self
+    }
+
+    /// Installs the ordered screen-level action slot.
+    #[must_use]
+    pub fn footer_actions(mut self, actions: impl IntoIterator<Item = FooterAction>) -> Self {
+        self.footer = FooterActions::new(actions);
         self
     }
 
@@ -1409,6 +1724,9 @@ impl Page {
     #[must_use]
     pub fn required_capabilities(&self) -> Vec<&'static str> {
         let mut capabilities = vec![PAGE_COMPONENT_CAPABILITY];
+        if !self.footer.is_empty() {
+            capabilities.push(FOOTER_ACTIONS_CAPABILITY);
+        }
         let chart_capability = match &self.body {
             PageBodySlot::Sparkline(_) => Some(crate::SPARKLINE_COMPONENT_CAPABILITY),
             PageBodySlot::BarChart(_) => Some(crate::BAR_CHART_COMPONENT_CAPABILITY),
@@ -1541,6 +1859,7 @@ impl Page {
             header.validate("page.header")?;
         }
         self.body.validate("page.body")?;
+        self.footer.validate("page.footer")?;
 
         let mut ids = HashSet::new();
         if let Some(input) = self.input_spec() {
@@ -1580,6 +1899,13 @@ impl Page {
             PageBodySlot::Gauge(chart) => {
                 register_unique(&mut ids, &chart.id, "page.body.id")?;
             }
+        }
+        for (index, action) in self.footer.actions.iter().enumerate() {
+            register_unique(
+                &mut ids,
+                &action.id,
+                &format!("page.footer.actions[{index}].id"),
+            )?;
         }
         Ok(())
     }
@@ -1632,6 +1958,21 @@ impl Page {
     /// row to one ListItem in v1.
     #[must_use]
     pub fn layout(&self, area: Rect) -> PageLayout {
+        let footer_height = u16::from(!self.footer.is_empty() && area.height > 0);
+        let content_area = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height.saturating_sub(footer_height),
+        );
+        let footer = (footer_height > 0).then(|| {
+            Rect::new(
+                area.x,
+                area.bottom().saturating_sub(footer_height),
+                area.width,
+                footer_height,
+            )
+        });
         let constraints = if self.input_spec().is_some() {
             vec![
                 Constraint::Length(2),
@@ -1645,18 +1986,20 @@ impl Page {
         let slots = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
-            .split(area);
+            .split(content_area);
         if self.input_spec().is_some() {
             PageLayout {
                 title: slots[0],
                 input: Some(slots[1]),
                 list: slots[3],
+                footer,
             }
         } else {
             PageLayout {
                 title: slots[0],
                 input: None,
                 list: slots[1],
+                footer,
             }
         }
     }
@@ -1991,6 +2334,7 @@ pub struct PageLayout {
     pub title: Rect,
     pub input: Option<Rect>,
     pub list: Rect,
+    pub footer: Option<Rect>,
 }
 
 impl PageTheme {
@@ -2724,6 +3068,19 @@ impl Widget for PageWidget<'_> {
                     .render(area, buffer);
             }
         }
+        if let Some(footer) = layout.footer {
+            self.page
+                .footer
+                .widget()
+                .styles(
+                    self.theme.style,
+                    self.theme.accent.add_modifier(Modifier::BOLD),
+                    self.theme.detail,
+                    self.theme.danger,
+                    self.theme.navigation.add_modifier(Modifier::DIM),
+                )
+                .render(footer, buffer);
+        }
     }
 }
 
@@ -2808,6 +3165,7 @@ fn validate_single_line(value: &str, path: &str) -> Result<(), ComponentValidati
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -2900,6 +3258,41 @@ mod tests {
         assert_eq!(rendered[(0, selected_y)].symbol(), " ");
         assert_eq!(rendered[(1, selected_y)].symbol(), " ");
         assert_eq!(rendered[(2, selected_y)].symbol(), "R");
+    }
+
+    #[test]
+    fn footer_actions_share_terminal_paint_keys_and_hit_geometry() {
+        let page = Page::new("Usage", List::new("metrics", Vec::new())).footer_actions([
+            FooterAction::new("open-alerts", "alert", "open-alerts").accelerator("a"),
+            FooterAction::new("refresh", "refresh", "refresh-usage").accelerator("r"),
+        ]);
+        page.validate().unwrap();
+        let mut input = InputField::new("");
+        let mut state = ListState::default();
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(page.widget(&mut input, &mut state), frame.area()))
+            .unwrap();
+
+        let rendered = terminal.backend().buffer();
+        let footer = page.layout(rendered.area).footer.unwrap();
+        let row = (0..rendered.area.width)
+            .map(|x| rendered[(x, footer.y)].symbol())
+            .collect::<String>();
+        assert!(row.starts_with("  a alert  r refresh"));
+        assert_eq!(
+            page.footer
+                .action_for_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+                .map(|action| action.action.as_str()),
+            Some("refresh-usage")
+        );
+        assert_eq!(
+            page.footer
+                .action_at(ratatui::layout::Position::new(14, footer.y), footer)
+                .map(|action| action.id.as_str()),
+            Some("refresh")
+        );
     }
 
     #[test]

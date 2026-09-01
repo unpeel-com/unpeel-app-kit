@@ -6,6 +6,7 @@ import {
   type ContentSelection,
   type ContentSpec,
   type GaugeSpec,
+  type FooterActionsSpec,
   type InputSpec,
   type LineChartSpec,
   type ListItemSlot,
@@ -42,6 +43,7 @@ import {
 } from "./protocol";
 import { listNavigationDecision } from "./list_navigation";
 import { renderSemanticMenu } from "./menu";
+import { handleFooterAccelerator, renderFooterActions } from "./footer";
 
 /** Native DOM interpretation of Page, List, ListItem, Toggle, and Input. */
 export class PageRenderer {
@@ -55,11 +57,15 @@ export class PageRenderer {
   private readonly resizeObservers: ResizeObserver[] = [];
   private contentSelection: ContentSelection | undefined;
   private contentAnchor: string | undefined;
+  private footer: FooterActionsSpec | undefined;
 
   constructor(container: HTMLElement, onAction: (action: UiAction) => void) {
     this.onAction = onAction;
     this.element = document.createElement("section");
     this.element.className = "unpeel-page";
+    this.element.addEventListener("keydown", (event) => {
+      handleFooterAccelerator(event, this.footer, this.onAction);
+    });
     container.replaceChildren(this.element);
   }
 
@@ -77,6 +83,7 @@ export class PageRenderer {
     this.serverInputValues.clear();
     this.selections.clear();
     this.serverSelections.clear();
+    this.footer = undefined;
     this.element.remove();
   }
 
@@ -89,6 +96,7 @@ export class PageRenderer {
       : "";
     this.disconnectResizeObservers();
     this.element.replaceChildren();
+    this.footer = page.footer;
     const pageHeader = document.createElement("header");
     pageHeader.className = "unpeel-page__header";
     if (page.back !== undefined) {
@@ -110,33 +118,36 @@ export class PageRenderer {
 
     if (isContentSpec(page.body)) {
       this.element.append(this.content(page.body));
-      this.restoreFocus(focusedID);
+      this.finishRender(page, focusedID);
       return;
     }
 
     if (isSparklineBodySpec(page.body)) {
       this.element.append(this.sparkline(page.body, "accent", false));
-      this.restoreFocus(focusedID);
+      this.finishRender(page, focusedID);
       return;
     }
     if (isBarChartSpec(page.body)) {
       this.element.append(this.barChart(page.body));
-      this.restoreFocus(focusedID);
+      this.finishRender(page, focusedID);
       return;
     }
     if (isLineChartSpec(page.body)) {
       this.element.append(this.lineChart(page.body));
-      this.restoreFocus(focusedID);
+      this.finishRender(page, focusedID);
       return;
     }
     if (isGaugeSpec(page.body)) {
       this.element.append(this.gauge(page.body));
-      this.restoreFocus(focusedID);
+      this.finishRender(page, focusedID);
       return;
     }
 
     const body = page.body;
-    if (!isListSpec(body)) return;
+    if (!isListSpec(body)) {
+      this.finishRender(page, focusedID);
+      return;
+    }
     const list = document.createElement("ul");
     list.className = "unpeel-list";
     list.id = `unpeel-list-${body.id}`;
@@ -155,6 +166,14 @@ export class PageRenderer {
     }
     this.element.append(list);
     this.configureValueVisibility(list, body);
+    this.finishRender(page, focusedID);
+  }
+
+  private finishRender(page: PageNode, focusedID: string): void {
+    const footer = document.createElement("footer");
+    footer.className = "unpeel-footer-actions";
+    renderFooterActions(footer, page.footer, this.onAction);
+    if (!footer.hidden) this.element.append(footer);
     this.restoreFocus(focusedID);
   }
 

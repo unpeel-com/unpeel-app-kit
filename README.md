@@ -203,9 +203,10 @@ The standalone component layer currently provides:
 | Component | Responsibility |
 | --- | --- |
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
-| `Tree` / `TreeWidget` | Closed drill-down/outline hierarchy with opaque ids, parent/filter semantics, bounded children, and the same `SelectableRow`/scrollbar foundation |
+| `Tree` / `TreeWidget` | Closed drill-down/outline hierarchy with opaque ids, parent/filter semantics, bounded children, an optional screen footer, and the same `SelectableRow`/scrollbar foundation |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
-| `Page` | Top-level standalone Ratatui presentation with a constrained Input header and a closed List, Content, Sparkline, BarChart, LineChart, or Gauge body, plus one optional back action |
+| `Page` | Top-level standalone Ratatui presentation with a constrained Input header, a closed List, Content, Sparkline, BarChart, LineChart, or Gauge body, one optional back action, and an ordered FooterActions slot |
+| `FooterActions` / `FooterActionsWidget` | Ordered App-owned screen commands with optional one-key accelerators, danger/disabled intent, and the classic compact Ratatui bottom hint bar |
 | `Content` / `ContentWidget` | Read-only scrollable styled lines for issue, diff, and document detail screens; keyed range selection and bounded context actions without editor semantics |
 | `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and closed slots including compact Sparkline/Gauge metrics |
 | `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
@@ -255,7 +256,7 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | `UiStateStore` | Atomic `ui-state.json` save/restore envelope for always-on hosted Apps |
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
-| Page semantic projection | Closed List, read-only Content, Sparkline, BarChart, LineChart, or Gauge body; constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
+| Page semantic projection | Closed List, read-only Content, Sparkline, BarChart, LineChart, or Gauge body; constrained master/detail activation/back/footer actions, compact deltas, and native SwiftUI/DOM wrappers |
 | Content semantic projection | Keyed styled lines, wrap/monospace intent, inclusive line-range selection, bounded context menus, and line-splice/selection deltas for native detail views |
 | Sparkline semantic projection | Data-first numeric history rendered through Ratatui Sparkline, Swift Charts, or dependency-free inline SVG with one shared domain contract |
 | BarChart semantic projection | Labeled numeric bars rendered through Ratatui BarChart, Swift Charts, or dependency-free inline SVG; emphasis and captions remain spec-owned |

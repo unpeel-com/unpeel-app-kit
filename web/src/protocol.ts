@@ -26,6 +26,7 @@ export const UI_TOGGLE_CAPABILITY = "toggle" as const;
 export const UI_INPUT_CAPABILITY = "input" as const;
 export const UI_BUTTON_CAPABILITY = "button" as const;
 export const UI_PAGE_BACK_CAPABILITY = "pageBack" as const;
+export const UI_FOOTER_ACTIONS_CAPABILITY = "footerActions" as const;
 export const UI_CONTENT_CAPABILITY = "content" as const;
 export const UI_CONTENT_SELECTION_CAPABILITY = "contentSelection" as const;
 export const UI_SURFACE_CAPABILITY = "surface" as const;
@@ -59,6 +60,7 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_INPUT_CAPABILITY,
   UI_BUTTON_CAPABILITY,
   UI_PAGE_BACK_CAPABILITY,
+  UI_FOOTER_ACTIONS_CAPABILITY,
   UI_CONTENT_CAPABILITY,
   UI_CONTENT_SELECTION_CAPABILITY,
   UI_TREE_CAPABILITY,
@@ -208,6 +210,22 @@ export interface MarkdownEditorNode {
   actions?: MarkdownEditorActions;
   insertMenu?: MenuSpec;
   contextMenu?: MenuSpec;
+  footer?: FooterActionsSpec;
+}
+
+export type FooterActionRole = "default" | "danger";
+
+export interface FooterActionSpec {
+  id: string;
+  label: string;
+  action: string;
+  accelerator?: string;
+  role?: FooterActionRole;
+  disabled?: boolean;
+}
+
+export interface FooterActionsSpec {
+  actions: FooterActionSpec[];
 }
 
 export type MediaFit = "contain" | "cover" | "fill";
@@ -536,6 +554,7 @@ export interface PageNode {
   back?: string;
   header?: InputSpec | UnsupportedComponentSlot;
   body: PageBodySpec;
+  footer?: FooterActionsSpec;
 }
 
 export type TreePresentation = "drillDown" | "outline";
@@ -588,6 +607,7 @@ export interface TreeNode {
   primaryAction?: TreePrimaryAction;
   contextMenu?: MenuSpec;
   actions: TreeActions;
+  footer?: FooterActionsSpec;
 }
 
 /** Opaque root retained only so the session can request terminal fallback. */
@@ -828,7 +848,8 @@ export function isRenderablePageNode(node: UiNode): node is PageNode & {
 } {
   if (!isPageNode(node) || !isListSpec(node.body)) return false;
   if (node.header !== undefined && !isInputSpec(node.header)) return false;
-  return (node.body.contextMenu === undefined || isValidMenu(node.body.contextMenu))
+  return isValidFooterActions(node.footer)
+    && (node.body.contextMenu === undefined || isValidMenu(node.body.contextMenu))
     && node.body.items.every((item) => [item.leading, item.trailing, item.accessory]
       .every((slot) => slot === undefined || isKnownListItemSlot(slot)));
 }
@@ -840,7 +861,8 @@ export function isRenderableContentPageNode(node: UiNode): node is PageNode & {
   return isPageNode(node)
     && isContentSpec(node.body)
     && (node.header === undefined || isInputSpec(node.header))
-    && isValidContent(node.body);
+    && isValidContent(node.body)
+    && isValidFooterActions(node.footer);
 }
 
 export function isRenderableChartPageNode(node: UiNode): node is PageNode & {
@@ -850,7 +872,8 @@ export function isRenderableChartPageNode(node: UiNode): node is PageNode & {
   return isPageNode(node)
     && (isSparklineBodySpec(node.body) || isBarChartSpec(node.body)
       || isLineChartSpec(node.body) || isGaugeSpec(node.body))
-    && (node.header === undefined || isInputSpec(node.header));
+    && (node.header === undefined || isInputSpec(node.header))
+    && isValidFooterActions(node.footer);
 }
 
 /** Capability required for a known root, or undefined for an unknown kind. */
@@ -871,13 +894,17 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
       || (node.contextMenu !== undefined && !isValidMenu(node.contextMenu))
       || (node.commandHint !== undefined
         && (!isValidMarkdownCommandHint(node.commandHint)
-          || node.actions?.openMenu === undefined))) return undefined;
+          || node.actions?.openMenu === undefined))
+      || !isValidFooterActions(node.footer)) return undefined;
     const capabilities: string[] = [UI_MARKDOWN_EDITOR_CAPABILITY];
     if (node.commandHint !== undefined) {
       capabilities.push(UI_MARKDOWN_COMMAND_HINT_CAPABILITY);
     }
     if (node.insertMenu !== undefined || node.contextMenu !== undefined) {
       capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
+    }
+    if ((node.footer?.actions.length ?? 0) > 0) {
+      capabilities.push(UI_FOOTER_ACTIONS_CAPABILITY);
     }
     return capabilities;
   }
@@ -902,6 +929,9 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
     if (node.contextMenu !== undefined) {
       capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
     }
+    if ((node.footer?.actions.length ?? 0) > 0) {
+      capabilities.push(UI_FOOTER_ACTIONS_CAPABILITY);
+    }
     return capabilities;
   }
   if (isRenderableChartPageNode(node)) {
@@ -912,13 +942,20 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
         : isLineChartSpec(node.body)
           ? UI_LINE_CHART_CAPABILITY
           : UI_GAUGE_CAPABILITY;
-    const capabilities: string[] = [UI_PAGE_CAPABILITY, capability];
+    const capabilities: string[] = [UI_PAGE_CAPABILITY];
+    if ((node.footer?.actions.length ?? 0) > 0) {
+      capabilities.push(UI_FOOTER_ACTIONS_CAPABILITY);
+    }
+    capabilities.push(capability);
     if (node.header !== undefined) capabilities.push(UI_INPUT_CAPABILITY);
     if (node.back !== undefined) capabilities.push(UI_PAGE_BACK_CAPABILITY);
     return capabilities;
   }
   if (!isRenderablePageNode(node) && !isRenderableContentPageNode(node)) return undefined;
   const capabilities: string[] = [UI_PAGE_CAPABILITY];
+  if ((node.footer?.actions.length ?? 0) > 0) {
+    capabilities.push(UI_FOOTER_ACTIONS_CAPABILITY);
+  }
   if (isRenderableContentPageNode(node)) {
     capabilities.push(UI_CONTENT_CAPABILITY);
     if (node.header !== undefined) capabilities.push(UI_INPUT_CAPABILITY);
@@ -998,6 +1035,37 @@ function isValidContent(content: ContentSpec): boolean {
   return content.contextMenu === undefined || isValidMenu(content.contextMenu);
 }
 
+export function isValidFooterActions(footer: FooterActionsSpec | undefined): boolean {
+  if (footer === undefined) return true;
+  if (!Array.isArray(footer.actions) || footer.actions.length > 100_000) return false;
+  const ids = new Set<string>();
+  const accelerators = new Set<string>();
+  for (const action of footer.actions) {
+    if (!portableIdentifier.test(action.id) || !portableIdentifier.test(action.action)
+      || new TextEncoder().encode(action.label).length > 4_096
+      || action.label.includes("\n") || action.label.includes("\r")
+      || ids.has(action.id)
+      || (action.role !== undefined && action.role !== "default" && action.role !== "danger")
+      || (action.disabled !== undefined && typeof action.disabled !== "boolean")) return false;
+    ids.add(action.id);
+    if (action.accelerator !== undefined) {
+      if (!isFooterAccelerator(action.accelerator) || accelerators.has(action.accelerator)) {
+        return false;
+      }
+      accelerators.add(action.accelerator);
+    }
+  }
+  return true;
+}
+
+const portableIdentifier = /^[A-Za-z0-9._:/-]{1,256}$/u;
+
+function isFooterAccelerator(value: string): boolean {
+  return value === "escape" || value === "enter" || value === "space"
+    || /^ctrl\+[A-Za-z0-9]$/u.test(value)
+    || /^[\x21-\x7e]$/u.test(value);
+}
+
 export function flattenTreeItems(items: readonly TreeItem[]): TreeItem[] {
   return items.flatMap((item) => [item, ...flattenTreeItems(item.children ?? [])]);
 }
@@ -1037,11 +1105,15 @@ function isValidTree(node: TreeNode): boolean {
     }
     return true;
   };
-  return visit(node.items, 0) && parents <= 1
+  const validItems = visit(node.items, 0);
+  const footerIDs = new Set(node.footer?.actions.map((action) => action.id) ?? []);
+  return validItems && parents <= 1
     && (node.selectedId === undefined || ids.has(node.selectedId))
     && ((node.presentation ?? "drillDown") !== "outline"
       || node.actions.setExpanded !== undefined)
-    && (node.contextMenu === undefined || isValidMenu(node.contextMenu));
+    && (node.contextMenu === undefined || isValidMenu(node.contextMenu))
+    && isValidFooterActions(node.footer)
+    && [...footerIDs].every((id) => !ids.has(id));
 }
 
 /** Filesystem paths must be translated by the Host before entering a browser. */
@@ -1119,6 +1191,7 @@ export type UiDeltaOperation =
     caption?: string | null;
     accessibilityText: string;
   }
+  | { op: "footerSetActions"; nodeId: string; actions: FooterActionSpec[] }
   | { op: "inputSetValue"; nodeId: string; value: string }
   | { op: "listInsertItem"; listId: string; index: number; item: ListItemSpec }
   | { op: "listSetSelection"; listId: string; selectedId: string | null }
@@ -1615,6 +1688,15 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       body: { ...page.body, items },
     };
   }
+  if (operation.op === "footerSetActions") {
+    if (root.id !== operation.nodeId || !isValidFooterActions({ actions: operation.actions })) {
+      throw new Error("Delta targets an unavailable or invalid FooterActions root");
+    }
+    if (!isPageNode(root) && !isTreeNode(root) && !isMarkdownEditorNode(root)) {
+      throw new Error("Delta root has no FooterActions slot");
+    }
+    return { ...root, footer: { actions: operation.actions } };
+  }
   if (operation.op === "inputSetValue") {
     const page = requireRenderablePage(root);
     if (page.header === undefined || page.header.id !== operation.nodeId) {
@@ -2022,6 +2104,49 @@ function validateNode(value: unknown, path: string): void {
   }
   if (root.insertMenu !== undefined) validateMenuSpec(root.insertMenu, `${path}.insertMenu`);
   if (root.contextMenu !== undefined) validateMenuSpec(root.contextMenu, `${path}.contextMenu`);
+  if (root.footer !== undefined) validateFooterActions(root.footer, `${path}.footer`);
+}
+
+function validateFooterActions(
+  value: unknown,
+  path: string,
+  register: (value: unknown, valuePath: string) => void = requireIdentifier,
+): void {
+  const footer = record(value, path);
+  if (!Array.isArray(footer.actions) || footer.actions.length > 100_000) {
+    throw new Error(`${path}.actions must contain at most 100000 entries`);
+  }
+  const ids = new Set<string>();
+  const accelerators = new Set<string>();
+  for (const [index, value] of footer.actions.entries()) {
+    const actionPath = `${path}.actions[${index}]`;
+    const action = record(value, actionPath);
+    register(action.id, `${actionPath}.id`);
+    if (ids.has(action.id as string)) throw new Error(`${actionPath}.id is duplicated`);
+    ids.add(action.id as string);
+    requireString(action.label, `${actionPath}.label`, true);
+    requireSingleLine(action.label, `${actionPath}.label`);
+    if (new TextEncoder().encode(action.label as string).length > 4_096) {
+      throw new Error(`${actionPath}.label must contain at most 4096 UTF-8 bytes`);
+    }
+    requireIdentifier(action.action, `${actionPath}.action`);
+    if (action.accelerator !== undefined) {
+      requireString(action.accelerator, `${actionPath}.accelerator`);
+      if (!isFooterAccelerator(action.accelerator as string)) {
+        throw new Error(`${actionPath}.accelerator is unsupported`);
+      }
+      if (accelerators.has(action.accelerator as string)) {
+        throw new Error(`${actionPath}.accelerator is duplicated`);
+      }
+      accelerators.add(action.accelerator as string);
+    }
+    if (action.role !== undefined && !["default", "danger"].includes(String(action.role))) {
+      throw new Error(`${actionPath}.role is unsupported`);
+    }
+    if (action.disabled !== undefined && typeof action.disabled !== "boolean") {
+      throw new Error(`${actionPath}.disabled must be boolean`);
+    }
+  }
 }
 
 function validateMenuSpec(value: unknown, path: string): void {
@@ -2146,13 +2271,20 @@ function validateTreeNode(root: Record<string, unknown>, path: string): void {
     }
   };
   visit(root.items, 0, `${path}.items`);
-  if (parentCount > 1) throw new Error(`${path}.items accepts at most one parent entry`);
   if (root.selectedId !== undefined) {
     requireIdentifier(root.selectedId, `${path}.selectedId`);
     if (!ids.has(root.selectedId as string)) {
       throw new Error(`${path}.selectedId must identify one Tree entry`);
     }
   }
+  if (root.footer !== undefined) {
+    validateFooterActions(root.footer, `${path}.footer`, (value, valuePath) => {
+      requireIdentifier(value, valuePath);
+      if (ids.has(value as string)) throw new Error(`${valuePath} duplicates a component id`);
+      ids.add(value as string);
+    });
+  }
+  if (parentCount > 1) throw new Error(`${path}.items accepts at most one parent entry`);
   if (root.emptyMessage !== undefined) {
     requireString(root.emptyMessage, `${path}.emptyMessage`, true);
   }
@@ -2211,6 +2343,9 @@ function validatePageNode(root: Record<string, unknown>, path: string): void {
     if (ids.has(value as string)) throw new Error(`${valuePath} duplicates a component id`);
     ids.add(value as string);
   };
+  if (root.footer !== undefined) {
+    validateFooterActions(root.footer, `${path}.footer`, register);
+  }
   if (root.header !== undefined) {
     const header = record(root.header, `${path}.header`);
     requireIdentifier(header.type, `${path}.header.type`);
@@ -2959,6 +3094,10 @@ function validateDeltaOperation(value: unknown, path: string): void {
         caption: operation.caption ?? undefined,
         accessibilityText: operation.accessibilityText,
       }, path, requireIdentifier);
+      return;
+    case "footerSetActions":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      validateFooterActions({ actions: operation.actions }, path);
       return;
     case "inputSetValue":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);

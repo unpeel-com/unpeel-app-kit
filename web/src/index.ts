@@ -3,6 +3,7 @@ export * from "./list_navigation";
 export * from "./markdown-editor";
 export * from "./media";
 export * from "./menu";
+export * from "./footer";
 export * from "./page";
 export * from "./tree";
 export * from "./surface";

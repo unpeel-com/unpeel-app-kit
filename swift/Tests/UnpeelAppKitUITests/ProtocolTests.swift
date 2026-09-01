@@ -432,11 +432,15 @@ func sharedProtocolFixturesDecode() throws {
     }
     #expect(quotaGauge.ratio == 0.77)
     #expect(quotaGauge.valueLabel == "77% left · Resets in 5d 14h")
+    #expect(quotaPage.footer.actions[0].accelerator == "a")
+    #expect(quotaPage.footer.actions[1].label == "refresh")
     #expect(quotaPage.requiredCapabilities == [
-        "page", "list", "listItem", "listItemPresentation", "gauge",
+        "page", "footerActions", "list", "listItem", "listItemPresentation", "gauge",
     ])
     #expect(updatedQuotaGauge.ratio == 0.61)
     #expect(updatedQuotaGauge.valueLabel == "61% left · Resets in 4d")
+    #expect(updatedQuotaPage.footer.actions[1].label == "refreshing…")
+    #expect(updatedQuotaPage.footer.actions[1].disabled)
 }
 
 @Test

@@ -1,4 +1,5 @@
 import {
+  type FooterActionsSpec,
   type TreeItem,
   type TreeNode,
   type UiAction,
@@ -7,6 +8,7 @@ import {
   uiAction,
 } from "./protocol";
 import { renderSemanticMenu } from "./menu";
+import { handleFooterAccelerator, renderFooterActions } from "./footer";
 
 interface VisibleItem {
   item: TreeItem;
@@ -21,11 +23,15 @@ export class TreeRenderer {
   private selectedId: string | undefined;
   private filterDraft = "";
   private clickTimer: ReturnType<typeof setTimeout> | undefined;
+  private footer: FooterActionsSpec | undefined;
 
   constructor(container: HTMLElement, onAction: (action: UiAction) => void) {
     this.onAction = onAction;
     this.element = document.createElement("section");
     this.element.className = "unpeel-tree";
+    this.element.addEventListener("keydown", (event) => {
+      handleFooterAccelerator(event, this.footer, this.onAction);
+    });
     container.replaceChildren(this.element);
   }
 
@@ -38,6 +44,7 @@ export class TreeRenderer {
 
   destroy(): void {
     if (this.clickTimer !== undefined) clearTimeout(this.clickTimer);
+    this.footer = undefined;
     this.element.remove();
   }
 
@@ -46,6 +53,7 @@ export class TreeRenderer {
       ? document.activeElement.id
       : "";
     this.element.replaceChildren();
+    this.footer = tree.footer;
     this.selectedId = tree.selectedId ?? this.selectedId;
 
     let filterInput: HTMLInputElement | undefined;
@@ -96,6 +104,7 @@ export class TreeRenderer {
       empty.className = "unpeel-tree__empty";
       empty.textContent = tree.emptyMessage ?? "No items";
       this.element.append(empty);
+      this.finishRender(tree, focused);
       return;
     }
 
@@ -122,9 +131,15 @@ export class TreeRenderer {
       }
     });
 
-    if (focused !== "") {
-      document.getElementById(focused)?.focus();
-    }
+    this.finishRender(tree, focused);
+  }
+
+  private finishRender(tree: TreeNode, focused: string): void {
+    const footer = document.createElement("footer");
+    footer.className = "unpeel-footer-actions";
+    renderFooterActions(footer, tree.footer, this.onAction);
+    if (!footer.hidden) this.element.append(footer);
+    if (focused !== "") document.getElementById(focused)?.focus();
   }
 
   private item(tree: TreeNode, row: VisibleItem): HTMLLIElement {

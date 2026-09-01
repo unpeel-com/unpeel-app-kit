@@ -168,11 +168,13 @@ extension HostedAppSession {
             }
             return (2, UIAction(nodeID: snapshot.root.id, action: back, kind: .cancel))
         case 2:
-            guard page.title == "Usage", case .list(let list) = page.body,
-                let alerts = list.items.first(where: { $0.label == "Alerts" }),
-                let activate = alerts.activate
+            guard page.title == "Usage",
+                let alerts = page.footer.actions.first(where: { $0.id == "open-alerts" })
             else { return nil }
-            return (3, UIAction(nodeID: alerts.id, action: activate, kind: .activate))
+            return (
+                3,
+                UIAction(nodeID: alerts.id, action: alerts.action, kind: .activate)
+            )
         default:
             return nil
         }
@@ -210,10 +212,12 @@ extension HostedAppSession {
                 )
             )
         case (1, .tree(let tree)):
-            guard let primary = tree.primaryAction else { return nil }
+            guard let create = tree.footer.actions.first(where: { $0.id == "new-note" }) else {
+                return nil
+            }
             return (
                 2,
-                UIAction(nodeID: primary.id, action: primary.action, kind: .activate)
+                UIAction(nodeID: create.id, action: create.action, kind: .activate)
             )
         case (2, .page(let page)) where page.title == "New note":
             guard let back = page.back else { return nil }

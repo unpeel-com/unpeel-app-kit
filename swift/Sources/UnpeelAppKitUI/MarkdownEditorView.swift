@@ -49,6 +49,7 @@ public struct MarkdownEditorView: View {
                 toolbar(editor)
                 Divider()
                 editorContent(editor)
+                FooterActionsView(footer: editor.footer, onAction: onAction)
             }
         case .canvasPage, .media, .menu, .page, .surface, .tree, .unsupported:
             EmptyView()

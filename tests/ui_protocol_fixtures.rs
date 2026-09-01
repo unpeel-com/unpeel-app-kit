@@ -560,9 +560,18 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     };
     assert_eq!(gauge.ratio.value(), 0.77);
     assert_eq!(gauge.value_label(), "77% left · Resets in 5d 14h");
+    assert_eq!(page.footer.actions[0].accelerator.as_deref(), Some("a"));
+    assert_eq!(page.footer.actions[1].label, "refresh");
     assert_eq!(
         quota_snapshot.root.required_capabilities(),
-        vec!["page", "list", "listItem", "listItemPresentation", "gauge"]
+        vec![
+            "page",
+            "footerActions",
+            "list",
+            "listItem",
+            "listItemPresentation",
+            "gauge"
+        ]
     );
     let UiMessage::Delta(quota_delta) = &messages[43] else {
         panic!("List Gauge fixture must have a compact delta");
@@ -571,7 +580,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     let UiComponent::Page(page) = updated.root.element else {
         panic!("List Gauge delta must preserve Page");
     };
-    let PageBodySlot::List(list) = page.body else {
+    let PageBodySlot::List(list) = &page.body else {
         panic!("List Gauge delta must preserve List");
     };
     let Some(ListItemSlot::Gauge(gauge)) = list.items[0].trailing.as_ref() else {
@@ -579,4 +588,6 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     };
     assert_eq!(gauge.ratio.value(), 0.61);
     assert_eq!(gauge.value_label(), "61% left · Resets in 4d");
+    assert_eq!(page.footer.actions[1].label, "refreshing…");
+    assert!(page.footer.actions[1].disabled);
 }

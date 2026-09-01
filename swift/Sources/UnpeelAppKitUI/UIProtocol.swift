@@ -29,6 +29,7 @@ public enum UnpeelUIProtocol {
     public static let inputCapability = "input"
     public static let buttonCapability = "button"
     public static let pageBackCapability = "pageBack"
+    public static let footerActionsCapability = "footerActions"
     public static let contentCapability = "content"
     public static let contentSelectionCapability = "contentSelection"
     public static let surfaceCapability = "surface"
@@ -64,6 +65,7 @@ public enum UnpeelUIProtocol {
         inputCapability,
         buttonCapability,
         pageBackCapability,
+        footerActionsCapability,
         contentCapability,
         contentSelectionCapability,
         treeCapability,
@@ -563,6 +565,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
     public let actions: MarkdownEditorActions
     public let insertMenu: UIMenuSpec?
     public let contextMenu: UIMenuSpec?
+    public let footer: UIFooterActionsSpec
 
     public init(
         text: String,
@@ -575,7 +578,8 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         title: String? = nil,
         actions: MarkdownEditorActions = .init(),
         insertMenu: UIMenuSpec? = nil,
-        contextMenu: UIMenuSpec? = nil
+        contextMenu: UIMenuSpec? = nil,
+        footer: UIFooterActionsSpec = .init()
     ) {
         self.text = text
         self.selection = selection
@@ -588,6 +592,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         self.actions = actions
         self.insertMenu = insertMenu
         self.contextMenu = contextMenu
+        self.footer = footer
     }
 
     enum CodingKeys: String, CodingKey {
@@ -602,6 +607,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         case actions
         case insertMenu
         case contextMenu
+        case footer
     }
 
     public init(from decoder: Decoder) throws {
@@ -626,6 +632,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         ) ?? .init()
         insertMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .insertMenu)
         contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
+        footer = try container.decodeIfPresent(UIFooterActionsSpec.self, forKey: .footer) ?? .init()
     }
 
     /// Pure interpretation of the closed Rust visibility rule.
@@ -1224,6 +1231,102 @@ public struct UIButtonSpec: Codable, Equatable, Hashable, Identifiable, Sendable
         action = try container.decode(String.self, forKey: .action)
         role = try container.decodeIfPresent(UIButtonRole.self, forKey: .role) ?? .standard
     }
+}
+
+/// Closed visual intent for one screen-level action.
+public enum UIFooterActionRole: String, Codable, Equatable, Hashable, Sendable {
+    case standard = "default"
+    case danger
+}
+
+/// One App-owned action in an ordered screen footer.
+public struct UIFooterActionSpec: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let label: String
+    public let action: String
+    public let accelerator: String?
+    public let role: UIFooterActionRole
+    public let disabled: Bool
+
+    public init(
+        id: String,
+        label: String,
+        action: String,
+        accelerator: String? = nil,
+        role: UIFooterActionRole = .standard,
+        disabled: Bool = false
+    ) {
+        self.id = id
+        self.label = label
+        self.action = action
+        self.accelerator = accelerator
+        self.role = role
+        self.disabled = disabled
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, action, accelerator, role, disabled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        action = try container.decode(String.self, forKey: .action)
+        accelerator = try container.decodeIfPresent(String.self, forKey: .accelerator)
+        role = try container.decodeIfPresent(UIFooterActionRole.self, forKey: .role) ?? .standard
+        disabled = try container.decodeIfPresent(Bool.self, forKey: .disabled) ?? false
+    }
+}
+
+/// Ordered action slot consumed identically by all screen-root renderers.
+public struct UIFooterActionsSpec: Codable, Equatable, Hashable, Sendable {
+    public var actions: [UIFooterActionSpec]
+
+    public init(actions: [UIFooterActionSpec] = []) {
+        self.actions = actions
+    }
+
+    public var isValid: Bool {
+        guard actions.count <= 100_000 else { return false }
+        var ids = Set<String>()
+        var accelerators = Set<String>()
+        for action in actions {
+            guard isPortableUIIdentifier(action.id),
+                  isPortableUIIdentifier(action.action),
+                  action.label.utf8.count <= 4 * 1024,
+                  !action.label.contains("\n"), !action.label.contains("\r"),
+                  ids.insert(action.id).inserted
+            else { return false }
+            if let accelerator = action.accelerator {
+                guard isFooterAccelerator(accelerator),
+                      accelerators.insert(accelerator).inserted
+                else { return false }
+            }
+        }
+        return true
+    }
+}
+
+private func isPortableUIIdentifier(_ value: String) -> Bool {
+    let punctuation = Set("._:/-".utf8)
+    return !value.isEmpty && value.utf8.count <= 256 && value.utf8.allSatisfy {
+        (48...57).contains($0)
+            || (65...90).contains($0)
+            || (97...122).contains($0)
+            || punctuation.contains($0)
+    }
+}
+
+private func isFooterAccelerator(_ value: String) -> Bool {
+    if ["escape", "enter", "space"].contains(value) { return true }
+    if value.hasPrefix("ctrl+") {
+        let key = value.dropFirst(5)
+        return key.utf8.count == 1 && key.utf8.first.map {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
+        } == true
+    }
+    return value.utf8.count == 1 && value.utf8.first.map { (33...126).contains($0) } == true
 }
 
 /// One fixed Surface slot inside a CanvasPage. Unknown fields remain ignored
@@ -2539,21 +2642,39 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
     public let back: String?
     public var header: UIPageHeaderSlot?
     public var body: UIPageBodySlot
+    public var footer: UIFooterActionsSpec
 
     public init(
         title: String,
         back: String? = nil,
         header: UIPageHeaderSlot? = nil,
-        body: UIPageBodySlot
+        body: UIPageBodySlot,
+        footer: UIFooterActionsSpec = .init()
     ) {
         self.title = title
         self.back = back
         self.header = header
         self.body = body
+        self.footer = footer
+    }
+
+    enum CodingKeys: String, CodingKey { case title, back, header, body, footer }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decode(String.self, forKey: .title)
+        back = try container.decodeIfPresent(String.self, forKey: .back)
+        header = try container.decodeIfPresent(UIPageHeaderSlot.self, forKey: .header)
+        body = try container.decode(UIPageBodySlot.self, forKey: .body)
+        footer = try container.decodeIfPresent(UIFooterActionsSpec.self, forKey: .footer) ?? .init()
     }
 
     public var requiredCapabilities: [String]? {
+        guard footer.isValid else { return nil }
         var capabilities = [UnpeelUIProtocol.pageCapability]
+        if !footer.actions.isEmpty {
+            capabilities.append(UnpeelUIProtocol.footerActionsCapability)
+        }
         let chartCapability: String? = switch body {
         case .sparkline: UnpeelUIProtocol.sparklineCapability
         case .barChart: UnpeelUIProtocol.barChartCapability
@@ -2786,6 +2907,7 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
     public let primaryAction: UIButtonSpec?
     public let contextMenu: UIMenuSpec?
     public let actions: UITreeActions
+    public var footer: UIFooterActionsSpec
 
     public init(
         label: String,
@@ -2797,7 +2919,8 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
         emptyMessage: String? = nil,
         primaryAction: UIButtonSpec? = nil,
         contextMenu: UIMenuSpec? = nil,
-        actions: UITreeActions = .init()
+        actions: UITreeActions = .init(),
+        footer: UIFooterActionsSpec = .init()
     ) {
         self.label = label
         self.location = location
@@ -2809,11 +2932,12 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
         self.primaryAction = primaryAction
         self.contextMenu = contextMenu
         self.actions = actions
+        self.footer = footer
     }
 
     enum CodingKeys: String, CodingKey {
         case label, location, presentation, filter, items, selectedID = "selectedId"
-        case emptyMessage, primaryAction, contextMenu, actions
+        case emptyMessage, primaryAction, contextMenu, actions, footer
     }
 
     public init(from decoder: Decoder) throws {
@@ -2831,6 +2955,7 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
         primaryAction = try container.decodeIfPresent(UIButtonSpec.self, forKey: .primaryAction)
         contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
         actions = try container.decodeIfPresent(UITreeActions.self, forKey: .actions) ?? .init()
+        footer = try container.decodeIfPresent(UIFooterActionsSpec.self, forKey: .footer) ?? .init()
     }
 
     public var requiredCapabilities: [String]? {
@@ -2845,7 +2970,9 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
             parentCount: &parentCount
         ), parentCount <= 1,
               selectedID.map(ids.contains) ?? true,
-              presentation != .outline || actions.setExpanded != nil
+              presentation != .outline || actions.setExpanded != nil,
+              footer.isValid,
+              footer.actions.allSatisfy({ !ids.contains($0.id) })
         else { return nil }
         var capabilities = [UnpeelUIProtocol.treeCapability]
         if presentation == .outline || items.contains(where: { !$0.children.isEmpty }) {
@@ -2859,6 +2986,9 @@ public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
                 UnpeelUIProtocol.menuCapability,
                 UnpeelUIProtocol.menuAnchorCapability,
             ]
+        }
+        if !footer.actions.isEmpty {
+            capabilities.append(UnpeelUIProtocol.footerActionsCapability)
         }
         return capabilities
     }
@@ -2941,7 +3071,8 @@ public enum UIComponent: Equatable, Sendable {
             guard editor.insertMenu?.requiredCapabilities != nil || editor.insertMenu == nil,
                   editor.contextMenu?.requiredCapabilities != nil || editor.contextMenu == nil,
                   editor.commandHint?.isValid ?? true,
-                  editor.commandHint == nil || editor.actions.openMenu != nil
+                  editor.commandHint == nil || editor.actions.openMenu != nil,
+                  editor.footer.isValid
             else { return nil }
             var capabilities = [UnpeelUIProtocol.markdownEditorCapability]
             if editor.commandHint != nil {
@@ -2952,6 +3083,9 @@ public enum UIComponent: Equatable, Sendable {
                     UnpeelUIProtocol.menuCapability,
                     UnpeelUIProtocol.menuAnchorCapability,
                 ]
+            }
+            if !editor.footer.actions.isEmpty {
+                capabilities.append(UnpeelUIProtocol.footerActionsCapability)
             }
             return capabilities
         case .media:

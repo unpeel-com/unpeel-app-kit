@@ -388,8 +388,10 @@ describe("shared protocol", () => {
     }
     expect(quotaSlot.ratio).toBe(0.77);
     expect(gaugeValueLabel(quotaSlot)).toBe("77% left · Resets in 5d 14h");
+    expect(quotaSnapshot.root.footer?.actions[0]?.accelerator).toBe("a");
+    expect(quotaSnapshot.root.footer?.actions[1]?.label).toBe("refresh");
     expect(uiNodeCapabilities(quotaSnapshot.root)).toEqual([
-      "page", "list", "listItem", "listItemPresentation", "gauge",
+      "page", "footerActions", "list", "listItem", "listItemPresentation", "gauge",
     ]);
     const updatedQuota = applyUiDelta(quotaSnapshot, messages[43] as UiDelta);
     if (!isRenderablePageNode(updatedQuota.root)) throw new Error("expected updated List Gauge");
@@ -399,6 +401,8 @@ describe("shared protocol", () => {
     }
     expect(updatedQuotaSlot.ratio).toBe(0.61);
     expect(gaugeValueLabel(updatedQuotaSlot)).toBe("61% left · Resets in 4d");
+    expect(updatedQuota.root.footer?.actions[1]?.label).toBe("refreshing…");
+    expect(updatedQuota.root.footer?.actions[1]?.disabled).toBe(true);
   });
 
   test("uses one role-aware Enter and Space decision table", () => {

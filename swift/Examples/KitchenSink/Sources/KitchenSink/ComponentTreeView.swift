@@ -32,7 +32,7 @@ private struct ComponentTreeNode: Identifiable {
             let priority = [
                 "type", "id", "title", "label", "value", "done", "presentation",
                 "readOnly", "dirty", "header", "body", "items", "leading", "trailing",
-                "accessory", "bars", "series", "points", "ratio", "accessibilityText",
+                "accessory", "footer", "bars", "series", "points", "ratio", "accessibilityText",
                 "actionRole", "actions", "delete", "activate", "setValue", "submit",
             ]
             let keys = dictionary.keys.sorted { lhs, rhs in

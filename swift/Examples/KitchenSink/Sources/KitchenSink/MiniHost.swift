@@ -646,7 +646,13 @@ final class HostedAppSession: ObservableObject, Identifiable {
             }
             action = UIAction(nodeID: item.id, action: item.action, kind: .activate)
         case let .tree(tree):
-            if let primary = tree.primaryAction {
+            if let footer = tree.footer.actions.first(where: { !$0.disabled }) {
+                action = UIAction(
+                    nodeID: footer.id,
+                    action: footer.action,
+                    kind: .activate
+                )
+            } else if let primary = tree.primaryAction {
                 action = UIAction(
                     nodeID: primary.id,
                     action: primary.action,

@@ -203,6 +203,36 @@
         "openMenu": { "$ref": "#/$defs/identifier" }
       }
     },
+    "footerAction": {
+      "description": "One App-owned screen action with an optional single physical-key accelerator.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "label", "action"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+        "action": { "$ref": "#/$defs/identifier" },
+        "accelerator": {
+          "type": "string",
+          "pattern": "^(?:[!-~]|ctrl\\+[A-Za-z0-9]|escape|enter|space)$"
+        },
+        "role": { "enum": ["default", "danger"], "default": "default" },
+        "disabled": { "type": "boolean", "default": false }
+      }
+    },
+    "footerActions": {
+      "description": "Ordered screen-level action slot shared by Page, Tree, and MarkdownEditor roots.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["actions"],
+      "properties": {
+        "actions": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": { "$ref": "#/$defs/footerAction" }
+        }
+      }
+    },
     "menuItem": {
       "type": "object",
       "additionalProperties": true,
@@ -268,7 +298,8 @@
         "title": { "type": "string" },
         "actions": { "$ref": "#/$defs/markdownActions" },
         "insertMenu": { "$ref": "#/$defs/semanticMenu" },
-        "contextMenu": { "$ref": "#/$defs/semanticMenu" }
+        "contextMenu": { "$ref": "#/$defs/semanticMenu" },
+        "footer": { "$ref": "#/$defs/footerActions" }
       }
     },
     "markdownCommandHint": {
@@ -900,7 +931,8 @@
             { "$ref": "#/$defs/gauge" },
             { "$ref": "#/$defs/unsupportedBodySlot" }
           ]
-        }
+        },
+        "footer": { "$ref": "#/$defs/footerActions" }
       }
     },
     "treeFilter": {
@@ -978,7 +1010,8 @@
         "emptyMessage": { "type": "string", "maxLength": 16384 },
         "primaryAction": { "$ref": "#/$defs/treePrimaryAction" },
         "contextMenu": { "$ref": "#/$defs/semanticMenu" },
-        "actions": { "$ref": "#/$defs/treeActions" }
+        "actions": { "$ref": "#/$defs/treeActions" },
+        "footer": { "$ref": "#/$defs/footerActions" }
       }
     },
     "unsupportedComponent": {
@@ -1296,6 +1329,20 @@
               ]
             },
             "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "nodeId", "actions"],
+          "properties": {
+            "op": { "const": "footerSetActions" },
+            "nodeId": { "$ref": "#/$defs/identifier" },
+            "actions": {
+              "type": "array",
+              "maxItems": 100000,
+              "items": { "$ref": "#/$defs/footerAction" }
+            }
           }
         },
         {

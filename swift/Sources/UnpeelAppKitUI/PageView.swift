@@ -175,6 +175,7 @@ private struct PageContent: View {
                 }
                 .padding()
             }
+            FooterActionsView(footer: page.footer, onAction: onAction)
         }
     }
 

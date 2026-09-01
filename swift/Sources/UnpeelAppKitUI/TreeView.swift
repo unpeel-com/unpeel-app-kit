@@ -132,6 +132,7 @@ private struct TreeContent: View {
                     }
                 }
             }
+            FooterActionsView(footer: tree.footer, onAction: onAction)
         }
     }
 

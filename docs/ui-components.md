@@ -545,9 +545,10 @@ reducer:
 ```text
 Page "Todos"
 ├─ header: Input "New todo" → submit("add-todo", text)
-└─ body: List "todos"
+├─ body: List "todos"
    └─ ListItem { id, label, done, delete }
       └─ trailing: Toggle → change("set-done", bool)
+└─ footer: ordered screen actions (optional)
 ```
 
 The standalone presentation uses App Kit's `ListWidget`, built from
@@ -626,10 +627,51 @@ published. A relaunch loads and validates this file before its first snapshot.
 Hosted production Apps may place the same model inside `UiStateStore`; the
 renderer is never the durable owner in either form.
 
-Page adds six compact operations: `toggleSetValue`, `checkmarkSetValue`,
-`inputSetValue`, `listInsertItem`, `listRemoveItem`, and `listSetSelection`. A
-Toggle update also updates its row's denormalized `done` value, preserving one
-semantic invariant across all three renderers.
+Page adds seven compact operations: `toggleSetValue`, `checkmarkSetValue`,
+`inputSetValue`, `listInsertItem`, `listRemoveItem`, `listSetSelection`, and
+`footerSetActions`. A Toggle update also updates its row's denormalized `done`
+value, preserving one semantic invariant across all three renderers. The footer
+operation replaces its ordered slot atomically when an action becomes disabled
+or its App-authored label changes.
+
+### Footer actions slot
+
+Screen-level commands are not List rows. `Page.footer` is one constrained,
+ordered `FooterActions` slot. Each entry carries exactly `id`, `label`,
+`action`, an optional accelerator, optional `default`/`danger` role, and an
+optional disabled state. The same named slot is available on `Tree` and
+`MarkdownEditor`, because those closed root components can themselves own a
+screen; it is never an arbitrary child container.
+
+The accelerator grammar is deliberately small: one printable ASCII key,
+`ctrl+` plus one alphanumeric key, or `escape`, `enter`, and `space`. Rust owns
+matching and disabled-state behavior. An activation always emits
+`activate(nodeId: footer-action.id, action: footer-action.action, value: none)`.
+Apps do not keep a second shortcut table.
+
+The three interpretations are peers:
+
+- Ratatui reserves one bottom row and draws the classic compact key-hint bar,
+  such as `a alert  r refresh`; both key and pointer hit testing use that exact
+  `FooterActions` value and geometry.
+- SwiftUI renders the ordered entries as bottom-toolbar Buttons, preserving
+  danger and disabled intent and attaching the declared shortcut where macOS
+  can honor it.
+- Web renders an accessible footer of ordered Buttons and resolves the same
+  accelerator grammar without stealing printable keys from an active editor.
+
+Usage publishes Alerts and Refresh here instead of adding command-shaped List
+rows. Diffs publishes Refresh on both list and detail Pages; GitHub Issues
+publishes Refresh/Reload according to its current Page; Filetree publishes
+Refresh and Show/Hide Hidden on its Tree; Markdown publishes picker and editor
+commands on their respective Tree/MarkdownEditor roots. Consequently the
+Kitchen Sink component inspector, native toolbar, web footer, terminal hint
+bar, and agent participant all observe the same action order and reducer.
+
+The shared NDJSON Usage fixture includes this slot and a `footerSetActions`
+delta, and Rust, Swift, and web fixture tests assert the same initial and
+resulting ordered action state. A renderer that lacks `footerActions` falls
+back to the terminal for the pane under the normal capability rule.
 
 The pane-level degradation rule is explicit: if a renderer does not recognize
 the Page root, any named slot/role kind, or any required
@@ -638,7 +680,7 @@ metadata/activation, or Page-back capability, it keeps the attachment alive
 and requests the complete terminal view for that pane. It never rejects the
 attach merely because its component vocabulary is older.
 
-The sixteenth shared NDJSON fixture exercises the same Page family as a Usage
+The shared Usage NDJSON fixture exercises the same Page family as a Usage
 master/detail screen: provider rows carry a leading health status, plan badge,
 emphasis, detail/value metadata, narrow-width value policy, busy state,
 selection, and an activation action, while the detail Page carries a back

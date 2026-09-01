@@ -692,6 +692,8 @@ pub struct MarkdownEditorSpec {
     /// Closed context-menu descriptor. Renderers open it at their own pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_menu: Option<SemanticMenu>,
+    #[serde(default, skip_serializing_if = "crate::FooterActions::is_empty")]
+    pub footer: crate::FooterActions,
 }
 
 impl MarkdownEditorSpec {
@@ -709,6 +711,7 @@ impl MarkdownEditorSpec {
             actions: MarkdownEditorActions::editable(),
             insert_menu: None,
             context_menu: None,
+            footer: crate::FooterActions::default(),
         }
     }
 
@@ -756,6 +759,15 @@ impl MarkdownEditorSpec {
     #[must_use]
     pub fn insert_menu(mut self, menu: SemanticMenu) -> Self {
         self.insert_menu = Some(menu);
+        self
+    }
+
+    #[must_use]
+    pub fn footer_actions(
+        mut self,
+        actions: impl IntoIterator<Item = crate::FooterAction>,
+    ) -> Self {
+        self.footer = crate::FooterActions::new(actions);
         self
     }
 
@@ -826,6 +838,9 @@ impl MarkdownEditorSpec {
                 })?;
             }
         }
+        self.footer
+            .validate(&format!("{path}.footer"))
+            .map_err(|error| UiValidationError::new(error.path, error.message))?;
         Ok(())
     }
 }
@@ -887,6 +902,9 @@ impl UiComponent {
                         crate::MENU_COMPONENT_CAPABILITY,
                         crate::MENU_ANCHOR_CAPABILITY,
                     ]);
+                }
+                if !editor.footer.is_empty() {
+                    capabilities.push(crate::FOOTER_ACTIONS_CAPABILITY);
                 }
                 capabilities
             }
@@ -1000,6 +1018,29 @@ impl UiNode {
     pub fn required_capabilities(&self) -> Vec<&'static str> {
         self.element.required_capabilities()
     }
+
+    /// Returns the shared screen footer regardless of the closed root kind.
+    #[must_use]
+    pub const fn footer(&self) -> Option<&crate::FooterActions> {
+        match &self.element {
+            UiComponent::MarkdownEditor(editor) => Some(&editor.footer),
+            UiComponent::Page(page) => Some(&page.footer),
+            UiComponent::Tree(tree) => Some(&tree.footer),
+            UiComponent::CanvasPage(_)
+            | UiComponent::Media(_)
+            | UiComponent::Menu(_)
+            | UiComponent::Surface(_) => None,
+        }
+    }
+
+    /// Resolves a terminal accelerator from the exact published component.
+    #[must_use]
+    pub fn footer_action_for_key(
+        &self,
+        key: &crossterm::event::KeyEvent,
+    ) -> Option<&crate::FooterAction> {
+        self.footer()?.action_for_key(key)
+    }
 }
 
 /// Builds component-specific operations between two Markdown projections.
@@ -1082,6 +1123,12 @@ pub fn markdown_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDelt
             node_id: next.id.clone(),
             insert_menu: next_editor.insert_menu.clone(),
             context_menu: next_editor.context_menu.clone(),
+        });
+    }
+    if previous_editor.footer != next_editor.footer {
+        operations.push(UiDeltaOperation::FooterSetActions {
+            node_id: next.id.clone(),
+            actions: next_editor.footer.actions.clone(),
         });
     }
     operations
@@ -1172,6 +1219,12 @@ pub fn tree_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
             selected_id: next_tree.selected_id.clone(),
         });
     }
+    if previous_tree.footer != next_tree.footer {
+        operations.push(UiDeltaOperation::FooterSetActions {
+            node_id: next.id.clone(),
+            actions: next_tree.footer.actions.clone(),
+        });
+    }
     operations
 }
 
@@ -1200,7 +1253,7 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
     {
         return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
     }
-    match (&previous_page.body, &next_page.body) {
+    let mut operations = match (&previous_page.body, &next_page.body) {
         (PageBodySlot::List(previous_list), PageBodySlot::List(next_list)) => {
             let Some(mut operations) = list_chart_delta_operations(previous_list, next_list) else {
                 return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
@@ -1294,7 +1347,18 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
                 .collect()
         }
         _ => vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }],
+    };
+    if !matches!(
+        operations.as_slice(),
+        [UiDeltaOperation::ReplaceRoot { .. }]
+    ) && previous_page.footer != next_page.footer
+    {
+        operations.push(UiDeltaOperation::FooterSetActions {
+            node_id: next.id.clone(),
+            actions: next_page.footer.actions.clone(),
+        });
     }
+    operations
 }
 
 fn list_chart_delta_operations(
@@ -1546,6 +1610,11 @@ pub enum UiDeltaOperation {
         caption: Option<String>,
         accessibility_text: String,
     },
+    /// Replaces the complete ordered action slot for a stable screen root.
+    FooterSetActions {
+        node_id: NodeId,
+        actions: Vec<crate::FooterAction>,
+    },
     InputSetValue {
         node_id: String,
         value: String,
@@ -1701,6 +1770,17 @@ impl UiDeltaOperation {
             label: gauge.label.clone(),
             caption: gauge.caption.clone(),
             accessibility_text: gauge.accessibility_text.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn footer_set_actions(
+        node_id: impl Into<NodeId>,
+        actions: impl IntoIterator<Item = crate::FooterAction>,
+    ) -> Self {
+        Self::FooterSetActions {
+            node_id: node_id.into(),
+            actions: actions.into_iter().collect(),
         }
     }
 
@@ -1883,6 +1963,18 @@ impl UiDeltaOperation {
             .map_err(|error| {
                 UiProtocolError::InvalidView(UiValidationError::new(error.path, error.message))
             }),
+            Self::FooterSetActions { node_id, actions } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                crate::FooterActions::new(actions.clone())
+                    .validate(path)
+                    .map_err(|error| {
+                        UiProtocolError::InvalidView(UiValidationError::new(
+                            error.path,
+                            error.message,
+                        ))
+                    })
+            }
             Self::ListInsertItem {
                 list_id,
                 index,
@@ -2200,6 +2292,9 @@ impl UiNode {
                         })
                         .map_err(|error| component_delta_error(index, error))?;
                 }
+                UiDeltaOperation::FooterSetActions { node_id, actions } => {
+                    self.set_footer_actions(node_id, actions.clone(), index)?;
+                }
                 UiDeltaOperation::InputSetValue { node_id, value } => {
                     self.page_mut(index)?
                         .set_input_value(node_id, value.clone())
@@ -2353,6 +2448,36 @@ impl UiNode {
                 "operation requires a Markdown editor",
             )),
         }
+    }
+
+    fn set_footer_actions(
+        &mut self,
+        expected_id: &NodeId,
+        actions: Vec<crate::FooterAction>,
+        operation_index: usize,
+    ) -> Result<(), UiValidationError> {
+        if &self.id != expected_id {
+            return Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                format!("node {expected_id:?} is not present"),
+            ));
+        }
+        let footer = crate::FooterActions::new(actions);
+        match &mut self.element {
+            UiComponent::MarkdownEditor(editor) => editor.footer = footer,
+            UiComponent::Page(page) => page.footer = footer,
+            UiComponent::Tree(tree) => tree.footer = footer,
+            UiComponent::CanvasPage(_)
+            | UiComponent::Media(_)
+            | UiComponent::Menu(_)
+            | UiComponent::Surface(_) => {
+                return Err(UiValidationError::new(
+                    format!("delta.operations[{operation_index}].nodeId"),
+                    "operation requires a root with a FooterActions slot",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn media_mut(
