@@ -1052,6 +1052,20 @@ pub fn tree_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
     }
 
     let mut operations = Vec::new();
+    let clears_selection_before_splice = previous_tree.items != next_tree.items
+        && previous_tree
+            .selected_id
+            .as_deref()
+            .is_some_and(|selected| !tree_items_contain_id(&next_tree.items, selected));
+    if clears_selection_before_splice {
+        // Each operation must leave a valid retained Tree. Clearing an id
+        // that disappears comes before the child splice; the next selection
+        // is installed after the new collection exists.
+        operations.push(UiDeltaOperation::TreeSetSelection {
+            node_id: next.id.clone(),
+            selected_id: None,
+        });
+    }
     if previous_tree.location != next_tree.location {
         operations.push(UiDeltaOperation::TreeSetLocation {
             node_id: next.id.clone(),
@@ -1076,13 +1090,21 @@ pub fn tree_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
             items: next_tree.items.clone(),
         });
     }
-    if previous_tree.selected_id != next_tree.selected_id {
+    if previous_tree.selected_id != next_tree.selected_id
+        && !(clears_selection_before_splice && next_tree.selected_id.is_none())
+    {
         operations.push(UiDeltaOperation::TreeSetSelection {
             node_id: next.id.clone(),
             selected_id: next_tree.selected_id.clone(),
         });
     }
     operations
+}
+
+fn tree_items_contain_id(items: &[crate::TreeItem], target: &str) -> bool {
+    items
+        .iter()
+        .any(|item| item.id == target || tree_items_contain_id(&item.children, target))
 }
 
 /// Builds compact operations for one stable Page projection.
@@ -3116,7 +3138,7 @@ fn validate_event_value(value: &UiEventValue) -> Result<(), UiProtocolError> {
 mod tests {
     use std::io::Cursor;
 
-    use crate::{Input, List, ListItem, ListItemSlot, Toggle};
+    use crate::{Input, List, ListItem, ListItemSlot, Toggle, Tree, TreeItem};
 
     use super::*;
 
@@ -3319,6 +3341,48 @@ mod tests {
         assert_eq!(page.list().items.len(), 1);
         assert_eq!(page.list().items[0].id, "todo-2");
         assert_eq!(page.list().selected_id.as_deref(), Some("todo-2"));
+    }
+
+    #[test]
+    fn tree_directory_delta_clears_a_disappearing_selection_before_splicing() {
+        let previous = UiNode::tree(
+            "files",
+            Tree::new(
+                "Files",
+                ".",
+                [
+                    TreeItem::directory("root-docs", "docs"),
+                    TreeItem::file("root-readme", "README.md"),
+                ],
+            )
+            .selected_id("root-docs"),
+        );
+        let next = UiNode::tree(
+            "files",
+            Tree::new(
+                "Files",
+                "docs",
+                [
+                    TreeItem::parent("docs-parent"),
+                    TreeItem::file("docs-guide", "guide.txt"),
+                ],
+            )
+            .selected_id("docs-guide"),
+        );
+
+        let operations = tree_delta_operations(&previous, &next);
+        assert!(matches!(
+            operations.as_slice(),
+            [
+                UiDeltaOperation::TreeSetSelection { selected_id: None, .. },
+                UiDeltaOperation::TreeSetLocation { .. },
+                UiDeltaOperation::TreeSpliceChildren { .. },
+                UiDeltaOperation::TreeSetSelection { selected_id: Some(id), .. },
+            ] if id == "docs-guide"
+        ));
+        let mut applied = previous;
+        applied.apply_delta_operations(&operations).unwrap();
+        assert_eq!(applied, next);
     }
 
     #[test]
