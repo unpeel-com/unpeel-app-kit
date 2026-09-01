@@ -1513,7 +1513,8 @@ fn append_leading_slot(
             if status.emphasis == ListItemEmphasis::Strong {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            spans.push(Span::styled(format!("{}  ", status.symbol), style));
+            spans.push(Span::styled(status.symbol.clone(), style));
+            spans.push(Span::raw("  "));
         }
         ListItemSlot::Badge(badge) => spans.push(Span::styled(
             format!("{} ", badge.text),
