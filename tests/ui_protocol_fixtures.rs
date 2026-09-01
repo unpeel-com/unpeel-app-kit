@@ -101,6 +101,8 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(page.title, "Todos");
     assert_eq!(page.list().items.len(), 3);
     assert_eq!(page.list().items[0].label, "Run the standalone TUI");
+    assert_eq!(page.list().selected_id.as_deref(), Some("todo-1"));
+    assert_eq!(page.list().select.as_deref(), Some("select-todo"));
     let Some(ListItemSlot::Toggle(toggle)) = &page.list().items[1].trailing else {
         panic!("Todo rows must expose their completion Toggle in a named slot");
     };
@@ -118,6 +120,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         panic!("Todo delta must preserve Page");
     };
     assert!(page.list().items[1].done);
+    assert_eq!(page.list().selected_id.as_deref(), Some("todo-3"));
 
     let UiMessage::Snapshot(usage_snapshot) = &messages[15] else {
         panic!("sixteenth fixture must contain the Usage master/detail Page");
@@ -131,6 +134,19 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         Some("Resets in 6d 18h")
     );
     assert_eq!(page.list().items[0].value.as_deref(), Some("3% used"));
+    assert!(page.list().items[1].busy);
+    let Some(ListItemSlot::Status(status)) = &page.list().items[0].leading else {
+        panic!("Usage rows must expose their status in the leading slot");
+    };
+    assert_eq!(status.symbol, "✓");
+    let Some(ListItemSlot::Badge(badge)) = &page.list().items[0].accessory else {
+        panic!("Usage rows must expose their plan badge in the accessory slot");
+    };
+    assert_eq!(badge.text, "Pro");
+    assert_eq!(
+        page.list().selected_id.as_deref(),
+        Some("provider-0-metric-0")
+    );
     assert_eq!(
         page.list().items[1].activate.as_deref(),
         Some("refresh-usage")

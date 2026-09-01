@@ -132,7 +132,11 @@ func sharedProtocolFixturesDecode() throws {
     ])
     #expect(input.submit == "add-todo")
     #expect(toggle.value == false)
-    #expect(page.requiredCapabilities == ["page", "list", "listItem", "input", "toggle"])
+    #expect(list.selectedID == "todo-1")
+    #expect(list.select == "select-todo")
+    #expect(page.requiredCapabilities == [
+        "page", "list", "listItem", "input", "toggle", "listSelection",
+    ])
 
     guard case let .delta(todoDelta) = messages[14],
           case let .page(updatedPage) = try todoSnapshot.applying(todoDelta).root.component,
@@ -142,6 +146,7 @@ func sharedProtocolFixturesDecode() throws {
         return
     }
     #expect(updatedList.items[1].done)
+    #expect(updatedList.selectedID == "todo-3")
 
     guard case let .snapshot(usageSnapshot) = messages[15],
           case let .page(usagePage) = usageSnapshot.root.component,
@@ -153,9 +158,22 @@ func sharedProtocolFixturesDecode() throws {
     #expect(usagePage.back == "close-provider")
     #expect(usageList.items[0].detail == "Resets in 6d 18h")
     #expect(usageList.items[0].value == "3% used")
+    #expect(usageList.items[0].valueTone == .success)
+    #expect(usageList.items[0].emphasis == .strong)
+    guard case let .status(status)? = usageList.items[0].leading,
+          case let .badge(badge)? = usageList.items[0].accessory
+    else {
+        Issue.record("Usage fixture must contain status and badge row slots")
+        return
+    }
+    #expect(status.symbol == "✓")
+    #expect(status.preserveToneWhenSelected)
+    #expect(badge.text == "Pro")
+    #expect(usageList.items[1].busy)
     #expect(usageList.items[1].activate == "refresh-usage")
     #expect(usagePage.requiredCapabilities == [
         "page", "list", "listItem", "pageBack", "listItemMetadata", "listItemActivate",
+        "listItemPresentation", "statusSymbol", "badge", "listSelection",
     ])
 
     guard case let .snapshot(surfaceSnapshot) = messages[16],
@@ -403,6 +421,7 @@ func pageInputAndListDeltasPreserveTheClosedRoot() throws {
                 item: UIListItemSpec(id: "todo-2", label: "Second")
             ),
             .listRemoveItem(listID: "todos", itemID: "todo-1"),
+            .listSetSelection(listID: "todos", selectedID: "todo-2"),
         ]
     )
     guard case let .page(page) = try snapshot.applying(delta).root.component,
@@ -414,6 +433,7 @@ func pageInputAndListDeltasPreserveTheClosedRoot() throws {
     }
     #expect(input.value == "draft")
     #expect(list.items.map(\.id) == ["todo-2"])
+    #expect(list.selectedID == "todo-2")
 }
 
 @Test

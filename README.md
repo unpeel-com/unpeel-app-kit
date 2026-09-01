@@ -163,7 +163,8 @@ The standalone component layer currently provides:
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
 | `Page` | Top-level standalone Ratatui presentation with constrained Input header/List body slots and one optional back action |
-| `List` / `ListItem` | Ratatui List rows with stable ids, detail/value metadata, one optional activate action, and named closed control slots |
+| `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and named closed slots |
+| `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
 | `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
 | `Button` | Closed semantic action control with default/primary/destructive native intent rather than arbitrary styling |
@@ -187,8 +188,8 @@ The standalone component layer currently provides:
 | `Media` | Static images behind the independent `media` feature, using Kitty/iTerm2/Sixel with a Unicode half-block fallback |
 | `Surface` / `SurfaceView` | Optional `surface-embed` delegation to unpeel-surface's WASM guest, local wgpu renderer, mmap ring, and Kitty presenter; absent from default/pure-TUI builds |
 
-The crate owns reusable component behavior, not an App's event loop, key map,
-commands, or surrounding chrome. Hosted helpers elsewhere in the table are
+The crate owns reusable component behavior and the standard flat-list keymap,
+not an App's event loop, commands, or surrounding chrome. Hosted helpers elsewhere in the table are
 optional calls and retain their documented standalone no-op, unavailable, or
 platform-fallback behavior.
 
@@ -260,7 +261,8 @@ inline image, or a content-addressed blob reference—never as an unbounded JSON
 payload. `Tabs` and later richer components such as `DataGrid` can join the
 same closed, versioned vocabulary. Containment is slot-based:
 `List` accepts only `ListItem` values, and row slots accept only explicitly
-enumerated controls rather than arbitrary child nodes. See [the component
+enumerated Toggle, status-symbol, and Badge values rather than arbitrary child
+nodes. See [the component
 architecture](docs/ui-components.md), the trusted [`unpeel.ui/1`
 schema](protocol/unpeel-ui-v1.schema.json), and the separate
 [browser-to-workspace schema](protocol/unpeel-workspace-ui-v1.schema.json).

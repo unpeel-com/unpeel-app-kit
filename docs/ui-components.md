@@ -398,7 +398,7 @@ Every cross-renderer component has:
 
 Renderers preserve semantics and interaction, not terminal-cell geometry.
 Platform-native presentation is expected: for example, `List` can map to
-`ratatui::widgets::List`, SwiftUI `List`, and an accessible web list while
+App Kit's Ratatui `ListWidget`, SwiftUI `List`, and an accessible web list while
 retaining the same item identities and selection actions.
 
 Raw Ratatui widgets remain supported in the terminal. They do not acquire
@@ -415,17 +415,19 @@ web, and agent participants:
 - `List` contains only keyed `ListItem` values, not arbitrary nodes;
 - `ListItem` owns row fields such as label and detail plus enumerated slots
   such as `leading`, `trailing`, and `accessory`;
-- each slot accepts only the schema-enumerated controls allowed in that role,
-  such as a `Badge`, `Toggle`, `Input`, or `Menu` as the vocabulary grows; and
+- each slot accepts only the schema-enumerated controls allowed in that role;
+  v1 has completion `Toggle`, static status-symbol, and `Badge` values; and
 - `Page` and later containers expose named, purpose-specific regions only when
   their cross-platform semantics are defined.
 
 The current master/detail extension stays inside those named semantics:
 `ListItem.detail` is secondary copy, `ListItem.value` is a trailing read-only
-value, and `ListItem.activate` is one declared row action; `Page.back` is one
-declared return action. They are not arbitrary children. Renderers advertise
-`listItemMetadata`, `listItemActivate`, and `pageBack` before receiving a tree
-that depends on them.
+value that disappears rather than crushing the label below its width contract,
+`ListItem.busy` is a spinner/progress state, and `ListItem.activate` is one
+declared row action; `Page.back` is one declared return action. They are not
+arbitrary children. Renderers advertise `listItemMetadata`,
+`listItemPresentation`, `listItemActivate`, and `pageBack` before receiving a
+tree that depends on them.
 
 Slot payloads are closed enums, not nested `UiNode` escape hatches. For
 example, a trailing `Toggle` remains a native SwiftUI list-row toggle and an
@@ -448,8 +450,9 @@ Page "Todos"
       └─ trailing: Toggle → change("set-done", bool)
 ```
 
-The standalone presentation uses Ratatui's `List` plus App Kit's existing
-`InputField`. It remains fully usable with `ui-bridge` compiled out. When a
+The standalone presentation uses App Kit's `ListWidget`, built from
+`SelectableRow` and `VerticalScrollbar`, plus the existing `InputField`. It
+remains fully usable with `ui-bridge` compiled out. When a
 Host endpoint is present, the same owned values serialize as one Page root;
 SwiftUI `PageView` maps them to a native `List`, `Toggle`, and `TextField`, and
 the web `PageRenderer` maps them to a list, checkbox controls, and a labeled
@@ -459,9 +462,28 @@ Containment is deliberately closed:
 
 - Page's v1 header accepts Input and its body accepts List;
 - List accepts only ListItem rows; and
-- ListItem's `leading`, `trailing`, and `accessory` slots currently accept
-  at most one completion Toggle, never an arbitrary `UiNode`; its value and
-  the row's `done` state are one validated invariant.
+- ListItem's `leading`, `trailing`, and `accessory` slots accept only Toggle,
+  status-symbol, or Badge values, never an arbitrary `UiNode`; it accepts at
+  most one completion Toggle, whose value and the row's `done` state are one
+  validated invariant.
+
+Flat-list behavior is also one Kit-owned contract. `ListKeymap` maps Down/`j`,
+Up/`k`, Home/`g`, End/`G`, PageUp/PageDown, Enter, Escape/`q`, and an explicit
+opt-in Space-as-PageDown. `ListState` clamps at both ends, never wraps, pages by
+the rendered viewport minus `pageOverlap`, and scrolls the selection into view
+with configurable `scrollPadding`. A list may instead declare page behavior
+`scroll` for screens such as Usage whose Page keys move only the viewport.
+Ratatui, SwiftUI, and web use that same key vocabulary; `selectedId` and the
+idempotent `select` action carry the authoritative identity over the semantic
+channel.
+
+The terminal renderer deliberately reproduces the established App rows by
+construction: selected background across the complete row, exactly two cells
+of left content padding and one cell on the right, borderless single-line
+rows, and a right-edge scrollbar only when content overflows. A leading status
+symbol, inline badge, spinner, and right-aligned value are schema fields rather
+than arbitrary styled spans. This is the visual contract used for sibling-App
+buffer parity tests.
 
 The wire declares all nested component ids and actions, so an agent can reason
 about “complete todo 2” rather than terminal coordinates. A neighboring agent
@@ -480,8 +502,8 @@ published. A relaunch loads and validates this file before its first snapshot.
 Hosted production Apps may place the same model inside `UiStateStore`; the
 renderer is never the durable owner in either form.
 
-Page adds four compact operations: `toggleSetValue`, `inputSetValue`,
-`listInsertItem`, and `listRemoveItem`. A Toggle update also updates its row's
+Page adds five compact operations: `toggleSetValue`, `inputSetValue`,
+`listInsertItem`, `listRemoveItem`, and `listSetSelection`. A Toggle update also updates its row's
 denormalized `done` value, preserving one semantic invariant across all three
 renderers.
 
@@ -492,11 +514,12 @@ attachment alive and requests the complete terminal view for that pane. It
 never rejects the attach merely because its component vocabulary is older.
 
 The sixteenth shared NDJSON fixture exercises the same Page family as a Usage
-master/detail screen: provider rows carry detail/value metadata and an
-activation action, while the detail Page carries a back action. Rich Ratatui
-meters remain App-owned, but native/web users can navigate and refresh the
-same authoritative provider model without introducing a generic dashboard or
-flex container.
+master/detail screen: provider rows carry a leading health status, plan badge,
+emphasis, detail/value metadata, narrow-width value policy, busy state,
+selection, and an activation action, while the detail Page carries a back
+action. Rich Ratatui meters remain App-owned, but native/web users can navigate
+and refresh the same authoritative provider model without introducing a
+generic dashboard or flex container.
 
 ## MarkdownEditor v1
 
@@ -816,7 +839,7 @@ optimization. `UiDelta` carries `baseRevision`, the next `revision`, and
 ordered component operations. Markdown supports range replacement, selection,
 presentation, dirty/read-only/title/placeholder/action updates; Media supports
 an atomic source-reference and intrinsic-size swap; Page supports Toggle/Input
-updates and ListItem insertion/removal; and `replaceRoot` remains the escape
+updates, ListItem insertion/removal, and keyed selection changes; and `replaceRoot` remains the escape
 hatch. Swift and web clients apply deltas to their last complete snapshot and
 expose the resulting complete state to renderers.
 

@@ -25,11 +25,11 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Style;
-use ratatui::widgets::{ListState, Paragraph};
+use ratatui::widgets::Paragraph;
 use serde::{Deserialize, Serialize};
 use unpeel_app_kit::{
-    Input, InputField, InputFieldAction, KitTheme, List, ListItem, ListItemSlot, Page, PageTheme,
-    Toggle,
+    Input, InputField, InputFieldAction, KitTheme, List, ListItem, ListItemSlot, ListKeymap,
+    ListNavigationOutcome, ListState, Page, PageTheme, Toggle,
 };
 
 #[cfg(feature = "ui-bridge")]
@@ -52,6 +52,7 @@ const INPUT_ID: &str = "new-todo";
 const ADD_ACTION: &str = "add-todo";
 const SET_DONE_ACTION: &str = "set-done";
 const DELETE_ACTION: &str = "delete-todo";
+const SELECT_ACTION: &str = "select-todo";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,8 +119,8 @@ enum ModelChange {
 
 #[cfg(feature = "ui-bridge")]
 impl ModelChange {
-    fn ui_delta(&self) -> UiDeltaOperation {
-        match self {
+    fn ui_delta_operations(&self, selected_id: Option<String>) -> Vec<UiDeltaOperation> {
+        let model = match self {
             Self::Toggle { id, value } => {
                 UiDeltaOperation::toggle_set_value(toggle_id(*id), *value)
             }
@@ -127,7 +128,11 @@ impl ModelChange {
                 UiDeltaOperation::list_insert_item(LIST_ID, *index as u64, component_item(todo))
             }
             Self::Remove { id } => UiDeltaOperation::list_remove_item(LIST_ID, item_id(*id)),
-        }
+        };
+        vec![
+            model,
+            UiDeltaOperation::list_set_selection(LIST_ID, selected_id),
+        ]
     }
 }
 
@@ -159,7 +164,7 @@ impl TodoApp {
             state,
             state_path,
             input,
-            list_state: ListState::default().with_selected(selected),
+            list_state: ListState::new(selected),
             input_focused: true,
             list_area: Rect::default(),
             status: String::new(),
@@ -167,15 +172,15 @@ impl TodoApp {
     }
 
     fn page(&self) -> Page {
-        Page::new(
-            "Todos",
-            List::new(
-                LIST_ID,
-                self.state.todos.iter().map(component_item).collect(),
-            )
-            .empty_message("No todos yet"),
+        let mut list = List::new(
+            LIST_ID,
+            self.state.todos.iter().map(component_item).collect(),
         )
-        .input(
+        .empty_message("No todos yet");
+        if let Some(todo) = self.selected_todo() {
+            list = list.selected(item_id(todo.id), SELECT_ACTION);
+        }
+        Page::new("Todos", list).input(
             Input::new(INPUT_ID, "New todo")
                 .placeholder("What needs doing?")
                 .submit_action(ADD_ACTION),
@@ -246,21 +251,22 @@ impl TodoApp {
     fn select_relative(&mut self, offset: isize) {
         let len = self.state.todos.len();
         if len == 0 {
-            self.list_state.select(None);
+            self.list_state.select(None, 0);
             return;
         }
         let current = self.list_state.selected().unwrap_or(0) as isize;
         let selected = (current + offset).clamp(0, len.saturating_sub(1) as isize) as usize;
-        self.list_state.select(Some(selected));
+        self.list_state.select(Some(selected), len);
     }
 
     fn clamp_selection(&mut self) {
         let len = self.state.todos.len();
-        self.list_state.select(if len == 0 {
+        let selected = if len == 0 {
             None
         } else {
             Some(self.list_state.selected().unwrap_or(0).min(len - 1))
-        });
+        };
+        self.list_state.select(selected, len);
     }
 
     fn focus_input(&mut self, focused: bool) {
@@ -292,7 +298,7 @@ fn terminal_mouse_intent(app: &mut TodoApp, mouse: MouseEvent) -> Option<Intent>
                 value: !todo.done,
             };
             app.focus_input(false);
-            app.list_state.select(Some(index));
+            app.list_state.select(Some(index), app.state.todos.len());
             Some(intent)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
@@ -457,22 +463,15 @@ fn terminal_intent(app: &mut TodoApp, key: KeyEvent) -> Option<Result<Intent, St
         return None;
     }
 
-    match key.code {
-        KeyCode::Char('q') => Some(Err("quit".to_owned())),
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.select_relative(-1);
-            None
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.select_relative(1);
-            None
-        }
-        KeyCode::Char(' ') | KeyCode::Enter => app.selected_todo().map(|todo| {
+    if key.code == KeyCode::Char(' ') {
+        return app.selected_todo().map(|todo| {
             Ok(Intent::Toggle {
                 id: todo.id,
                 value: !todo.done,
             })
-        }),
+        });
+    }
+    match key.code {
         KeyCode::Delete | KeyCode::Char('d') => app
             .selected_todo()
             .map(|todo| Ok(Intent::Delete { id: todo.id })),
@@ -480,18 +479,57 @@ fn terminal_intent(app: &mut TodoApp, key: KeyEvent) -> Option<Result<Intent, St
             app.focus_input(true);
             None
         }
-        _ => None,
+        _ => match ListKeymap::new()
+            .action_for_key(&key)
+            .map(|action| app.list_state.navigate(action, app.state.todos.len()))
+        {
+            Some(ListNavigationOutcome::Back) => Some(Err("quit".to_owned())),
+            Some(ListNavigationOutcome::Activate(index)) => {
+                app.state.todos.get(index).map(|todo| {
+                    Ok(Intent::Toggle {
+                        id: todo.id,
+                        value: !todo.done,
+                    })
+                })
+            }
+            Some(
+                ListNavigationOutcome::None
+                | ListNavigationOutcome::SelectionChanged(_)
+                | ListNavigationOutcome::Scrolled(_),
+            )
+            | None => None,
+        },
     }
 }
 
 #[cfg(feature = "ui-bridge")]
-fn semantic_intent(event: &unpeel_app_kit::UiEvent) -> Result<Intent, String> {
+enum SemanticIntent {
+    Model(Intent),
+    Select(usize),
+}
+
+#[cfg(feature = "ui-bridge")]
+fn semantic_intent(
+    event: &unpeel_app_kit::UiEvent,
+    app: &TodoApp,
+) -> Result<SemanticIntent, String> {
     let node = event.action.node_id.as_str();
     let action = event.action.action.as_str();
     match (node, action, event.action.kind, &event.action.value) {
-        (INPUT_ID, ADD_ACTION, UiEventKind::Submit, UiEventValue::Text(label)) => Ok(Intent::Add {
-            label: label.clone(),
-        }),
+        (INPUT_ID, ADD_ACTION, UiEventKind::Submit, UiEventValue::Text(label)) => {
+            Ok(SemanticIntent::Model(Intent::Add {
+                label: label.clone(),
+            }))
+        }
+        (LIST_ID, SELECT_ACTION, UiEventKind::Change, UiEventValue::Text(item)) => {
+            let index = app
+                .state
+                .todos
+                .iter()
+                .position(|todo| item_id(todo.id) == *item)
+                .ok_or_else(|| "Selected Todo no longer exists".to_owned())?;
+            Ok(SemanticIntent::Select(index))
+        }
         (_, SET_DONE_ACTION, UiEventKind::Change, UiEventValue::Bool(value)) => {
             let id = node
                 .strip_prefix("todo-")
@@ -501,7 +539,7 @@ fn semantic_intent(event: &unpeel_app_kit::UiEvent) -> Result<Intent, String> {
             if toggle_id(id) != node {
                 return Err("Toggle target is not a canonical Todo id".to_owned());
             }
-            Ok(Intent::Toggle { id, value: *value })
+            Ok(SemanticIntent::Model(Intent::Toggle { id, value: *value }))
         }
         (_, DELETE_ACTION, UiEventKind::Change, UiEventValue::None) => {
             let id = node
@@ -511,7 +549,7 @@ fn semantic_intent(event: &unpeel_app_kit::UiEvent) -> Result<Intent, String> {
             if item_id(id) != node {
                 return Err("Delete target is not a canonical Todo id".to_owned());
             }
-            Ok(Intent::Delete { id })
+            Ok(SemanticIntent::Model(Intent::Delete { id }))
         }
         _ => Err("Action is not declared by the Todo Page".to_owned()),
     }
@@ -542,25 +580,35 @@ fn drain_bridge(app: &mut TodoApp, bridge: &mut UiBridge) -> Result<(), Box<dyn 
                 )?;
             }
             UiBridgeEvent::Action { event, .. } => {
-                let result = if event.base_revision == app.state.revision {
-                    semantic_intent(&event).and_then(|intent| app.commit(intent))
-                } else {
-                    Err(format!(
-                        "Todo changed from revision {} to {}; retry the action",
-                        event.base_revision, app.state.revision
-                    ))
-                };
+                let result: Result<Option<ModelChange>, String> =
+                    if event.base_revision == app.state.revision {
+                        semantic_intent(&event, app).and_then(|intent| match intent {
+                            SemanticIntent::Model(intent) => app.commit(intent).map(Some),
+                            SemanticIntent::Select(index) => {
+                                app.list_state.select(Some(index), app.state.todos.len());
+                                Ok(None)
+                            }
+                        })
+                    } else {
+                        Err(format!(
+                            "Todo changed from revision {} to {}; retry the action",
+                            event.base_revision, app.state.revision
+                        ))
+                    };
                 let outcome = match result {
-                    Ok(change) => {
+                    Ok(Some(change)) => {
                         let base = event.base_revision;
                         bridge.publish_delta(
                             VIEW_ID,
                             base,
                             app.state.revision,
-                            vec![change.ui_delta()],
+                            change.ui_delta_operations(
+                                app.selected_todo().map(|todo| item_id(todo.id)),
+                            ),
                         )?;
                         UiEventOutcome::Applied
                     }
+                    Ok(None) => UiEventOutcome::Applied,
                     Err(message) => UiEventOutcome::Rejected(message),
                 };
                 bridge.acknowledge(&event, outcome, app.state.revision)?;
@@ -663,7 +711,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                                         VIEW_ID,
                                         base,
                                         app.state.revision,
-                                        vec![change.ui_delta()],
+                                        change.ui_delta_operations(
+                                            app.selected_todo().map(|todo| item_id(todo.id)),
+                                        ),
                                     )?;
                                 }
                                 Err(message) => app.status = message,
@@ -689,7 +739,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 VIEW_ID,
                                 base,
                                 app.state.revision,
-                                vec![change.ui_delta()],
+                                change.ui_delta_operations(
+                                    app.selected_todo().map(|todo| item_id(todo.id)),
+                                ),
                             )?;
                         }
                         Err(message) => app.status = message,

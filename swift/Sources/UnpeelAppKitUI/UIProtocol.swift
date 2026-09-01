@@ -13,6 +13,10 @@ public enum UnpeelUIProtocol {
     public static let listItemCapability = "listItem"
     public static let listItemMetadataCapability = "listItemMetadata"
     public static let listItemActivateCapability = "listItemActivate"
+    public static let listItemPresentationCapability = "listItemPresentation"
+    public static let listSelectionCapability = "listSelection"
+    public static let statusSymbolCapability = "statusSymbol"
+    public static let badgeCapability = "badge"
     public static let toggleCapability = "toggle"
     public static let inputCapability = "input"
     public static let buttonCapability = "button"
@@ -30,6 +34,10 @@ public enum UnpeelUIProtocol {
         listItemCapability,
         listItemMetadataCapability,
         listItemActivateCapability,
+        listItemPresentationCapability,
+        listSelectionCapability,
+        statusSymbolCapability,
+        badgeCapability,
         toggleCapability,
         inputCapability,
         buttonCapability,
@@ -1115,13 +1123,107 @@ public struct UIToggleSpec: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+public enum UIListItemTone: String, Codable, Equatable, Hashable, Sendable {
+    case `default`
+    case muted
+    case accent
+    case info
+    case success
+    case warning
+    case danger
+}
+
+public enum UIListItemEmphasis: String, Codable, Equatable, Hashable, Sendable {
+    case regular
+    case strong
+}
+
+public enum UIListPageBehavior: String, Codable, Equatable, Hashable, Sendable {
+    case selection
+    case scroll
+}
+
+public struct UIStatusSymbolSpec: Codable, Equatable, Hashable, Sendable {
+    public let symbol: String
+    public let label: String
+    public let tone: UIListItemTone
+    public let emphasis: UIListItemEmphasis
+    public let preserveToneWhenSelected: Bool
+
+    public init(
+        symbol: String,
+        label: String,
+        tone: UIListItemTone = .default,
+        emphasis: UIListItemEmphasis = .regular,
+        preserveToneWhenSelected: Bool = false
+    ) {
+        self.symbol = symbol
+        self.label = label
+        self.tone = tone
+        self.emphasis = emphasis
+        self.preserveToneWhenSelected = preserveToneWhenSelected
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case symbol, label, tone, emphasis, preserveToneWhenSelected
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        symbol = try container.decode(String.self, forKey: .symbol)
+        label = try container.decode(String.self, forKey: .label)
+        guard !symbol.isEmpty, !symbol.contains("\n"), !symbol.contains("\r") else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .symbol,
+                in: container,
+                debugDescription: "Status symbol must be a non-empty single line"
+            )
+        }
+        tone = try container.decodeIfPresent(UIListItemTone.self, forKey: .tone) ?? .default
+        emphasis = try container.decodeIfPresent(UIListItemEmphasis.self, forKey: .emphasis) ?? .regular
+        preserveToneWhenSelected = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .preserveToneWhenSelected
+        ) ?? false
+    }
+}
+
+public struct UIBadgeSpec: Codable, Equatable, Hashable, Sendable {
+    public let text: String
+    public let tone: UIListItemTone
+
+    public init(text: String, tone: UIListItemTone = .muted) {
+        self.text = text
+        self.tone = tone
+    }
+
+    enum CodingKeys: String, CodingKey { case text, tone }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decode(String.self, forKey: .text)
+        guard !text.contains("\n"), !text.contains("\r") else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .text,
+                in: container,
+                debugDescription: "Badge text must be a single line"
+            )
+        }
+        tone = try container.decodeIfPresent(UIListItemTone.self, forKey: .tone) ?? .default
+    }
+}
+
 public enum UIListItemSlot: Equatable, Hashable, Sendable {
     case toggle(UIToggleSpec)
+    case status(UIStatusSymbolSpec)
+    case badge(UIBadgeSpec)
     case unsupported(kind: String)
 
     public var kind: String {
         switch self {
         case .toggle: "toggle"
+        case .status: "status"
+        case .badge: "badge"
         case let .unsupported(kind): kind
         }
     }
@@ -1135,6 +1237,8 @@ extension UIListItemSlot: Codable {
         let kind = try container.decode(String.self, forKey: .type)
         switch kind {
         case "toggle": self = .toggle(try UIToggleSpec(from: decoder))
+        case "status": self = .status(try UIStatusSymbolSpec(from: decoder))
+        case "badge": self = .badge(try UIBadgeSpec(from: decoder))
         default: self = .unsupported(kind: kind)
         }
     }
@@ -1145,6 +1249,12 @@ extension UIListItemSlot: Codable {
         case let .toggle(toggle):
             try container.encode("toggle", forKey: .type)
             try toggle.encode(to: encoder)
+        case let .status(status):
+            try container.encode("status", forKey: .type)
+            try status.encode(to: encoder)
+        case let .badge(badge):
+            try container.encode("badge", forKey: .type)
+            try badge.encode(to: encoder)
         case let .unsupported(kind):
             try container.encode(kind, forKey: .type)
         }
@@ -1154,9 +1264,14 @@ extension UIListItemSlot: Codable {
 public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendable {
     public let id: String
     public let label: String
+    public let labelTone: UIListItemTone
+    public let emphasis: UIListItemEmphasis
     public let detail: String?
     public let value: String?
+    public let valueTone: UIListItemTone
+    public let valueMinWidth: Int?
     public var done: Bool
+    public let busy: Bool
     public var leading: UIListItemSlot?
     public var trailing: UIListItemSlot?
     public var accessory: UIListItemSlot?
@@ -1166,9 +1281,14 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     public init(
         id: String,
         label: String,
+        labelTone: UIListItemTone = .default,
+        emphasis: UIListItemEmphasis = .regular,
         detail: String? = nil,
         value: String? = nil,
+        valueTone: UIListItemTone = .muted,
+        valueMinWidth: Int? = nil,
         done: Bool = false,
+        busy: Bool = false,
         leading: UIListItemSlot? = nil,
         trailing: UIListItemSlot? = nil,
         accessory: UIListItemSlot? = nil,
@@ -1177,9 +1297,14 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     ) {
         self.id = id
         self.label = label
+        self.labelTone = labelTone
+        self.emphasis = emphasis
         self.detail = detail
         self.value = value
+        self.valueTone = valueTone
+        self.valueMinWidth = valueMinWidth
         self.done = done
+        self.busy = busy
         self.leading = leading
         self.trailing = trailing
         self.accessory = accessory
@@ -1188,21 +1313,43 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, detail, value, done, leading, trailing, accessory, delete, activate
+        case id, label, labelTone, emphasis, detail, value, valueTone, valueMinWidth
+        case done, busy, leading, trailing, accessory, delete, activate
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         label = try container.decode(String.self, forKey: .label)
+        labelTone = try container.decodeIfPresent(UIListItemTone.self, forKey: .labelTone) ?? .default
+        emphasis = try container.decodeIfPresent(UIListItemEmphasis.self, forKey: .emphasis) ?? .regular
         detail = try container.decodeIfPresent(String.self, forKey: .detail)
         value = try container.decodeIfPresent(String.self, forKey: .value)
+        valueTone = try container.decodeIfPresent(UIListItemTone.self, forKey: .valueTone) ?? .muted
+        valueMinWidth = try container.decodeIfPresent(Int.self, forKey: .valueMinWidth)
         done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
+        busy = try container.decodeIfPresent(Bool.self, forKey: .busy) ?? false
         leading = try container.decodeIfPresent(UIListItemSlot.self, forKey: .leading)
         trailing = try container.decodeIfPresent(UIListItemSlot.self, forKey: .trailing)
         accessory = try container.decodeIfPresent(UIListItemSlot.self, forKey: .accessory)
         delete = try container.decodeIfPresent(String.self, forKey: .delete)
         activate = try container.decodeIfPresent(String.self, forKey: .activate)
+        guard [label, detail, value].compactMap({ $0 }).allSatisfy({
+            !$0.contains("\n") && !$0.contains("\r")
+        }) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .label,
+                in: container,
+                debugDescription: "ListItem label, detail, and value must be single-line"
+            )
+        }
+        if let valueMinWidth, !(0...Int(UInt16.max)).contains(valueMinWidth) {
+            throw DecodingError.dataCorruptedError(
+                forKey: .valueMinWidth,
+                in: container,
+                debugDescription: "ListItem valueMinWidth must fit in UInt16"
+            )
+        }
         let toggles = [leading, trailing, accessory].compactMap { slot -> UIToggleSpec? in
             guard case let .toggle(toggle) = slot else { return nil }
             return toggle
@@ -1221,20 +1368,67 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
     public let id: String
     public var items: [UIListItemSpec]
     public let emptyMessage: String
+    public var selectedID: String?
+    public let select: String?
+    public let scrollPadding: Int
+    public let pageOverlap: Int
+    public let pageBehavior: UIListPageBehavior
+    public let spacePagesDown: Bool
 
-    public init(id: String, items: [UIListItemSpec], emptyMessage: String = "") {
+    public init(
+        id: String,
+        items: [UIListItemSpec],
+        emptyMessage: String = "",
+        selectedID: String? = nil,
+        select: String? = nil,
+        scrollPadding: Int = 0,
+        pageOverlap: Int = 1,
+        pageBehavior: UIListPageBehavior = .selection,
+        spacePagesDown: Bool = false
+    ) {
         self.id = id
         self.items = items
         self.emptyMessage = emptyMessage
+        self.selectedID = selectedID
+        self.select = select
+        self.scrollPadding = scrollPadding
+        self.pageOverlap = pageOverlap
+        self.pageBehavior = pageBehavior
+        self.spacePagesDown = spacePagesDown
     }
 
-    enum CodingKeys: String, CodingKey { case id, items, emptyMessage }
+    enum CodingKeys: String, CodingKey {
+        case id, items, emptyMessage, selectedID = "selectedId", select, scrollPadding
+        case pageOverlap, pageBehavior, spacePagesDown
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         items = try container.decode([UIListItemSpec].self, forKey: .items)
         emptyMessage = try container.decodeIfPresent(String.self, forKey: .emptyMessage) ?? ""
+        selectedID = try container.decodeIfPresent(String.self, forKey: .selectedID)
+        select = try container.decodeIfPresent(String.self, forKey: .select)
+        scrollPadding = try container.decodeIfPresent(Int.self, forKey: .scrollPadding) ?? 0
+        pageOverlap = try container.decodeIfPresent(Int.self, forKey: .pageOverlap) ?? 1
+        pageBehavior = try container.decodeIfPresent(UIListPageBehavior.self, forKey: .pageBehavior) ?? .selection
+        spacePagesDown = try container.decodeIfPresent(Bool.self, forKey: .spacePagesDown) ?? false
+        guard (0...Int(UInt16.max)).contains(scrollPadding),
+              (0...Int(UInt16.max)).contains(pageOverlap)
+        else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .scrollPadding,
+                in: container,
+                debugDescription: "List scrollPadding and pageOverlap must fit in UInt16"
+            )
+        }
+        if let selectedID, !items.contains(where: { $0.id == selectedID }) {
+            throw DecodingError.dataCorruptedError(
+                forKey: .selectedID,
+                in: container,
+                debugDescription: "List selectedId must identify one of its items"
+            )
+        }
     }
 }
 
@@ -1370,13 +1564,35 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
             capabilities.append(UnpeelUIProtocol.listItemActivateCapability)
         }
         var hasToggle = false
+        var hasStatus = false
+        var hasBadge = false
         for item in list.items {
             for slot in [item.leading, item.trailing, item.accessory].compactMap({ $0 }) {
-                guard case .toggle = slot else { return nil }
-                hasToggle = true
+                switch slot {
+                case .toggle: hasToggle = true
+                case .status: hasStatus = true
+                case .badge: hasBadge = true
+                case .unsupported: return nil
+                }
             }
         }
         if hasToggle { capabilities.append(UnpeelUIProtocol.toggleCapability) }
+        if list.items.contains(where: {
+            $0.busy || $0.labelTone != .default || $0.valueTone != .muted
+                || $0.emphasis != .regular || $0.valueMinWidth != nil
+                || $0.leading?.kind == "status" || $0.leading?.kind == "badge"
+                || $0.trailing?.kind == "status" || $0.trailing?.kind == "badge"
+                || $0.accessory?.kind == "status" || $0.accessory?.kind == "badge"
+        }) {
+            capabilities.append(UnpeelUIProtocol.listItemPresentationCapability)
+        }
+        if hasStatus { capabilities.append(UnpeelUIProtocol.statusSymbolCapability) }
+        if hasBadge { capabilities.append(UnpeelUIProtocol.badgeCapability) }
+        if list.selectedID != nil || list.select != nil || list.scrollPadding != 0
+            || list.pageOverlap != 1 || list.pageBehavior != .selection || list.spacePagesDown
+        {
+            capabilities.append(UnpeelUIProtocol.listSelectionCapability)
+        }
         return capabilities
     }
 }

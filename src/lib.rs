@@ -21,6 +21,7 @@ mod explorer;
 mod host;
 mod input;
 mod keyboard;
+mod list_navigation;
 #[cfg(feature = "markdown-text-area")]
 mod markdown_interaction;
 #[cfg(feature = "markdown-text-area")]
@@ -54,11 +55,13 @@ pub use agent::{
 };
 pub use click::{DEFAULT_DOUBLE_CLICK_INTERVAL, DoubleClickTracker};
 pub use components::{
-    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, ComponentValidationError,
-    INPUT_COMPONENT_CAPABILITY, Input, LIST_COMPONENT_CAPABILITY, LIST_ITEM_ACTIVATE_CAPABILITY,
-    LIST_ITEM_COMPONENT_CAPABILITY, LIST_ITEM_METADATA_CAPABILITY, List, ListItem, ListItemSlot,
-    PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page, PageBodySlot, PageHeaderSlot,
-    PageLayout, PageTheme, PageWidget, TOGGLE_COMPONENT_CAPABILITY, Toggle,
+    BADGE_COMPONENT_CAPABILITY, BUTTON_COMPONENT_CAPABILITY, Badge, Button, ButtonRole,
+    ComponentValidationError, INPUT_COMPONENT_CAPABILITY, Input, LIST_COMPONENT_CAPABILITY,
+    LIST_ITEM_ACTIVATE_CAPABILITY, LIST_ITEM_COMPONENT_CAPABILITY, LIST_ITEM_METADATA_CAPABILITY,
+    LIST_ITEM_PRESENTATION_CAPABILITY, LIST_SELECTION_CAPABILITY, List, ListItem, ListItemEmphasis,
+    ListItemSlot, ListItemTone, ListWidget, PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page,
+    PageBodySlot, PageHeaderSlot, PageLayout, PageTheme, PageWidget,
+    STATUS_SYMBOL_COMPONENT_CAPABILITY, StatusSymbol, TOGGLE_COMPONENT_CAPABILITY, Toggle,
 };
 pub use context::{
     AppContext, AppMode, ProjectContext, UnpeelUser, WorkspaceContext, WorktreeContext,
@@ -75,6 +78,9 @@ pub use explorer::{
 pub use host::AppReporter;
 pub use input::{InputField, InputFieldAction, InputFieldTheme, InputFieldWidget};
 pub use keyboard::KeyboardEnhancementGuard;
+pub use list_navigation::{
+    ListKeymap, ListNavigationAction, ListNavigationOutcome, ListPageBehavior, ListState,
+};
 #[cfg(feature = "markdown-text-area")]
 pub use markdown_interaction::{
     MARKDOWN_INSERT_ITEMS, MarkdownBlockKind, MarkdownEditorInteraction, MarkdownInsertItem,

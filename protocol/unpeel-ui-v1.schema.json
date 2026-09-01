@@ -473,6 +473,35 @@
         "setValue": { "$ref": "#/$defs/identifier" }
       }
     },
+    "listItemTone": {
+      "enum": ["default", "muted", "accent", "info", "success", "warning", "danger"]
+    },
+    "listItemEmphasis": {
+      "enum": ["regular", "strong"]
+    },
+    "statusSymbol": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "symbol", "label"],
+      "properties": {
+        "type": { "const": "status" },
+        "symbol": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\r\\n]+$" },
+        "label": { "type": "string", "maxLength": 4096 },
+        "tone": { "$ref": "#/$defs/listItemTone", "default": "default" },
+        "emphasis": { "$ref": "#/$defs/listItemEmphasis", "default": "regular" },
+        "preserveToneWhenSelected": { "type": "boolean", "default": false }
+      }
+    },
+    "badge": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "badge" },
+        "text": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+        "tone": { "$ref": "#/$defs/listItemTone", "default": "default" }
+      }
+    },
     "unsupportedRowSlot": {
       "description": "Opaque future row control retained so a renderer can fall back to the terminal pane.",
       "type": "object",
@@ -481,12 +510,14 @@
       "properties": { "type": { "$ref": "#/$defs/identifier" } },
       "not": {
         "required": ["type"],
-        "properties": { "type": { "const": "toggle" } }
+        "properties": { "type": { "enum": ["toggle", "status", "badge"] } }
       }
     },
     "listItemSlot": {
       "oneOf": [
         { "$ref": "#/$defs/toggle" },
+        { "$ref": "#/$defs/statusSymbol" },
+        { "$ref": "#/$defs/badge" },
         { "$ref": "#/$defs/unsupportedRowSlot" }
       ]
     },
@@ -496,10 +527,15 @@
       "required": ["id", "label"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
-        "label": { "type": "string", "maxLength": 16384 },
-        "detail": { "type": "string", "maxLength": 16384 },
-        "value": { "type": "string", "maxLength": 4096 },
+        "label": { "type": "string", "maxLength": 16384, "pattern": "^[^\\r\\n]*$" },
+        "labelTone": { "$ref": "#/$defs/listItemTone", "default": "default" },
+        "emphasis": { "$ref": "#/$defs/listItemEmphasis", "default": "regular" },
+        "detail": { "type": "string", "maxLength": 16384, "pattern": "^[^\\r\\n]*$" },
+        "value": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+        "valueTone": { "$ref": "#/$defs/listItemTone", "default": "muted" },
+        "valueMinWidth": { "type": "integer", "minimum": 0, "maximum": 65535 },
         "done": { "type": "boolean", "default": false },
+        "busy": { "type": "boolean", "default": false },
         "leading": { "$ref": "#/$defs/listItemSlot" },
         "trailing": { "$ref": "#/$defs/listItemSlot" },
         "accessory": { "$ref": "#/$defs/listItemSlot" },
@@ -519,7 +555,13 @@
           "maxItems": 100000,
           "items": { "$ref": "#/$defs/listItem" }
         },
-        "emptyMessage": { "type": "string", "maxLength": 4096 }
+        "emptyMessage": { "type": "string", "maxLength": 4096 },
+        "selectedId": { "$ref": "#/$defs/identifier" },
+        "select": { "$ref": "#/$defs/identifier" },
+        "scrollPadding": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "pageOverlap": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 1 },
+        "pageBehavior": { "enum": ["selection", "scroll"], "default": "selection" },
+        "spacePagesDown": { "type": "boolean", "default": false }
       }
     },
     "input": {
@@ -778,6 +820,21 @@
             "listId": { "$ref": "#/$defs/identifier" },
             "index": { "$ref": "#/$defs/revision" },
             "item": { "$ref": "#/$defs/listItem" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["op", "listId", "selectedId"],
+          "properties": {
+            "op": { "const": "listSetSelection" },
+            "listId": { "$ref": "#/$defs/identifier" },
+            "selectedId": {
+              "oneOf": [
+                { "$ref": "#/$defs/identifier" },
+                { "type": "null" }
+              ]
+            }
           }
         },
         {

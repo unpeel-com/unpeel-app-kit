@@ -16,6 +16,7 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case toggleSetValue(nodeID: String, value: Bool)
     case inputSetValue(nodeID: String, value: String)
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
+    case listSetSelection(listID: String, selectedID: String?)
     case listRemoveItem(listID: String, itemID: String)
 }
 
@@ -40,6 +41,7 @@ extension UIDeltaOperation: Codable {
         case index
         case item
         case itemID = "itemId"
+        case selectedID = "selectedId"
     }
 
     enum Operation: String, Codable {
@@ -57,6 +59,7 @@ extension UIDeltaOperation: Codable {
         case toggleSetValue
         case inputSetValue
         case listInsertItem
+        case listSetSelection
         case listRemoveItem
     }
 
@@ -140,6 +143,11 @@ extension UIDeltaOperation: Codable {
                 listID: try container.decode(String.self, forKey: .listID),
                 itemID: try container.decode(String.self, forKey: .itemID)
             )
+        case .listSetSelection:
+            self = .listSetSelection(
+                listID: try container.decode(String.self, forKey: .listID),
+                selectedID: try container.decodeIfPresent(String.self, forKey: .selectedID)
+            )
         }
     }
 
@@ -210,6 +218,14 @@ extension UIDeltaOperation: Codable {
             try container.encode(Operation.listRemoveItem, forKey: .op)
             try container.encode(listID, forKey: .listID)
             try container.encode(itemID, forKey: .itemID)
+        case let .listSetSelection(listID, selectedID):
+            try container.encode(Operation.listSetSelection, forKey: .op)
+            try container.encode(listID, forKey: .listID)
+            if let selectedID {
+                try container.encode(selectedID, forKey: .selectedID)
+            } else {
+                try container.encodeNil(forKey: .selectedID)
+            }
         }
     }
 }
@@ -431,6 +447,19 @@ private extension UINode {
                 throw UIDeltaApplicationError("Delta targets an unavailable ListItem")
             }
             list.items.remove(at: index)
+            page.body = .list(list)
+            return UINode(id: id, component: .page(page))
+        case let .listSetSelection(listID, selectedID):
+            var page = try page()
+            guard case var .list(list) = page.body,
+                  list.id == listID,
+                  selectedID.map({ selected in
+                      list.items.contains(where: { $0.id == selected })
+                  }) ?? true
+            else {
+                throw UIDeltaApplicationError("Delta targets an unavailable List selection")
+            }
+            list.selectedID = selectedID
             page.body = .list(list)
             return UINode(id: id, component: .page(page))
         }

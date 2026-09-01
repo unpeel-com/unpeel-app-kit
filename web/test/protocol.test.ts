@@ -83,23 +83,37 @@ describe("shared protocol", () => {
       "Attach SwiftUI or web",
       "Invite an agent with edit grant",
     ]);
+    expect(todoSnapshot.root.body).toMatchObject({
+      selectedId: "todo-1",
+      select: "select-todo",
+    });
     expect(uiNodeCapabilities(todoSnapshot.root)).toEqual([
       "page",
       "list",
       "listItem",
       "input",
       "toggle",
+      "listSelection",
     ]);
     const todoDelta = messages[14] as UiDelta;
     const updatedTodo = applyUiDelta(todoSnapshot, todoDelta);
     if (!isRenderablePageNode(updatedTodo.root)) throw new Error("expected Todo Page delta");
     expect(updatedTodo.root.body.items[1]?.done).toBe(true);
+    expect(updatedTodo.root.body.selectedId).toBe("todo-3");
 
     const usageSnapshot = messages[15] as UiSnapshot;
     if (!isRenderablePageNode(usageSnapshot.root)) throw new Error("expected Usage Page fixture");
     expect(usageSnapshot.root.back).toBe("close-provider");
     expect(usageSnapshot.root.body.items[0]?.detail).toBe("Resets in 6d 18h");
     expect(usageSnapshot.root.body.items[0]?.value).toBe("3% used");
+    expect(usageSnapshot.root.body.items[0]).toMatchObject({
+      emphasis: "strong",
+      valueTone: "success",
+      valueMinWidth: 30,
+      leading: { type: "status", symbol: "✓", tone: "success" },
+      accessory: { type: "badge", text: "Pro", tone: "accent" },
+    });
+    expect(usageSnapshot.root.body.items[1]?.busy).toBe(true);
     expect(usageSnapshot.root.body.items[1]?.activate).toBe("refresh-usage");
     expect(uiNodeCapabilities(usageSnapshot.root)).toEqual([
       "page",
@@ -108,6 +122,10 @@ describe("shared protocol", () => {
       "pageBack",
       "listItemMetadata",
       "listItemActivate",
+      "listItemPresentation",
+      "statusSymbol",
+      "badge",
+      "listSelection",
     ]);
 
     const canvasSnapshot = messages[18] as UiSnapshot;
@@ -280,6 +298,7 @@ describe("shared protocol", () => {
           item: { id: "todo-4", label: "Fourth", done: false },
         },
         { op: "listRemoveItem", listId: "todos", itemId: "todo-1" },
+        { op: "listSetSelection", listId: "todos", selectedId: "todo-2" },
       ],
     };
     const updated = applyUiDelta(snapshot, delta);
@@ -290,6 +309,7 @@ describe("shared protocol", () => {
       "todo-3",
       "todo-4",
     ]);
+    expect(updated.root.body.selectedId).toBe("todo-2");
   });
 });
 

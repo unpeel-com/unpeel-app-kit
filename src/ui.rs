@@ -1057,6 +1057,10 @@ pub enum UiDeltaOperation {
         index: u64,
         item: ListItem,
     },
+    ListSetSelection {
+        list_id: String,
+        selected_id: Option<String>,
+    },
     ListRemoveItem {
         list_id: String,
         item_id: String,
@@ -1134,6 +1138,14 @@ impl UiDeltaOperation {
         }
     }
 
+    #[must_use]
+    pub fn list_set_selection(list_id: impl Into<String>, selected_id: Option<String>) -> Self {
+        Self::ListSetSelection {
+            list_id: list_id.into(),
+            selected_id,
+        }
+    }
+
     fn validate(&self, path: &str) -> Result<(), UiProtocolError> {
         match self {
             Self::ReplaceRoot { root } => root.validate().map_err(UiProtocolError::InvalidView),
@@ -1200,6 +1212,18 @@ impl UiDeltaOperation {
                     .map_err(UiProtocolError::InvalidView)?;
                 validate_identifier(item_id, &format!("{path}.itemId"))
                     .map_err(UiProtocolError::InvalidView)
+            }
+            Self::ListSetSelection {
+                list_id,
+                selected_id,
+            } => {
+                validate_identifier(list_id, &format!("{path}.listId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if let Some(selected_id) = selected_id {
+                    validate_identifier(selected_id, &format!("{path}.selectedId"))
+                        .map_err(UiProtocolError::InvalidView)?;
+                }
+                Ok(())
             }
             Self::MarkdownSetSelection { node_id, .. }
             | Self::MarkdownSetPresentation { node_id, .. }
@@ -1297,6 +1321,14 @@ impl UiNode {
                 UiDeltaOperation::ListRemoveItem { list_id, item_id } => {
                     self.page_mut(index)?
                         .remove_list_item(list_id, item_id)
+                        .map_err(|error| component_delta_error(index, error))?;
+                }
+                UiDeltaOperation::ListSetSelection {
+                    list_id,
+                    selected_id,
+                } => {
+                    self.page_mut(index)?
+                        .set_list_selection(list_id, selected_id.clone())
                         .map_err(|error| component_delta_error(index, error))?;
                 }
             }
@@ -2617,6 +2649,7 @@ mod tests {
                 UiDeltaOperation::toggle_set_value("todo-1-toggle", true),
                 UiDeltaOperation::list_insert_item("todos", 1, second),
                 UiDeltaOperation::list_remove_item("todos", "todo-1"),
+                UiDeltaOperation::list_set_selection("todos", Some("todo-2".to_owned())),
             ],
         );
         let updated = todo_snapshot().applying(&delta).unwrap();
@@ -2626,6 +2659,7 @@ mod tests {
         assert_eq!(page.input_spec().unwrap().value, "draft");
         assert_eq!(page.list().items.len(), 1);
         assert_eq!(page.list().items[0].id, "todo-2");
+        assert_eq!(page.list().selected_id.as_deref(), Some("todo-2"));
     }
 
     #[test]
