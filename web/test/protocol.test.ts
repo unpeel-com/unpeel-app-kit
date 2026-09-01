@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   decodeUiMessage,
   diffText,
+  markdownTaskToggleAtOffset,
   markdownBlockReplacement,
   visibleMarkdownInsertItems,
   isMarkdownEditorNode,
@@ -787,6 +788,21 @@ describe("MarkdownEditor", () => {
       },
       text: "X",
     });
+  });
+
+  test("task markers toggle only when the caret lands on the checkbox", () => {
+    const text = "- [ ] first\n10. [x] second";
+    expect(markdownTaskToggleAtOffset(text, 3)).toEqual({
+      start: 3,
+      end: 4,
+      replacement: "x",
+    });
+    expect(markdownTaskToggleAtOffset(text, 17)).toEqual({
+      start: 17,
+      end: 18,
+      replacement: " ",
+    });
+    expect(markdownTaskToggleAtOffset(text, 7)).toBeUndefined();
   });
 });
 

@@ -15,6 +15,20 @@ func markdownInsertMenuFiltersAndBuildsClosedBlockReplacements() {
 }
 
 @Test
+func markdownTaskMarkersToggleOnlyAtTheCheckbox() {
+    let text = "- [ ] first\n10. [x] second"
+    #expect(markdownTaskToggleEdit(text: text, utf16Offset: 3) == MarkdownTaskToggleEdit(
+        range: NSRange(location: 3, length: 1),
+        replacement: "x"
+    ))
+    #expect(markdownTaskToggleEdit(text: text, utf16Offset: 17) == MarkdownTaskToggleEdit(
+        range: NSRange(location: 17, length: 1),
+        replacement: " "
+    ))
+    #expect(markdownTaskToggleEdit(text: text, utf16Offset: 7) == nil)
+}
+
+@Test
 func markdownSlashMenuIgnoresCodeFencesAndBackspaceRemovesMarkers() {
     let source = "title\n/todo"
     let context = markdownSlashContext(

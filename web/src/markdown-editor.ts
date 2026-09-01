@@ -16,6 +16,57 @@ export interface MarkdownEditorRendererOptions {
   renderMarkdown?: (source: string) => Node | string;
 }
 
+export interface MarkdownOffsetEdit {
+  start: number;
+  end: number;
+  replacement: string;
+}
+
+/** Returns the checkbox-character edit when a caret lands on a task marker. */
+export function markdownTaskToggleAtOffset(
+  text: string,
+  offset: number,
+): MarkdownOffsetEdit | undefined {
+  if (offset < 0 || offset > text.length) return undefined;
+  const lineStart = text.lastIndexOf("\n", Math.max(offset - 1, 0)) + 1;
+  const nextBreak = text.indexOf("\n", offset);
+  const lineEnd = nextBreak < 0 ? text.length : nextBreak;
+  const line = text.slice(lineStart, lineEnd);
+  const match = /^(\s*(?:(?:[-+*])|(?:\d+\.))\s+)\[([ xX])\]/u.exec(line);
+  if (!match) return undefined;
+  const markerStart = lineStart + match[1]!.length;
+  const markerEnd = markerStart + 2;
+  if (offset < markerStart || offset > markerEnd) return undefined;
+  return {
+    start: markerStart + 1,
+    end: markerStart + 2,
+    replacement: match[2] === " " ? "x" : " ",
+  };
+}
+
+function droppedMarkdownText(transfer: DataTransfer): string {
+  const uri = transfer.getData("text/uri-list")
+    .split(/\r?\n/u)
+    .find((line) => line !== "" && !line.startsWith("#"));
+  let text = "";
+  if (uri) {
+    try {
+      const url = new URL(uri);
+      text = url.protocol === "file:" ? decodeURIComponent(url.pathname) : uri;
+    } catch {
+      text = uri;
+    }
+  }
+  if (text === "") text = transfer.getData("text/plain");
+  if (text === "" && transfer.files.length > 0) {
+    // Browsers intentionally hide local absolute paths. A filename remains a
+    // useful Markdown insertion while native trusted renderers can insert the
+    // complete filesystem path.
+    text = Array.from(transfer.files, (file) => file.name).join("\n");
+  }
+  return text.replaceAll("\0", "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+}
+
 /// DOM renderer for the same terminal-backed MarkdownEditor component.
 export class MarkdownEditorRenderer {
   readonly element: HTMLElement;
@@ -108,8 +159,21 @@ export class MarkdownEditorRenderer {
       if (!this.keyEdited) this.selectionChanged();
       this.keyEdited = false;
     });
-    this.textarea.addEventListener("mouseup", () => this.selectionChanged());
+    this.textarea.addEventListener("mouseup", (event) => {
+      if (event.button === 0 && this.toggleTaskAtCaret()) return;
+      this.selectionChanged();
+    });
     this.textarea.addEventListener("blur", () => this.selectionChanged());
+    this.textarea.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer) return;
+      if (event.dataTransfer.files.length > 0
+        || event.dataTransfer.types.includes("text/plain")
+        || event.dataTransfer.types.includes("text/uri-list")) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }
+    });
+    this.textarea.addEventListener("drop", (event) => this.insertDrop(event));
     this.textarea.addEventListener("contextmenu", (event) => {
       if (this.editor?.contextMenu === undefined) return;
       event.preventDefault();
@@ -218,6 +282,34 @@ export class MarkdownEditorRenderer {
     this.keyEdited = true;
     this.refreshInsertMenu();
     this.scheduleFlush();
+  }
+
+  private toggleTaskAtCaret(): boolean {
+    if (!this.editor || this.editor.readOnly || this.textarea.selectionStart !== this.textarea.selectionEnd) {
+      return false;
+    }
+    const caret = this.textarea.selectionStart;
+    const edit = markdownTaskToggleAtOffset(this.textarea.value, caret);
+    if (!edit) return false;
+    this.textarea.setRangeText(edit.replacement, edit.start, edit.end, "preserve");
+    this.textarea.setSelectionRange(caret, caret);
+    this.textChanged();
+    return true;
+  }
+
+  private insertDrop(event: DragEvent): void {
+    if (!event.dataTransfer || !this.editor || this.editor.readOnly) return;
+    const insertion = droppedMarkdownText(event.dataTransfer);
+    if (insertion === "") return;
+    event.preventDefault();
+    this.textarea.setRangeText(
+      insertion,
+      this.textarea.selectionStart,
+      this.textarea.selectionEnd,
+      "end",
+    );
+    this.textChanged();
+    this.textarea.focus();
   }
 
   private selectionChanged(): void {
@@ -543,6 +635,22 @@ export class MarkdownEditorRenderer {
         ));
       });
       this.toolbar.append(picker);
+    }
+
+    const openMenuAction = componentAction(editor.actions, "openMenu", "open-menu");
+    if (openMenuAction) {
+      const commands = document.createElement("button");
+      commands.type = "button";
+      commands.textContent = "Commands";
+      commands.addEventListener("click", () => {
+        this.onAction(uiAction(
+          editor.id,
+          openMenuAction,
+          "command",
+          { type: "text", value: "palette" },
+        ));
+      });
+      this.toolbar.append(commands);
     }
 
     const saveAction = componentAction(editor.actions, "save", "save");

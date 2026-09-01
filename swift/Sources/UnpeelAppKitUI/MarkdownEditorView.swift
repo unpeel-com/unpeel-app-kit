@@ -90,6 +90,17 @@ public struct MarkdownEditorView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 190)
             }
+            if let action = editor.actions.openMenu {
+                Button("Commands") {
+                    onAction(UIAction(
+                        nodeID: snapshot.root.id,
+                        action: action,
+                        kind: .command,
+                        value: .text("palette")
+                    ))
+                }
+                .help("Open block commands")
+            }
             if let action = editor.actions.save, !editor.readOnly {
                 Button("Save") {
                     onAction(UIAction(
@@ -158,6 +169,102 @@ private struct MarkdownPreview: View {
     }
 }
 
+struct MarkdownTaskToggleEdit: Equatable {
+    let range: NSRange
+    let replacement: String
+}
+
+func markdownTaskToggleEdit(text: String, utf16Offset: Int) -> MarkdownTaskToggleEdit? {
+    let source = text as NSString
+    guard utf16Offset >= 0, utf16Offset <= source.length else { return nil }
+    let location = min(utf16Offset, max(source.length - 1, 0))
+    let lineRange = source.lineRange(for: NSRange(location: location, length: 0))
+    let line = source.substring(with: lineRange)
+    guard let expression = try? NSRegularExpression(
+        pattern: #"^(\s*(?:(?:[-+*])|(?:\d+\.))\s+)\[([ xX])\]"#
+    ), let match = expression.firstMatch(
+        in: line,
+        range: NSRange(location: 0, length: (line as NSString).length)
+    ) else { return nil }
+    let markerStart = lineRange.location + match.range(at: 1).length
+    let markerEnd = markerStart + 2
+    guard utf16Offset >= markerStart, utf16Offset <= markerEnd else { return nil }
+    let stateRange = NSRange(location: markerStart + 1, length: 1)
+    let checked = source.substring(with: stateRange) != " "
+    return MarkdownTaskToggleEdit(range: stateRange, replacement: checked ? " " : "x")
+}
+
+@MainActor
+private final class InteractiveMarkdownTextView: NSTextView {
+    var interactionEnabled = true
+    var replaceFromInteraction: ((NSRange, String, Int) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        if interactionEnabled,
+           event.buttonNumber == 0,
+           event.clickCount == 1,
+           let offset = characterOffset(at: event.locationInWindow),
+           let edit = markdownTaskToggleEdit(text: string, utf16Offset: offset)
+        {
+            replaceFromInteraction?(edit.range, edit.replacement, 1)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        interactionEnabled && droppedText(from: sender.draggingPasteboard) != nil ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard interactionEnabled,
+              let text = droppedText(from: sender.draggingPasteboard),
+              !text.isEmpty
+        else { return false }
+        let offset = characterOffset(at: sender.draggingLocation) ?? selectedRange().location
+        replaceFromInteraction?(
+            NSRange(location: min(offset, (string as NSString).length), length: 0),
+            text,
+            text.utf16.count
+        )
+        return true
+    }
+
+    private func characterOffset(at windowPoint: NSPoint) -> Int? {
+        guard let layoutManager, let textContainer else { return nil }
+        let point = convert(windowPoint, from: nil)
+        let containerPoint = NSPoint(
+            x: point.x - textContainerOrigin.x,
+            y: point.y - textContainerOrigin.y
+        )
+        let glyph = layoutManager.glyphIndex(
+            for: containerPoint,
+            in: textContainer,
+            fractionOfDistanceThroughGlyph: nil
+        )
+        guard glyph < layoutManager.numberOfGlyphs else {
+            return (string as NSString).length
+        }
+        return layoutManager.characterIndexForGlyph(at: glyph)
+    }
+
+    private func droppedText(from pasteboard: NSPasteboard) -> String? {
+        let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL]
+        let raw = if let urls, !urls.isEmpty {
+            urls.map(\.path).joined(separator: "\n")
+        } else {
+            pasteboard.string(forType: .string)
+        }
+        return raw?
+            .replacingOccurrences(of: "\0", with: "")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+    }
+}
+
 @MainActor
 private struct MarkdownTextView: NSViewRepresentable {
     let nodeID: String
@@ -182,7 +289,7 @@ private struct MarkdownTextView: NSViewRepresentable {
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
 
-        let textView = NSTextView()
+        let textView = InteractiveMarkdownTextView()
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.importsGraphics = false
@@ -201,6 +308,7 @@ private struct MarkdownTextView: NSViewRepresentable {
         textView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 5, height: 6)
+        textView.registerForDraggedTypes([.fileURL, .string])
         scrollView.documentView = textView
         context.coordinator.attach(textView)
         context.coordinator.apply(editor, revision: revision, to: textView)
@@ -255,6 +363,17 @@ private struct MarkdownTextView: NSViewRepresentable {
 
         func attach(_ textView: NSTextView) {
             self.textView = textView
+            if let textView = textView as? InteractiveMarkdownTextView {
+                textView.replaceFromInteraction = { [weak self, weak textView] range, text, caret in
+                    guard let self, let textView else { return }
+                    self.replaceText(
+                        in: textView,
+                        range: range,
+                        with: text,
+                        caretUTF16Offset: caret
+                    )
+                }
+            }
         }
 
         func update(
@@ -281,6 +400,7 @@ private struct MarkdownTextView: NSViewRepresentable {
             }
             textView.isEditable = !editor.readOnly && editor.actions.replaceRange != nil
             textView.isSelectable = true
+            (textView as? InteractiveMarkdownTextView)?.interactionEnabled = textView.isEditable
             var shouldApplyAuthoritativeSelection = false
             let previousSelection = authoritativeSelection
             let selectionChanged = editor.selection != previousSelection
