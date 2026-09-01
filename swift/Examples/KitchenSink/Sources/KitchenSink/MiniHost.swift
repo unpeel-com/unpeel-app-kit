@@ -1,8 +1,14 @@
+import AppKit
 import Foundation
 import SwiftUI
 import UnpeelAppKitUI
 
 enum DemoKind: String, CaseIterable, Identifiable, Sendable {
+    case usageApp = "usage-app"
+    case diffsApp = "diffs-app"
+    case githubIssuesApp = "github-issues-app"
+    case markdownApp = "markdown-app"
+    case filetreeApp = "filetree-app"
     case todo
     case markdown
     case media
@@ -13,6 +19,11 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .usageApp: "Usage App"
+        case .diffsApp: "Diffs App"
+        case .githubIssuesApp: "GitHub Issues App"
+        case .markdownApp: "Markdown App"
+        case .filetreeApp: "File Tree App"
         case .todo: "Todo"
         case .markdown: "Markdown"
         case .media: "Media"
@@ -23,6 +34,11 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
 
     var systemImage: String {
         switch self {
+        case .usageApp: "chart.bar.xaxis"
+        case .diffsApp: "plus.forwardslash.minus"
+        case .githubIssuesApp: "exclamationmark.circle"
+        case .markdownApp: "doc.text"
+        case .filetreeApp: "folder"
         case .todo: "checklist"
         case .markdown: "doc.richtext"
         case .media: "photo"
@@ -33,6 +49,13 @@ enum DemoKind: String, CaseIterable, Identifiable, Sendable {
 
     var usesSurface: Bool {
         self == .surface || self == .canvas
+    }
+
+    var isCrossPlatformAuditApp: Bool {
+        switch self {
+        case .usageApp, .diffsApp, .githubIssuesApp, .markdownApp, .filetreeApp: true
+        case .todo, .markdown, .media, .surface, .canvas: false
+        }
     }
 }
 
@@ -85,7 +108,7 @@ final class MiniHost: ObservableObject {
     @Published var selectedSessionID: String? {
         didSet { updatePresentedSessions() }
     }
-    @Published private(set) var buildMessage = "Building Rust examples…"
+    @Published private(set) var buildMessage = "Building Rust apps…"
     @Published private(set) var buildError: String?
 
     init() {
@@ -102,9 +125,15 @@ final class MiniHost: ObservableObject {
             let examples = try await Task.detached(priority: .userInitiated) {
                 try Self.buildExamples(repository: repository)
             }.value
+            let automaticAudit = ProcessInfo.processInfo.environment[
+                "UNPEEL_KITCHEN_AUTO_WALK"
+            ] == "1"
+            let examplesToHost = automaticAudit
+                ? examples.filter { $0.kind.isCrossPlatformAuditApp }
+                : examples
             var prepared: [HostedAppSession] = []
             do {
-                for example in examples {
+                for example in examplesToHost {
                     prepared.append(try HostedAppSession(
                         kind: example.kind,
                         executable: example.executable,
@@ -123,6 +152,9 @@ final class MiniHost: ObservableObject {
                 $0.kind.rawValue == requestedDemo
             })?.id ?? sessions.first?.id
             buildMessage = "Ready"
+            if automaticAudit {
+                startAutomatedAudit()
+            }
         } catch {
             buildError = error.localizedDescription
             buildMessage = "Build failed"
@@ -160,32 +192,43 @@ final class MiniHost: ObservableObject {
     nonisolated private static func buildExamples(repository: String) throws -> [BuiltExample] {
         let targetDirectory = URL(fileURLWithPath: repository, isDirectory: true)
             .appendingPathComponent("target/kitchen-sink", isDirectory: true)
-        let process = Process()
-        let diagnostics = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [
-            "cargo", "build", "--quiet",
-            "--manifest-path", "\(repository)/Cargo.toml",
-            "--target-dir", targetDirectory.path,
-            "--features", "markdown-text-area,media,surface-embed",
-            "--example", "todo",
-            "--example", "markdown",
-            "--example", "media",
-            "--example", "surface_planets",
-            "--example", "surface_canvas",
+        try buildRust(
+            manifest: "\(repository)/Cargo.toml",
+            targetDirectory: targetDirectory.path,
+            arguments: [
+                "--features", "markdown-text-area,media,surface-embed",
+                "--example", "todo",
+                "--example", "markdown",
+                "--example", "media",
+                "--example", "surface_planets",
+                "--example", "surface_canvas",
+            ]
+        )
+        let siblingRoot = URL(fileURLWithPath: repository, isDirectory: true)
+            .deletingLastPathComponent()
+        let siblingTarget = targetDirectory.appendingPathComponent("apps", isDirectory: true)
+        let siblingApps: [(DemoKind, String, String)] = [
+            (.usageApp, "unpeel-app-usage", "unpeel-usage"),
+            (.diffsApp, "unpeel-app-diffs", "unpeel-diffs"),
+            (.githubIssuesApp, "unpeel-app-github-issues", "unpeel-github-issues"),
+            (.markdownApp, "unpeel-app-markdown", "unpeel-markdown"),
+            (.filetreeApp, "unpeel-app-filetree", "unpeel-filetree"),
         ]
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "UNPEEL_UI_SOCKET")
-        environment.removeValue(forKey: "UNPEEL_UI_TOKEN")
-        process.environment = environment
-        process.standardOutput = diagnostics
-        process.standardError = diagnostics
-        try process.run()
-        let output = diagnostics.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let message = String(data: output, encoding: .utf8) ?? "cargo build failed"
-            throw MiniHostError.buildFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
+        for (_, repositoryName, binary) in siblingApps {
+            try buildRust(
+                manifest: siblingRoot
+                    .appendingPathComponent(repositoryName)
+                    .appendingPathComponent("Cargo.toml").path,
+                targetDirectory: siblingTarget.path,
+                arguments: ["--bin", binary]
+            )
+        }
+        var built = siblingApps.map { kind, _, binary in
+            BuiltExample(
+                kind: kind,
+                executable: siblingTarget.appendingPathComponent("debug/\(binary)").path,
+                environment: [:]
+            )
         }
         var examples: [(DemoKind, String, [String: String])] = [
             (.todo, "todo", [:]),
@@ -197,13 +240,44 @@ final class MiniHost: ObservableObject {
             examples.append((.surface, "surface_planets", environment))
             examples.append((.canvas, "surface_canvas", environment))
         }
-        return examples.map { kind, executableName, extraEnvironment in
+        built += examples.map { kind, executableName, extraEnvironment in
             BuiltExample(
                 kind: kind,
                 executable: targetDirectory
                     .appendingPathComponent("debug/examples/\(executableName)")
                     .path,
                 environment: extraEnvironment
+            )
+        }
+        return built
+    }
+
+    nonisolated private static func buildRust(
+        manifest: String,
+        targetDirectory: String,
+        arguments: [String]
+    ) throws {
+        let process = Process()
+        let diagnostics = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "cargo", "build", "--quiet",
+            "--manifest-path", manifest,
+            "--target-dir", targetDirectory,
+        ] + arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: "UNPEEL_UI_SOCKET")
+        environment.removeValue(forKey: "UNPEEL_UI_TOKEN")
+        process.environment = environment
+        process.standardOutput = diagnostics
+        process.standardError = diagnostics
+        try process.run()
+        let output = diagnostics.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: output, encoding: .utf8) ?? "cargo build failed"
+            throw MiniHostError.buildFailed(
+                "\(manifest): \(message.trimmingCharacters(in: .whitespacesAndNewlines))"
             )
         }
     }
@@ -228,6 +302,31 @@ final class MiniHost: ObservableObject {
     private func updatePresentedSessions() {
         for session in sessions {
             session.setPresented(session.id == selectedSessionID)
+        }
+    }
+
+    private func startAutomatedAudit() {
+        let audited = sessions.filter { $0.kind.isCrossPlatformAuditApp }
+        audited.forEach { $0.walkEveryScreen() }
+        Task { [weak self] in
+            for _ in 0..<600 {
+                if audited.allSatisfy(\.walkthroughComplete) { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard let self else { return }
+            let report = HostedAppSession.coverageReport(for: audited)
+            let environment = ProcessInfo.processInfo.environment
+            if let path = environment["UNPEEL_KITCHEN_AUDIT_REPORT"], !path.isEmpty {
+                try? report.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+            try? FileHandle.standardError.write(contentsOf: Data((report + "\n").utf8))
+            self.buildMessage = audited.allSatisfy(\.walkthroughComplete)
+                ? "Cross-platform audit passed"
+                : "Cross-platform audit incomplete"
+            if environment["UNPEEL_KITCHEN_AUTO_EXIT"] == "1" {
+                self.shutdown()
+                NSApplication.shared.terminate(nil)
+            }
         }
     }
 }
@@ -270,6 +369,9 @@ final class HostedAppSession: ObservableObject, Identifiable {
     @Published private(set) var instanceGeneration = 0
     @Published private(set) var lastAttachResumed: Bool?
     @Published private(set) var fallbackMessage: String?
+    @Published var observedScreens: [String] = []
+    @Published var walkthroughStatus = "Not run"
+    var walkthroughStep: Int?
 
     @Published var agentGrants: Set<String> = ["view", "edit"]
     @Published private(set) var agentAttached = false
@@ -305,6 +407,7 @@ final class HostedAppSession: ObservableObject, Identifiable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        try kind.prepareKitchenFixture(sessionDirectory: sessionDirectory)
         surfaceBroker = kind.usesSurface
             ? try? SurfaceMiniBroker(sessionDirectory: sessionDirectory)
             : nil
@@ -605,6 +708,11 @@ final class HostedAppSession: ObservableObject, Identifiable {
         environment["UNPEEL_KITCHEN_SINK"] = "1"
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
+        for (key, value) in kind.kitchenFixtureEnvironment(
+            sessionDirectory: sessionDirectory
+        ) {
+            environment[key] = value
+        }
         if let surfaceBroker {
             environment["UNPEEL_SURFACE_SOCKET"] = surfaceBroker.socketPath
             environment["UNPEEL_SURFACE_REMOTE_WIDTH"] = String(
@@ -625,7 +733,9 @@ final class HostedAppSession: ObservableObject, Identifiable {
         processState = .starting
         terminalEngine.start(TerminalLaunch(
             executable: executable,
-            currentDirectory: sessionDirectory,
+            currentDirectory: kind.kitchenLaunchDirectory(
+                sessionDirectory: sessionDirectory
+            ),
             environment: environment
         ))
         processState = .running
@@ -663,8 +773,12 @@ final class HostedAppSession: ObservableObject, Identifiable {
         case let .snapshot(snapshot):
             self.snapshot = snapshot
             fallbackMessage = nil
+            observeWalkthrough(snapshot)
         case let .ack(ack):
             lastAck = ack
+            if walkthroughStep != nil, ack.status == .rejected || ack.status == .stale {
+                walkthroughStatus = "\(ack.status.rawValue): \(ack.message ?? "action failed")"
+            }
         case let .presence(presence):
             self.presence = presence.members
         case let .error(error):

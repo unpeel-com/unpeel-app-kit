@@ -18,8 +18,9 @@ contains the optional hosted projection; without injected Host variables it is
 equally inert. Todo constructs Page, List, ListItem, Toggle, and Input values
 without passing a bridge into any component API.
 
-On macOS, the independent Kitchen Sink package exercises that same binary and
-the Markdown and Media examples through real libghostty PTYs, the native
+On macOS, the independent Kitchen Sink package exercises that same binary,
+the component examples, and the five sibling Apps (Usage, Diffs, GitHub
+Issues, Markdown, and File Tree) through real libghostty PTYs, the native
 SwiftUI renderer, and the actual TypeScript DOM renderers inside `WKWebView`,
 without Unpeel installed:
 
@@ -828,23 +829,38 @@ The active navigation and editing surface graph is now fully projected:
 - slash, backslash command palette, and selection context menus are
   SemanticMenu descriptors handled by the same reducer in every renderer.
 
-No dialog, picker, or menu inside an attached Markdown App session remains
-terminal-only. The audit did find three smaller gaps to close before calling
-the entire App 100% interaction-equivalent:
-
-- the first-ever folder chooser still runs as a TUI bootstrap before a
-  document/vault projection exists, only when there is no explicit path and no
-  remembered workspace;
-- the terminal footer's transient save/error message and current auto-save
-  indicator are not yet fields of `MarkdownEditor` (title, dirty state,
-  selection, and the palette action itself are already semantic); and
-- clicking task markers and dropping trusted-local filesystem paths are still
-  terminal-local editor gestures. Their resulting text edits synchronize, but
-  native/web do not yet expose equivalent gestures.
+No dialog, picker, menu, or editor state inside an attached Markdown App
+session remains terminal-only. The first-run workspace chooser is Page +
+Input; the editor title carries filename, save/dirty state, cursor position,
+auto-save state, and transient notices; native/web task-marker clicks enter
+the same text reducer; and trusted-local drops become semantic text edits
+(browser sandboxing intentionally exposes filenames when it withholds paths).
+The slash and context menus are closed SemanticMenu values, not renderer-owned
+commands.
 
 Caret/drop-hover visuals, local drag maps, and syntax colors remain
 platform-specific presentation rather than alternate App state surfaces.
 Unsupported renderers still receive the complete TUI.
+
+### Five-App cross-platform audit
+
+Kitchen Sink now builds and spawns Usage, Diffs, GitHub Issues, Markdown, and
+File Tree against isolated deterministic fixtures. Its screen walker drives
+the live App reducers over `ui.sock`; it does not substitute fixture snapshots
+for the Apps. The current verified inventory is:
+
+- Usage: provider catalog, provider detail, and Alerts;
+- Diffs: changed-file list and complete styled Content detail;
+- GitHub Issues: semantic filter/list and complete issue Content detail;
+- Markdown: workspace chooser, Tree picker, new-note form, editor, context
+  menu, and slash insert menu; and
+- File Tree: root and nested Tree screens, including filter and context menu.
+
+All five report **Terminal-only surfaces: none**. The retained Tree delta used
+for directory navigation clears a disappearing selection before splicing the
+new child collection, keeping every intermediate revision valid in Rust,
+Swift, and web. The reproducible command and captured report live in
+[`cross-platform-app-audit.md`](cross-platform-app-audit.md).
 
 ## Media v1
 

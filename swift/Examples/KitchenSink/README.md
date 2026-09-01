@@ -15,10 +15,13 @@ also promotes itself from macOS's default `BackgroundOnly` classification.
 Either path lets libghostty, native SwiftUI, and embedded web views own keyboard
 focus instead of the terminal that launched the rig.
 
-The first launch fetches `libghostty-spm` 1.5.0 and builds the repository's
-Todo, Markdown, Media, Surface Planets, and Canvas + Controls examples into
-`target/kitchen-sink`. The Surface examples are added to the session list when their sibling guest artifact
-exists. Its native and web presenters are enabled when the sibling
+The first launch fetches `libghostty-spm` 1.5.0 and builds the sibling Usage,
+Diffs, GitHub Issues, Markdown, and File Tree Apps plus this repository's Todo,
+Markdown, Media, Surface Planets, and Canvas + Controls examples into
+`target/kitchen-sink`. The five sibling repositories must sit beside
+`unpeel-app-kit`; Unpeel itself is not installed or launched. Surface examples
+are added when their sibling guest artifact exists. Their native and web
+presenters are enabled when the sibling
 `UnpeelSurfaceKit` XCFramework and `web/pkg` artifacts also exist. Each example
 then runs as the direct child of a real Ghostty exec PTY in a private,
 short-lived `/tmp/upkit-…` session directory. GhosttyTerminal owns the grid,
@@ -48,6 +51,24 @@ authoritative App process, attach a hidden agent participant with selectable
 grants, invoke a semantic action as that agent, inspect presence and final
 acks, and distinguish raw snapshots from server deltas. The participant's
 personalized title/alt text also proves `publish_to` isolation.
+
+Each of the five sibling sessions also has **Walk every screen**. It drives
+deterministic fixture data through the live reducer and records an explicit
+terminal-only inventory. Usage covers catalog/detail/Alerts; Diffs and GitHub
+Issues cover list and complete Content details; Markdown covers first-run
+chooser, Tree picker, new-note Page, editor, context menu, and slash menu; File
+Tree covers root and nested Trees. Run the reproducible unattended pass with:
+
+```sh
+UNPEEL_KITCHEN_AUTO_WALK=1 \
+UNPEEL_KITCHEN_AUTO_EXIT=1 \
+UNPEEL_KITCHEN_AUDIT_REPORT=/tmp/app-kit-audit.md \
+swift run --package-path swift/Examples/KitchenSink
+```
+
+Automatic mode launches only those five audit sessions, prints the report,
+and exits. The committed expected result is **Terminal-only surfaces: none**
+for every App.
 
 For the Todo session, terminal row clicks and input selection use the public
 `Page.layout` / `InputField` hit-test geometry, while native and web controls

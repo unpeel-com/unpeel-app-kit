@@ -124,6 +124,12 @@ private struct SessionDetail: View {
                 text: session.deliveryLabel,
                 color: session.lastDelivery.isDelta ? .purple : .blue
             )
+            if session.kind.isCrossPlatformAuditApp {
+                StatusPill(
+                    text: session.walkthroughStatus,
+                    color: session.walkthroughComplete ? .green : .secondary
+                )
+            }
             Spacer()
             Picker("Presentation", selection: $session.paneMode) {
                 ForEach(PaneMode.allCases) { mode in
@@ -413,6 +419,36 @@ private struct HarnessPanel: View {
                 }
 
                 Divider().frame(height: 108)
+
+                if session.kind.isCrossPlatformAuditApp {
+                    controlGroup("SEMANTIC SCREEN WALK") {
+                        HStack {
+                            Button("Walk every screen", systemImage: "figure.walk") {
+                                session.walkEveryScreen()
+                            }
+                            Text(session.walkthroughStatus)
+                                .font(.caption)
+                                .foregroundStyle(
+                                    session.walkthroughComplete ? .green : .secondary
+                                )
+                        }
+                        Text(session.observedScreens.isEmpty
+                            ? "No screens observed yet"
+                            : session.observedScreens.joined(separator: " · "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        let missing = session.kind.expectedSemanticScreens.filter {
+                            !session.observedScreens.contains($0)
+                        }
+                        Text("Terminal-only: \(missing.isEmpty ? "none" : missing.joined(separator: ", "))")
+                            .font(.caption)
+                            .foregroundStyle(missing.isEmpty ? .green : .orange)
+                            .lineLimit(1)
+                    }
+
+                    Divider().frame(height: 108)
+                }
 
                 controlGroup("SECOND PARTICIPANT") {
                     HStack(spacing: 10) {

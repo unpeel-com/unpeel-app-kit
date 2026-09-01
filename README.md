@@ -50,9 +50,11 @@ exercises the complete hosted loop without Unpeel installed:
 swift/Examples/KitchenSink/run-app.sh
 ```
 
-It builds and launches the Todo, Markdown, Media, and (when the sibling guest
-artifact exists) Surface Planets plus Canvas + Controls examples in real libghostty PTYs rendered
-through Metal, creates private per-session Unix
+It builds and launches the five sibling Apps—Usage, Diffs, GitHub Issues,
+Markdown, and File Tree—plus the Todo, component Markdown, Media, and (when
+the sibling guest artifact exists) Surface Planets and Canvas + Controls
+examples. Every process runs in a real libghostty PTY rendered through Metal;
+the mini-host creates private per-session Unix
 sockets and signing keys, and attaches the sibling `UnpeelAppKitUI` renderer
 with Host-minted scoped tokens. A `WKWebView` loads the repository's actual
 TypeScript/DOM renderers against the same live snapshot and action stream.
@@ -67,6 +69,23 @@ controls cover child kill/restart and durable restore, renderer
 disconnect/resume, a second agent participant with configurable grants,
 presence and acknowledgements, participant-specific `publish_to` projections,
 and a raw snapshot-versus-delta indicator.
+
+For the five migrated Apps, a **Walk every screen** control drives deterministic
+local fixtures through each catalog, detail, picker, menu, editor, and nested
+Tree state. The harness records observed semantic screens and displays the
+remaining terminal-only list inline. The same audit can run unattended:
+
+```sh
+UNPEEL_KITCHEN_AUTO_WALK=1 \
+UNPEEL_KITCHEN_AUTO_EXIT=1 \
+UNPEEL_KITCHEN_AUDIT_REPORT=/tmp/app-kit-audit.md \
+swift run --package-path swift/Examples/KitchenSink
+```
+
+Automatic mode hosts only those five sessions, exits after the walk, and
+writes the per-App report. See
+[`docs/cross-platform-app-audit.md`](docs/cross-platform-app-audit.md) for the
+checked-in result and exact screen inventory.
 
 The two Surface sessions exercise the composed canvas path as well. Canvas +
 Controls puts the closed CanvasPage/Button toolbar over the same local GPU
