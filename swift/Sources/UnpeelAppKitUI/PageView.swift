@@ -355,6 +355,14 @@ private struct PageContent: View {
                     action: activate,
                     kind: .activate
                 ))
+            } else if let gauge = item.primaryGauge,
+                      let activate = gauge.activate
+            {
+                onAction(UIAction(
+                    nodeID: gauge.id,
+                    action: activate,
+                    kind: .activate
+                ))
             } else {
                 return false
             }
@@ -530,6 +538,21 @@ private struct PageContent: View {
                         selectLocally(itemID, in: list)
                         onAction(UIAction(
                             nodeID: sparkline.id,
+                            action: action,
+                            kind: .activate
+                        ))
+                    }
+                }
+            )
+        case let .gauge(gauge):
+            NativeCompactGauge(
+                spec: gauge,
+                color: color(for: valueTone),
+                onActivate: gauge.activate.map { action in
+                    {
+                        selectLocally(itemID, in: list)
+                        onAction(UIAction(
+                            nodeID: gauge.id,
                             action: action,
                             kind: .activate
                         ))
@@ -751,11 +774,46 @@ private struct NativeGauge: View {
         SwiftUI.Gauge(value: spec.ratio, in: 0...1) {
             Text(spec.label)
         } currentValueLabel: {
-            Text(spec.percentageValueLabel)
+            Text(spec.valueLabel)
         }
         .gaugeStyle(.accessoryLinearCapacity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spec.accessibilityText)
+    }
+}
+
+@MainActor
+private struct NativeCompactGauge: View {
+    let spec: UIGaugeSpec
+    let color: Color
+    var onActivate: (() -> Void)?
+
+    @ViewBuilder
+    var body: some View {
+        if let onActivate {
+            Button(action: onActivate) {
+                content
+            }
+            .buttonStyle(.plain)
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .trailing, spacing: 3) {
+            Text(spec.valueLabel)
+                .font(.caption)
+                .foregroundStyle(color)
+                .lineLimit(1)
+            ProgressView(value: spec.ratio, total: 1)
+                .progressViewStyle(.linear)
+                .tint(color)
+                .frame(width: 150)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spec.accessibilityText)
+        .accessibilityValue(spec.valueLabel)
     }
 }
 

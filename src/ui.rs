@@ -1202,8 +1202,7 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
     }
     match (&previous_page.body, &next_page.body) {
         (PageBodySlot::List(previous_list), PageBodySlot::List(next_list)) => {
-            let Some(mut operations) = list_sparkline_delta_operations(previous_list, next_list)
-            else {
+            let Some(mut operations) = list_chart_delta_operations(previous_list, next_list) else {
                 return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
             };
             if previous_list.id != next_list.id
@@ -1298,7 +1297,7 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
     }
 }
 
-fn list_sparkline_delta_operations(
+fn list_chart_delta_operations(
     previous: &crate::List,
     next: &crate::List,
 ) -> Option<Vec<UiDeltaOperation>> {
@@ -1317,6 +1316,18 @@ fn list_sparkline_delta_operations(
             && previous_sparkline != next_sparkline
         {
             operations.push(UiDeltaOperation::sparkline_set_data(next_sparkline));
+            candidate.trailing = next_item.trailing.clone();
+            continue;
+        }
+        if let (
+            Some(crate::ListItemSlot::Gauge(previous_gauge)),
+            Some(crate::ListItemSlot::Gauge(next_gauge)),
+        ) = (&candidate.trailing, &next_item.trailing)
+            && previous_gauge.id == next_gauge.id
+            && previous_gauge.activate == next_gauge.activate
+            && previous_gauge != next_gauge
+        {
+            operations.push(UiDeltaOperation::gauge_set_data(next_gauge));
             candidate.trailing = next_item.trailing.clone();
         }
     }
@@ -1527,11 +1538,12 @@ pub enum UiDeltaOperation {
         y_axis: LineChartAxis,
         accessibility_text: String,
     },
-    /// Replaces one keyed Gauge's ratio, label, and accessibility description.
+    /// Replaces one keyed Gauge's ratio, App-owned copy, and accessibility description.
     GaugeSetData {
         node_id: String,
         ratio: SparklinePoint,
         label: String,
+        caption: Option<String>,
         accessibility_text: String,
     },
     InputSetValue {
@@ -1687,6 +1699,7 @@ impl UiDeltaOperation {
             node_id: gauge.id.clone(),
             ratio: gauge.ratio,
             label: gauge.label.clone(),
+            caption: gauge.caption.clone(),
             accessibility_text: gauge.accessibility_text.clone(),
         }
     }
@@ -1856,11 +1869,13 @@ impl UiDeltaOperation {
                 node_id,
                 ratio,
                 label,
+                caption,
                 accessibility_text,
             } => Gauge {
                 id: node_id.clone(),
                 ratio: *ratio,
                 label: label.clone(),
+                caption: caption.clone(),
                 accessibility_text: accessibility_text.clone(),
                 activate: None,
             }
@@ -2171,6 +2186,7 @@ impl UiNode {
                     node_id,
                     ratio,
                     label,
+                    caption,
                     accessibility_text,
                 } => {
                     self.page_mut(index)?
@@ -2178,6 +2194,7 @@ impl UiNode {
                             id: node_id.clone(),
                             ratio: *ratio,
                             label: label.clone(),
+                            caption: caption.clone(),
                             accessibility_text: accessibility_text.clone(),
                             activate: None,
                         })
@@ -3784,6 +3801,47 @@ mod tests {
             operations.as_slice(),
             [UiDeltaOperation::SparklineSetData { node_id, .. }]
                 if node_id == "trend-series"
+        ));
+        let mut applied = previous;
+        applied.apply_delta_operations(&operations).unwrap();
+        assert_eq!(applied, next);
+    }
+
+    #[test]
+    fn page_diff_updates_a_list_gauge_and_its_app_owned_caption() {
+        let page = |ratio: f64, caption: &str| {
+            UiNode::page(
+                "usage-page",
+                Page::new(
+                    "Usage",
+                    List::new(
+                        "usage-metrics",
+                        vec![
+                            ListItem::new("weekly", "7-day limit").trailing(ListItemSlot::gauge(
+                                Gauge::new(
+                                    "weekly-gauge",
+                                    ratio,
+                                    "7-day limit",
+                                    format!("7-day limit: {caption}"),
+                                )
+                                .caption(caption),
+                            )),
+                        ],
+                    ),
+                ),
+            )
+        };
+        let previous = page(0.77, "77% left · Resets in 5d 14h");
+        let next = page(0.61, "61% left · Resets in 4d");
+
+        let operations = page_delta_operations(&previous, &next);
+        assert!(matches!(
+            operations.as_slice(),
+            [UiDeltaOperation::GaugeSetData {
+                node_id,
+                caption: Some(caption),
+                ..
+            }] if node_id == "weekly-gauge" && caption == "61% left · Resets in 4d"
         ));
         let mut applied = previous;
         applied.apply_delta_operations(&operations).unwrap();

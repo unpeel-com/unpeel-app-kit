@@ -1781,6 +1781,7 @@ public struct UIGaugeSpec: Codable, Equatable, Hashable, Sendable {
     public let id: String
     public let ratio: Double
     public let label: String
+    public let caption: String?
     public let accessibilityText: String
     public let activate: String?
 
@@ -1788,18 +1789,20 @@ public struct UIGaugeSpec: Codable, Equatable, Hashable, Sendable {
         id: String,
         ratio: Double,
         label: String,
+        caption: String? = nil,
         accessibilityText: String,
         activate: String? = nil
     ) {
         self.id = id
         self.ratio = ratio
         self.label = label
+        self.caption = caption
         self.accessibilityText = accessibilityText
         self.activate = activate
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, ratio, label, accessibilityText, activate
+        case id, ratio, label, caption, accessibilityText, activate
     }
 
     public init(from decoder: Decoder) throws {
@@ -1807,6 +1810,7 @@ public struct UIGaugeSpec: Codable, Equatable, Hashable, Sendable {
         id = try container.decode(String.self, forKey: .id)
         ratio = try container.decode(Double.self, forKey: .ratio)
         label = try container.decode(String.self, forKey: .label)
+        caption = try container.decodeIfPresent(String.self, forKey: .caption)
         accessibilityText = try container.decode(String.self, forKey: .accessibilityText)
         activate = try container.decodeIfPresent(String.self, forKey: .activate)
         guard isValid else {
@@ -1822,16 +1826,21 @@ public struct UIGaugeSpec: Codable, Equatable, Hashable, Sendable {
         chartIdentifierIsValid(id)
             && ratio.isFinite && (0...1).contains(ratio)
             && chartSingleLineIsValid(label, allowEmpty: false)
+            && (caption.map { chartSingleLineIsValid($0, allowEmpty: false) } ?? true)
             && chartAccessibilityIsValid(accessibilityText)
             && (activate.map(chartIdentifierIsValid) ?? true)
     }
 
     public var percentageLabel: String {
-        "\(label)  \(percentageValueLabel)"
+        "\(label)  \(valueLabel)"
     }
 
     public var percentageValueLabel: String {
         "\(Int((ratio * 100).rounded()))%"
+    }
+
+    public var valueLabel: String {
+        caption ?? percentageValueLabel
     }
 }
 
@@ -1859,6 +1868,7 @@ public enum UIListItemSlot: Equatable, Hashable, Sendable {
     case status(UIStatusSymbolSpec)
     case badge(UIBadgeSpec)
     case sparkline(UISparklineSpec)
+    case gauge(UIGaugeSpec)
     case disclosure
     case checkmark(UICheckmarkSpec)
     case unsupported(kind: String)
@@ -1869,6 +1879,7 @@ public enum UIListItemSlot: Equatable, Hashable, Sendable {
         case .status: "status"
         case .badge: "badge"
         case .sparkline: "sparkline"
+        case .gauge: "gauge"
         case .disclosure: "disclosure"
         case .checkmark: "checkmark"
         case let .unsupported(kind): kind
@@ -1887,6 +1898,7 @@ extension UIListItemSlot: Codable {
         case "status": self = .status(try UIStatusSymbolSpec(from: decoder))
         case "badge": self = .badge(try UIBadgeSpec(from: decoder))
         case "sparkline": self = .sparkline(try UISparklineSpec(from: decoder))
+        case "gauge": self = .gauge(try UIGaugeSpec(from: decoder))
         case "disclosure": self = .disclosure
         case "checkmark": self = .checkmark(try UICheckmarkSpec(from: decoder))
         default: self = .unsupported(kind: kind)
@@ -1908,6 +1920,9 @@ extension UIListItemSlot: Codable {
         case let .sparkline(sparkline):
             try container.encode("sparkline", forKey: .type)
             try sparkline.encode(to: encoder)
+        case let .gauge(gauge):
+            try container.encode("gauge", forKey: .type)
+            try gauge.encode(to: encoder)
         case .disclosure:
             try container.encode("disclosure", forKey: .type)
         case let .checkmark(checkmark):
@@ -2038,6 +2053,10 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
             guard case let .sparkline(sparkline) = slot else { return nil }
             return sparkline
         }
+        let gauges = [leading, trailing, accessory].compactMap { slot -> UIGaugeSpec? in
+            guard case let .gauge(gauge) = slot else { return nil }
+            return gauge
+        }
         guard checkmarks.count <= 1, disclosures.count <= 1 else {
             throw DecodingError.dataCorruptedError(
                 forKey: .accessory,
@@ -2072,10 +2091,27 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
                 )
             }
         }
+        if !gauges.isEmpty {
+            guard gauges.count == 1, case .gauge? = trailing else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .trailing,
+                    in: container,
+                    debugDescription: "Gauge is accepted only once in the trailing slot"
+                )
+            }
+            guard value == nil else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .value,
+                    in: container,
+                    debugDescription: "Gauge owns the row's trailing value caption"
+                )
+            }
+        }
         let independentRoles = (toggles.isEmpty ? 0 : 1)
             + (checkmarks.isEmpty ? 0 : 1)
             + (disclosures.isEmpty ? 0 : 1)
             + (sparklines.contains(where: { $0.activate != nil }) ? 1 : 0)
+            + (gauges.contains(where: { $0.activate != nil }) ? 1 : 0)
             + (activate != nil && disclosures.isEmpty ? 1 : 0)
         guard independentRoles <= 1 else {
             throw DecodingError.dataCorruptedError(
@@ -2107,6 +2143,7 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
             return true
         }) { return .disclosure }
         if primarySparkline?.activate != nil { return .command }
+        if primaryGauge?.activate != nil { return .command }
         if activate != nil {
             return actionRole == .destructive ? .destructive : .command
         }
@@ -2130,6 +2167,13 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     public var primarySparkline: UISparklineSpec? {
         for slot in [leading, trailing, accessory] {
             if case let .sparkline(sparkline)? = slot { return sparkline }
+        }
+        return nil
+    }
+
+    public var primaryGauge: UIGaugeSpec? {
+        for slot in [leading, trailing, accessory] {
+            if case let .gauge(gauge)? = slot { return gauge }
         }
         return nil
     }
@@ -2567,6 +2611,7 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
         var hasStatus = false
         var hasBadge = false
         var hasSparkline = false
+        var hasGauge = false
         for item in list.items {
             for slot in [item.leading, item.trailing, item.accessory].compactMap({ $0 }) {
                 switch slot {
@@ -2574,6 +2619,7 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
                 case .status: hasStatus = true
                 case .badge: hasBadge = true
                 case .sparkline: hasSparkline = true
+                case .gauge: hasGauge = true
                 case .disclosure, .checkmark: break
                 case .unsupported: return nil
                 }
@@ -2592,6 +2638,7 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
         if hasStatus { capabilities.append(UnpeelUIProtocol.statusSymbolCapability) }
         if hasBadge { capabilities.append(UnpeelUIProtocol.badgeCapability) }
         if hasSparkline { capabilities.append(UnpeelUIProtocol.sparklineCapability) }
+        if hasGauge { capabilities.append(UnpeelUIProtocol.gaugeCapability) }
         if list.selectedID != nil || list.select != nil || list.scrollPadding != 0
             || list.pageOverlap != 1 || list.pageBehavior != .selection || list.spacePagesDown
         {

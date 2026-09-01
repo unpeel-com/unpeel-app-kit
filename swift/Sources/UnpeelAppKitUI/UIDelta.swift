@@ -270,6 +270,7 @@ extension UIDeltaOperation: Codable {
                 id: try container.decode(String.self, forKey: .nodeID),
                 ratio: try container.decode(Double.self, forKey: .ratio),
                 label: try container.decode(String.self, forKey: .label),
+                caption: try container.decodeIfPresent(String.self, forKey: .caption),
                 accessibilityText: try container.decode(String.self, forKey: .accessibilityText)
             )
             guard gauge.isValid else {
@@ -463,6 +464,8 @@ extension UIDeltaOperation: Codable {
             try container.encode(gauge.id, forKey: .nodeID)
             try container.encode(gauge.ratio, forKey: .ratio)
             try container.encode(gauge.label, forKey: .label)
+            try container.encodeIfPresent(gauge.caption, forKey: .caption)
+            if gauge.caption == nil { try container.encodeNil(forKey: .caption) }
             try container.encode(gauge.accessibilityText, forKey: .accessibilityText)
         case let .inputSetValue(nodeID, value):
             try container.encode(Operation.inputSetValue, forKey: .op)
@@ -853,16 +856,43 @@ private extension UINode {
             return UINode(id: id, component: .page(page))
         case let .gaugeSetData(gauge):
             var page = try page()
-            guard case let .gauge(current) = page.body, current.id == gauge.id else {
+            if case let .gauge(current) = page.body, current.id == gauge.id {
+                page.body = .gauge(UIGaugeSpec(
+                    id: gauge.id,
+                    ratio: gauge.ratio,
+                    label: gauge.label,
+                    caption: gauge.caption,
+                    accessibilityText: gauge.accessibilityText,
+                    activate: current.activate
+                ))
+                return UINode(id: id, component: .page(page))
+            }
+            guard case var .list(list) = page.body else {
                 throw UIDeltaApplicationError("Delta targets an unavailable Gauge")
             }
-            page.body = .gauge(UIGaugeSpec(
-                id: gauge.id,
-                ratio: gauge.ratio,
-                label: gauge.label,
-                accessibilityText: gauge.accessibilityText,
-                activate: current.activate
-            ))
+            var found = false
+            for index in list.items.indices {
+                var item = list.items[index]
+                if case let .gauge(current)? = item.trailing,
+                   current.id == gauge.id
+                {
+                    item.trailing = .gauge(UIGaugeSpec(
+                        id: gauge.id,
+                        ratio: gauge.ratio,
+                        label: gauge.label,
+                        caption: gauge.caption,
+                        accessibilityText: gauge.accessibilityText,
+                        activate: current.activate
+                    ))
+                    list.items[index] = item
+                    found = true
+                    break
+                }
+            }
+            guard found else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Gauge")
+            }
+            page.body = .list(list)
             return UINode(id: id, component: .page(page))
         case let .inputSetValue(nodeID, value):
             var page = try page()

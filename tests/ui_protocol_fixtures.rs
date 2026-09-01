@@ -18,7 +18,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 42);
+    assert_eq!(messages.len(), 44);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -545,4 +545,38 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     };
     assert_eq!(gauge.ratio.value(), 0.82);
     assert_eq!(gauge.activate.as_deref(), Some("next-chart"));
+
+    let UiMessage::Snapshot(quota_snapshot) = &messages[42] else {
+        panic!("List Gauge fixture must be a snapshot");
+    };
+    let UiComponent::Page(page) = &quota_snapshot.root.element else {
+        panic!("List Gauge fixture must remain a Page");
+    };
+    let PageBodySlot::List(list) = &page.body else {
+        panic!("List Gauge fixture must remain in a List");
+    };
+    let Some(ListItemSlot::Gauge(gauge)) = list.items[0].trailing.as_ref() else {
+        panic!("Usage quota must carry a trailing Gauge");
+    };
+    assert_eq!(gauge.ratio.value(), 0.77);
+    assert_eq!(gauge.value_label(), "77% left · Resets in 5d 14h");
+    assert_eq!(
+        quota_snapshot.root.required_capabilities(),
+        vec!["page", "list", "listItem", "listItemPresentation", "gauge"]
+    );
+    let UiMessage::Delta(quota_delta) = &messages[43] else {
+        panic!("List Gauge fixture must have a compact delta");
+    };
+    let updated = quota_snapshot.applying(quota_delta).unwrap();
+    let UiComponent::Page(page) = updated.root.element else {
+        panic!("List Gauge delta must preserve Page");
+    };
+    let PageBodySlot::List(list) = page.body else {
+        panic!("List Gauge delta must preserve List");
+    };
+    let Some(ListItemSlot::Gauge(gauge)) = list.items[0].trailing.as_ref() else {
+        panic!("List Gauge delta must preserve its trailing slot");
+    };
+    assert_eq!(gauge.ratio.value(), 0.61);
+    assert_eq!(gauge.value_label(), "61% left · Resets in 4d");
 }

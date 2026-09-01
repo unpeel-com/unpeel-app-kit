@@ -434,6 +434,7 @@ export interface GaugeSpec {
   id: string;
   ratio: number;
   label: string;
+  caption?: string;
   accessibilityText: string;
   activate?: string;
 }
@@ -443,8 +444,8 @@ export interface UnsupportedComponentSlot {
   [field: string]: unknown;
 }
 
-export type ListItemSlot = ToggleSpec | StatusSymbolSpec | BadgeSpec | SparklineSpec | DisclosureSpec
-  | CheckmarkSpec | UnsupportedComponentSlot;
+export type ListItemSlot = ToggleSpec | StatusSymbolSpec | BadgeSpec | SparklineSpec | GaugeSpec
+  | DisclosureSpec | CheckmarkSpec | UnsupportedComponentSlot;
 
 export interface ListItemSpec {
   id: string;
@@ -692,6 +693,10 @@ export function isSparklineSlot(slot: ListItemSlot): slot is SparklineSpec {
   return slot.type === "sparkline";
 }
 
+export function isGaugeSlot(slot: ListItemSlot): slot is GaugeSpec {
+  return slot.type === "gauge" && typeof (slot as Partial<GaugeSpec>).ratio === "number";
+}
+
 export function isDisclosureSlot(slot: ListItemSlot): slot is DisclosureSpec {
   return slot.type === "disclosure";
 }
@@ -703,9 +708,10 @@ export function isCheckmarkSlot(slot: ListItemSlot): slot is CheckmarkSpec {
 export function isKnownListItemSlot(
   slot: ListItemSlot,
 ): slot is ToggleSpec | StatusSymbolSpec | BadgeSpec | SparklineSpec | DisclosureSpec
-  | CheckmarkSpec {
+  | GaugeSpec | CheckmarkSpec {
   return isToggleSlot(slot) || isStatusSlot(slot) || isBadgeSlot(slot)
-    || isSparklineSlot(slot) || isDisclosureSlot(slot) || isCheckmarkSlot(slot);
+    || isSparklineSlot(slot) || isGaugeSlot(slot) || isDisclosureSlot(slot)
+    || isCheckmarkSlot(slot);
 }
 
 /** Authoritative cross-renderer domain: inferred bounds include zero. */
@@ -771,11 +777,15 @@ export function resolvedLineChartBounds(
 }
 
 export function gaugePercentageLabel(gauge: GaugeSpec): string {
-  return gauge.label + "  " + gaugePercentageValueLabel(gauge);
+  return gauge.label + "  " + gaugeValueLabel(gauge);
 }
 
 export function gaugePercentageValueLabel(gauge: GaugeSpec): string {
   return String(Math.round(gauge.ratio * 100)) + "%";
+}
+
+export function gaugeValueLabel(gauge: GaugeSpec): string {
+  return gauge.caption ?? gaugePercentageValueLabel(gauge);
 }
 
 export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
@@ -788,6 +798,7 @@ export function listItemPrimaryRole(item: ListItemSpec): ListItemPrimaryRole {
   if (slots.some((slot) => isSparklineSlot(slot) && slot.activate !== undefined)) {
     return "command";
   }
+  if (slots.some((slot) => isGaugeSlot(slot) && slot.activate !== undefined)) return "command";
   if (item.activate !== undefined) {
     return item.actionRole === "destructive" ? "destructive" : "command";
   }
@@ -958,6 +969,10 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
     .some((slot) => slot?.type === "sparkline"))) {
     capabilities.push(UI_SPARKLINE_CAPABILITY);
   }
+  if (node.body.items.some((item) => [item.leading, item.trailing, item.accessory]
+    .some((slot) => slot?.type === "gauge"))) {
+    capabilities.push(UI_GAUGE_CAPABILITY);
+  }
   if (node.body.selectedId !== undefined || node.body.select !== undefined
     || (node.body.scrollPadding ?? 0) !== 0 || (node.body.pageOverlap ?? 1) !== 1
     || (node.body.pageBehavior ?? "selection") !== "selection"
@@ -1101,6 +1116,7 @@ export type UiDeltaOperation =
     nodeId: string;
     ratio: number;
     label: string;
+    caption?: string | null;
     accessibilityText: string;
   }
   | { op: "inputSetValue"; nodeId: string; value: string }
@@ -1570,19 +1586,34 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
     return { ...root, body };
   }
   if (operation.op === "gaugeSetData") {
-    if (!isPageNode(root) || !isGaugeSpec(root.body)
-      || root.body.id !== operation.nodeId) {
-      throw new Error("Delta targets an unavailable Gauge");
-    }
-    const body: GaugeSpec = {
+    const replace = (existing: GaugeSpec): GaugeSpec => ({
       type: "gauge",
       id: operation.nodeId,
       ratio: operation.ratio,
       label: operation.label,
+      ...(operation.caption === null || operation.caption === undefined
+        ? {}
+        : { caption: operation.caption }),
       accessibilityText: operation.accessibilityText,
-      ...(root.body.activate === undefined ? {} : { activate: root.body.activate }),
+      ...(existing.activate === undefined ? {} : { activate: existing.activate }),
+    });
+    if (isPageNode(root) && isGaugeSpec(root.body)
+      && root.body.id === operation.nodeId) {
+      return { ...root, body: replace(root.body) };
+    }
+    const page = requireListPage(root);
+    let matched = false;
+    const items = page.body.items.map((item) => {
+      if (item.trailing === undefined || !isGaugeSlot(item.trailing)
+        || item.trailing.id !== operation.nodeId) return item;
+      matched = true;
+      return { ...item, trailing: replace(item.trailing) };
+    });
+    if (!matched) throw new Error("Delta targets an unavailable Gauge");
+    return {
+      ...page,
+      body: { ...page.body, items },
     };
-    return { ...root, body };
   }
   if (operation.op === "inputSetValue") {
     const page = requireRenderablePage(root);
@@ -2346,6 +2377,7 @@ function validateListItem(
   let checkmarkCount = 0;
   let disclosureCount = 0;
   let sparklineCount = 0;
+  let gaugeCount = 0;
   if (item.delete !== undefined) requireIdentifier(item.delete, `${path}.delete`);
   if (item.activate !== undefined) requireIdentifier(item.activate, `${path}.activate`);
   if (item.actionRole !== undefined
@@ -2382,6 +2414,14 @@ function validateListItem(
       sparklineCount += 1;
       if (name !== "trailing") {
         throw new Error(`${path}.${name} Sparkline is accepted only in the trailing slot`);
+      }
+      continue;
+    }
+    if (slot.type === "gauge") {
+      validateGauge(slot, `${path}.${name}`, register);
+      gaugeCount += 1;
+      if (name !== "trailing") {
+        throw new Error(`${path}.${name} Gauge is accepted only in the trailing slot`);
       }
       continue;
     }
@@ -2423,6 +2463,10 @@ function validateListItem(
     throw new Error(`${path} accepts at most one Checkmark or Disclosure`);
   }
   if (sparklineCount > 1) throw new Error(`${path} accepts at most one Sparkline`);
+  if (gaugeCount > 1) throw new Error(`${path} accepts at most one Gauge`);
+  if (gaugeCount > 0 && item.value !== undefined) {
+    throw new Error(`${path}.value is owned by its Gauge caption`);
+  }
   if (disclosureCount > 0 && item.activate === undefined) {
     throw new Error(`${path}.activate is required by Disclosure`);
   }
@@ -2432,7 +2476,8 @@ function validateListItem(
     + Number([item.leading, item.trailing, item.accessory].some((value) => {
       if (value === undefined) return false;
       const slot = record(value, `${path}.slots`);
-      return slot.type === "sparkline" && slot.activate !== undefined;
+      return (slot.type === "sparkline" || slot.type === "gauge")
+        && slot.activate !== undefined;
     }))
     + Number(item.activate !== undefined && disclosureCount === 0);
   if (independentRoles > 1) throw new Error(`${path} primary role is ambiguous`);
@@ -2578,6 +2623,7 @@ function validateGauge(
     throw new Error(`${path}.ratio must be between zero and one`);
   }
   requireChartLabel(gauge.label, `${path}.label`);
+  if (gauge.caption !== undefined) requireChartLabel(gauge.caption, `${path}.caption`);
   requireChartAccessibility(gauge.accessibilityText, `${path}.accessibilityText`);
   if (gauge.activate !== undefined) requireIdentifier(gauge.activate, `${path}.activate`);
 }
@@ -2910,6 +2956,7 @@ function validateDeltaOperation(value: unknown, path: string): void {
         id: operation.nodeId,
         ratio: operation.ratio,
         label: operation.label,
+        caption: operation.caption ?? undefined,
         accessibilityText: operation.accessibilityText,
       }, path, requireIdentifier);
       return;

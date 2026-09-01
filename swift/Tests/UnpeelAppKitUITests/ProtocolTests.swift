@@ -53,7 +53,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 42)
+    #expect(messages.count == 44)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -417,6 +417,26 @@ func sharedProtocolFixturesDecode() throws {
     #expect(gaugePage.requiredCapabilities == ["page", "gauge"])
     #expect(updatedGauge.ratio == 0.82)
     #expect(updatedGauge.activate == "next-chart")
+
+    guard case let .snapshot(quotaSnapshot) = messages[42],
+          case let .page(quotaPage) = quotaSnapshot.root.component,
+          case let .list(quotaList) = quotaPage.body,
+          case let .gauge(quotaGauge)? = quotaList.items.first?.trailing,
+          case let .delta(quotaDelta) = messages[43],
+          case let .page(updatedQuotaPage) = try quotaSnapshot.applying(quotaDelta).root.component,
+          case let .list(updatedQuotaList) = updatedQuotaPage.body,
+          case let .gauge(updatedQuotaGauge)? = updatedQuotaList.items.first?.trailing
+    else {
+        Issue.record("List Gauge fixture and keyed delta must decode")
+        return
+    }
+    #expect(quotaGauge.ratio == 0.77)
+    #expect(quotaGauge.valueLabel == "77% left · Resets in 5d 14h")
+    #expect(quotaPage.requiredCapabilities == [
+        "page", "list", "listItem", "listItemPresentation", "gauge",
+    ])
+    #expect(updatedQuotaGauge.ratio == 0.61)
+    #expect(updatedQuotaGauge.valueLabel == "61% left · Resets in 4d")
 }
 
 @Test

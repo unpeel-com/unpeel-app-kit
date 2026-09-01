@@ -22,6 +22,10 @@ pub struct Gauge {
     pub id: String,
     pub ratio: ChartValue,
     pub label: String,
+    /// Optional App-authored value copy. When absent, every renderer uses the
+    /// shared rounded percentage derived from `ratio`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
     pub accessibility_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activate: Option<String>,
@@ -39,6 +43,7 @@ impl Gauge {
             id: id.into(),
             ratio: ChartValue::new(ratio),
             label: label.into(),
+            caption: None,
             accessibility_text: accessibility_text.into(),
             activate: None,
         }
@@ -50,13 +55,25 @@ impl Gauge {
         self
     }
 
+    /// Supplies the canonical visible value copy for this ratio. This is used
+    /// for domain wording such as "77% left · Resets in 5d 14h", which a
+    /// renderer must never derive or invert independently.
+    #[must_use]
+    pub fn caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    #[must_use]
+    pub fn value_label(&self) -> String {
+        self.caption
+            .clone()
+            .unwrap_or_else(|| format!("{}%", (self.ratio.value() * 100.0).round() as u64))
+    }
+
     #[must_use]
     pub fn percentage_label(&self) -> String {
-        format!(
-            "{}  {}%",
-            self.label,
-            (self.ratio.value() * 100.0).round() as u64
-        )
+        format!("{}  {}", self.label, self.value_label())
     }
 
     pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
@@ -68,6 +85,9 @@ impl Gauge {
             ));
         }
         validate_single_line(&self.label, &format!("{path}.label"))?;
+        if let Some(caption) = &self.caption {
+            validate_single_line(caption, &format!("{path}.caption"))?;
+        }
         validate_text(
             &self.accessibility_text,
             MAX_ACCESSIBILITY_BYTES,
@@ -88,6 +108,7 @@ impl Gauge {
     pub(crate) fn replace_data_from(&mut self, replacement: Self) {
         self.ratio = replacement.ratio;
         self.label = replacement.label;
+        self.caption = replacement.caption;
         self.accessibility_text = replacement.accessibility_text;
     }
 
@@ -98,6 +119,8 @@ impl Gauge {
             gauge: self,
             filled_style: Style::new().fg(theme.accent),
             unfilled_style: Style::new().fg(theme.subtle),
+            compact: false,
+            show_label: true,
         }
     }
 }
@@ -107,6 +130,8 @@ pub struct GaugeWidget<'a> {
     gauge: &'a Gauge,
     filled_style: Style,
     unfilled_style: Style,
+    compact: bool,
+    show_label: bool,
 }
 
 impl GaugeWidget<'_> {
@@ -124,6 +149,22 @@ impl GaugeWidget<'_> {
         self.unfilled_style = unfilled;
         self
     }
+
+    /// Uses only the App-owned value caption inside a constrained List row;
+    /// the containing ListItem already presents the Gauge's semantic label.
+    #[must_use]
+    pub const fn compact(mut self) -> Self {
+        self.compact = true;
+        self
+    }
+
+    /// Draws only the filled/remaining track. A containing ListItem uses this
+    /// after laying out the same Gauge's App-owned caption beside the track.
+    #[must_use]
+    pub const fn without_label(mut self) -> Self {
+        self.show_label = false;
+        self
+    }
 }
 
 impl Widget for GaugeWidget<'_> {
@@ -132,7 +173,13 @@ impl Widget for GaugeWidget<'_> {
             return;
         }
         let ratio = self.gauge.ratio.value();
-        let label = self.gauge.percentage_label();
+        let label = if !self.show_label {
+            String::new()
+        } else if self.compact {
+            self.gauge.value_label()
+        } else {
+            self.gauge.percentage_label()
+        };
         if area.height == 1 {
             LineGauge::default()
                 .ratio(ratio)
@@ -180,6 +227,18 @@ mod tests {
                 .validate("gauge")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn app_authored_caption_wins_over_renderer_percentage_copy() {
+        let gauge = Gauge::new("quota", 0.77, "7-day limit", "77 percent remains")
+            .caption("77% left · Resets in 5d 14h");
+        assert_eq!(gauge.value_label(), "77% left · Resets in 5d 14h");
+        assert_eq!(
+            gauge.percentage_label(),
+            "7-day limit  77% left · Resets in 5d 14h"
+        );
+        assert!(gauge.validate("gauge").is_ok());
     }
 
     #[test]

@@ -513,7 +513,8 @@ web, and agent participants:
   such as `leading`, `trailing`, and `accessory`;
 - each slot accepts only the schema-enumerated controls allowed in that role;
   v1 has completion `Toggle`, selection `Checkmark`, navigation `Disclosure`,
-  static status-symbol, `Badge`, and read-only-data trailing `Sparkline` values; and
+  static status-symbol, `Badge`, and read-only-data trailing `Sparkline` or
+  bounded-ratio `Gauge` values; and
 - `Page` exposes one closed body slot: List, Content, Sparkline, BarChart,
   LineChart, or Gauge; it never accepts arbitrary children.
 
@@ -562,9 +563,10 @@ Containment is deliberately closed:
 - the Todo Page's header accepts Input and its body uses the List alternative;
 - List accepts only ListItem rows; and
 - ListItem's `leading`, `trailing`, and `accessory` slots accept only Toggle,
-  Checkmark, Disclosure, status-symbol, or Badge values, never an arbitrary
-  `UiNode`; it accepts at most one primary role, and a completion Toggle's
-  value and the row's `done` state are one validated invariant.
+  Checkmark, Disclosure, status-symbol, Badge, trailing Sparkline, or trailing
+  Gauge values, never an arbitrary `UiNode`; it accepts at most one primary
+  role, and a completion Toggle's value and the row's `done` state are one
+  validated invariant.
 
 Rows deliberately separate three layers:
 
@@ -640,9 +642,9 @@ The sixteenth shared NDJSON fixture exercises the same Page family as a Usage
 master/detail screen: provider rows carry a leading health status, plan badge,
 emphasis, detail/value metadata, narrow-width value policy, busy state,
 selection, and an activation action, while the detail Page carries a back
-action. Rich Ratatui meters remain App-owned, but native/web users can navigate
-and refresh the same authoritative provider model without introducing a
-generic dashboard or flex container.
+action. A later shared fixture carries Usage's bounded quota as a trailing
+Gauge, including its numeric ratio and App-authored remaining/reset caption;
+there is no parallel Ratatui-only meter or renderer-owned percentage transform.
 
 ## Explorer/Tree v1
 
@@ -837,7 +839,7 @@ the same Page values when hosted.
 | `Sparkline` | numeric series through Ratatui `Sparkline` | Swift Charts `LineMark` with hidden axes | accessible dependency-free inline SVG polyline |
 | `BarChart` | labeled bars through Ratatui `BarChart` | Swift Charts `BarMark` | accessible dependency-free inline SVG bars |
 | `LineChart` | named x/y series through Ratatui `Chart` | Swift Charts `LineMark` series | accessible dependency-free inline SVG polylines and axes |
-| `Gauge` | Ratatui `Gauge` or one-row `LineGauge` | SwiftUI `Gauge` | accessible dependency-free inline SVG meter |
+| `Gauge` | Ratatui `Gauge` or compact one-row `LineGauge` | SwiftUI `Gauge`, or linear `ProgressView` in a ListItem | accessible dependency-free inline SVG meter, or native `<progress>` in a ListItem |
 
 Each specification owns its stable id, actual numeric data, required
 accessibility text, and at most one optional idempotent `activate` action.
@@ -922,11 +924,21 @@ sets without smoothing or presenter-side aggregation.
 
 ### Gauge
 
-`Gauge` owns one finite ratio in `0...1`, one non-empty label, and accessibility
-text. Its shared percentage copy rounds to the nearest whole percent with
-positive half values rounding upward. Ratatui selects `LineGauge` for a
-one-cell allocation and `Gauge` otherwise; Apple maps it to SwiftUI `Gauge`,
-and web maps it to an SVG track/fill meter.
+`Gauge` owns one finite ratio in `0...1`, one non-empty label, optional
+single-line App-authored caption, and accessibility text. Without a caption,
+its shared percentage copy rounds to the nearest whole percent with positive
+half values rounding upward. A caption replaces only that generated value copy;
+renderers must show it verbatim and must never infer used-versus-remaining or
+reset wording from the ratio.
+
+A ListItem accepts Gauge only once in its trailing slot. This is the bounded
+counterpart to trailing Sparkline: the row remains a closed semantic metric,
+while agents receive the actual ratio. Ratatui renders a compact `LineGauge`,
+Swift renders a linear `ProgressView`, and web renders a native `<progress>`
+track. The Page-body form continues to use Ratatui `Gauge`, SwiftUI `Gauge`,
+and an SVG meter. Usage publishes every bounded provider quota this way—for
+example ratio `0.77` plus `77% left · Resets in 5d 14h`—so all three peers show
+the same fill direction and exactly the same caption.
 
 ### Shared chart deltas and parity
 
@@ -936,8 +948,10 @@ declared activation action. An id or action change replaces the Page instead
 of mutating identity locally. The shared NDJSON corpus contains a snapshot
 and keyed delta for every chart; Rust, Swift, and web tests apply the same
 vectors and assert bounds/normalization, resulting values, capabilities, and
-action preservation. A renderer missing any exact chart capability keeps the
-attachment alive and falls back to the complete terminal pane.
+action preservation. Sparkline and Gauge keyed deltas also address their
+constrained trailing ListItem forms. A renderer missing any exact chart
+capability keeps the attachment alive and falls back to the complete terminal
+pane.
 
 ## MarkdownEditor v1
 

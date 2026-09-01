@@ -207,14 +207,14 @@ The standalone component layer currently provides:
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
 | `Page` | Top-level standalone Ratatui presentation with a constrained Input header and a closed List, Content, Sparkline, BarChart, LineChart, or Gauge body, plus one optional back action |
 | `Content` / `ContentWidget` | Read-only scrollable styled lines for issue, diff, and document detail screens; keyed range selection and bounded context actions without editor semantics |
-| `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and named closed slots |
+| `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and closed slots including compact Sparkline/Gauge metrics |
 | `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
 | `Toggle` / `Input` | Owned component specifications used directly by the TUI and optionally serialized for native renderers |
 | `Sparkline` / `SparklineWidget` | Closed numeric history series with shared bounds/accessibility semantics, optional activation, and a Ratatui newest-points viewport |
 | `BarChart` / `BarChartWidget` | Labeled non-negative bars with optional captions and closed default/accent/danger emphasis, rendered by Ratatui BarChart |
 | `LineChart` / `LineChartWidget` | Named finite x/y series with optional bounded/labeled axes, rendered by Ratatui Chart |
-| `Gauge` / `GaugeWidget` | One validated `0...1` ratio and label, rendered as Ratatui Gauge or LineGauge |
+| `Gauge` / `GaugeWidget` | One validated `0...1` ratio, label, optional App-owned caption, and compact/full Ratatui Gauge interpretation |
 | `Button` | Closed semantic action control with default/primary/destructive native intent rather than arbitrary styling |
 | `CanvasPage` | Exactly one Surface slot plus a bounded fixed top Button toolbar, with Ratatui layout/hit boxes and no generic child tree |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
@@ -260,7 +260,7 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | Sparkline semantic projection | Data-first numeric history rendered through Ratatui Sparkline, Swift Charts, or dependency-free inline SVG with one shared domain contract |
 | BarChart semantic projection | Labeled numeric bars rendered through Ratatui BarChart, Swift Charts, or dependency-free inline SVG; emphasis and captions remain spec-owned |
 | LineChart semantic projection | Named x/y series and authoritative axis bounds/labels rendered through Ratatui Chart, Swift Charts, or dependency-free inline SVG |
-| Gauge semantic projection | A shared ratio/label contract rendered through Ratatui Gauge, SwiftUI Gauge, or dependency-free inline SVG |
+| Gauge semantic projection | A shared ratio/label/App-caption contract rendered through Ratatui Gauge, SwiftUI Gauge/ProgressView, or SVG/native web progress; accepted as a constrained trailing ListItem metric |
 | Tree semantic projection | Closed Explorer/Tree hierarchy preserving filter focus, wrap/page navigation, the synthetic parent action, opaque path-free ids, compact keyed deltas, and SwiftUI/ARIA-tree wrappers |
 | Menu semantic projection | Root or Markdown-nested action menus with disabled/danger roles, renderer-local anchors, keyboard navigation, native `NSMenu`/popover and web menu interpretations |
 | Surface semantic projection | Opaque session/stream reference, sizing, background, and input policy only; Swift/web wrappers inject existing USRF local-GPU presenters and never consume frames |
@@ -317,8 +317,8 @@ inline image, or a content-addressed blob reference—never as an unbounded JSON
 payload. `Tabs` and later richer components such as `DataGrid` can join the
 same closed, versioned vocabulary. Containment is slot-based:
 `List` accepts only `ListItem` values, and row slots accept only explicitly
-enumerated Toggle, status-symbol, Badge, and read-only Sparkline values rather
-than arbitrary child nodes. See [the component
+enumerated Toggle, status-symbol, Badge, and read-only Sparkline/Gauge values
+rather than arbitrary child nodes. See [the component
 architecture](docs/ui-components.md), the trusted [`unpeel.ui/1`
 schema](protocol/unpeel-ui-v1.schema.json), and the separate
 [browser-to-workspace schema](protocol/unpeel-workspace-ui-v1.schema.json).

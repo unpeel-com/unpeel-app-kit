@@ -22,6 +22,7 @@ import {
   isCheckmarkSlot,
   isContentSpec,
   isGaugeSpec,
+  isGaugeSlot,
   isLineChartSpec,
   isListSpec,
   isDisclosureSlot,
@@ -32,7 +33,7 @@ import {
   isSparklineSlot,
   isStatusSlot,
   isToggleSlot,
-  gaugePercentageValueLabel,
+  gaugeValueLabel,
   listItemPrimaryRole,
   normalizedBarChartValues,
   normalizedSparklineSeries,
@@ -415,6 +416,7 @@ export class PageRenderer {
     else if (isStatusSlot(slot)) row.append(this.status(slot));
     else if (isBadgeSlot(slot)) row.append(this.badge(slot));
     else if (isSparklineSlot(slot)) row.append(this.sparkline(slot, valueTone ?? "muted"));
+    else if (isGaugeSlot(slot)) row.append(this.compactGauge(slot, valueTone ?? "muted"));
     else if (isDisclosureSlot(slot)) row.append(this.disclosure());
     else if (isCheckmarkSlot(slot)) row.append(this.checkmark(slot));
   }
@@ -478,6 +480,28 @@ export class PageRenderer {
       element.append(point);
     }
     this.configureChartActivation(element, sparkline);
+    return element;
+  }
+
+  private compactGauge(
+    gauge: GaugeSpec,
+    tone: NonNullable<ListItemSpec["valueTone"]>,
+  ): HTMLDivElement {
+    const element = document.createElement("div");
+    element.className = "unpeel-list-item__gauge";
+    element.dataset.tone = tone;
+    const caption = document.createElement("span");
+    caption.className = "unpeel-list-item__gauge-caption";
+    caption.textContent = gaugeValueLabel(gauge);
+    const progress = document.createElement("progress");
+    progress.max = 1;
+    progress.value = gauge.ratio;
+    progress.setAttribute("aria-label", gauge.accessibilityText);
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuemax", "1");
+    progress.setAttribute("aria-valuenow", String(gauge.ratio));
+    element.append(caption, progress);
+    this.configureChartActivation(element, gauge);
     return element;
   }
 
@@ -669,7 +693,7 @@ export class PageRenderer {
     percentage.setAttribute("text-anchor", "end");
     percentage.setAttribute("fill", "currentColor");
     percentage.setAttribute("font-size", "16");
-    percentage.textContent = gaugePercentageValueLabel(gauge);
+    percentage.textContent = gaugeValueLabel(gauge);
 
     const track = document.createElementNS(namespace, "rect");
     track.setAttribute("x", String(left));
@@ -712,7 +736,7 @@ export class PageRenderer {
   }
 
   private configureChartActivation(
-    element: SVGSVGElement,
+    element: HTMLElement | SVGSVGElement,
     chart: { id: string; activate?: string; accessibilityText: string },
   ): void {
     element.id = chart.id;
@@ -728,7 +752,8 @@ export class PageRenderer {
       activate();
     });
     element.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
+      const key = (event as KeyboardEvent).key;
+      if (key !== "Enter" && key !== " ") return;
       event.preventDefault();
       event.stopPropagation();
       activate();
@@ -849,9 +874,18 @@ export class PageRenderer {
       const sparkline = [item.leading, item.trailing, item.accessory]
         .find((slot): slot is SparklineSpec => slot !== undefined
           && isSparklineSlot(slot) && slot.activate !== undefined);
-      if (sparkline?.activate === undefined) return false;
-      this.onAction(uiAction(sparkline.id, sparkline.activate, "activate"));
-      return true;
+      if (sparkline?.activate !== undefined) {
+        this.onAction(uiAction(sparkline.id, sparkline.activate, "activate"));
+        return true;
+      }
+      const gauge = [item.leading, item.trailing, item.accessory]
+        .find((slot): slot is GaugeSpec => slot !== undefined
+          && isGaugeSlot(slot) && slot.activate !== undefined);
+      if (gauge?.activate !== undefined) {
+        this.onAction(uiAction(gauge.id, gauge.activate, "activate"));
+        return true;
+      }
+      return false;
     }
     return false;
   }

@@ -701,7 +701,7 @@
       }
     },
     "gauge": {
-      "description": "Minimal labeled ratio from zero through one.",
+      "description": "Minimal labeled ratio from zero through one with optional App-authored value caption; valid as a Page body or one trailing ListItem slot.",
       "type": "object",
       "additionalProperties": true,
       "required": ["type", "id", "ratio", "label", "accessibilityText"],
@@ -710,6 +710,7 @@
         "id": { "$ref": "#/$defs/identifier" },
         "ratio": { "type": "number", "minimum": 0, "maximum": 1 },
         "label": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "caption": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
         "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" },
         "activate": { "$ref": "#/$defs/identifier" }
       }
@@ -722,7 +723,7 @@
       "properties": { "type": { "$ref": "#/$defs/identifier" } },
       "not": {
         "required": ["type"],
-        "properties": { "type": { "enum": ["toggle", "status", "badge", "sparkline", "disclosure", "checkmark"] } }
+        "properties": { "type": { "enum": ["toggle", "status", "badge", "sparkline", "gauge", "disclosure", "checkmark"] } }
       }
     },
     "listItemSlot": {
@@ -731,6 +732,7 @@
         { "$ref": "#/$defs/statusSymbol" },
         { "$ref": "#/$defs/badge" },
         { "$ref": "#/$defs/sparkline" },
+        { "$ref": "#/$defs/gauge" },
         { "$ref": "#/$defs/disclosure" },
         { "$ref": "#/$defs/checkmark" },
         { "$ref": "#/$defs/unsupportedRowSlot" }
@@ -1287,6 +1289,12 @@
             "nodeId": { "$ref": "#/$defs/identifier" },
             "ratio": { "type": "number", "minimum": 0, "maximum": 1 },
             "label": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
+            "caption": {
+              "oneOf": [
+                { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000\\r\\n]+$" },
+                { "type": "null" }
+              ]
+            },
             "accessibilityText": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r]*$" }
           }
         },

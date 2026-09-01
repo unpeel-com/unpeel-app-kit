@@ -466,6 +466,55 @@ textarea {
   font-size: 11px;
 }
 
+.unpeel-list-item__gauge {
+  display: grid;
+  flex: 0 1 190px;
+  gap: 4px;
+  min-width: 120px;
+  color: var(--muted);
+}
+
+.unpeel-list-item__gauge-caption {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.15;
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unpeel-list-item__gauge progress {
+  width: 100%;
+  height: 4px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  color: currentColor;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  appearance: none;
+}
+
+.unpeel-list-item__gauge progress::-webkit-progress-bar {
+  border-radius: inherit;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.unpeel-list-item__gauge progress::-webkit-progress-value {
+  border-radius: inherit;
+  background: currentColor;
+}
+
+.unpeel-list-item__gauge progress::-moz-progress-bar {
+  border-radius: inherit;
+  background: currentColor;
+}
+
+.unpeel-list-item__gauge[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
 .unpeel-list-item__disclosure,
 .unpeel-list-item__checkmark {
   flex: 0 0 auto;

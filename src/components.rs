@@ -343,6 +343,7 @@ pub enum ListItemSlot {
     Status(StatusSymbol),
     Badge(Badge),
     Sparkline(Sparkline),
+    Gauge(Gauge),
     Disclosure,
     Checkmark(Checkmark),
 }
@@ -370,6 +371,14 @@ impl ListItemSlot {
         Self::Sparkline(sparkline)
     }
 
+    /// A bounded ratio with App-owned copy. Gauge is deliberately
+    /// trailing-only so a row remains a semantic metric rather than an
+    /// arbitrary chart container.
+    #[must_use]
+    pub const fn gauge(gauge: Gauge) -> Self {
+        Self::Gauge(gauge)
+    }
+
     /// UITableViewCell-style navigation affordance. The row's `activate`
     /// action remains the authoritative App/router transition.
     #[must_use]
@@ -388,6 +397,7 @@ impl ListItemSlot {
             Self::Toggle(toggle) => Some(toggle.id.as_str()),
             Self::Checkmark(checkmark) => Some(checkmark.id.as_str()),
             Self::Sparkline(sparkline) => Some(sparkline.id.as_str()),
+            Self::Gauge(gauge) => Some(gauge.id.as_str()),
             Self::Status(_) | Self::Badge(_) | Self::Disclosure => None,
         }
     }
@@ -398,6 +408,7 @@ impl ListItemSlot {
             Self::Status(status) => status.validate(path),
             Self::Badge(badge) => badge.validate(path),
             Self::Sparkline(sparkline) => sparkline.validate(path),
+            Self::Gauge(gauge) => gauge.validate(path),
             Self::Disclosure => Ok(()),
             Self::Checkmark(checkmark) => checkmark.validate(path),
         }
@@ -410,6 +421,7 @@ impl ListItemSlot {
             | Self::Status(_)
             | Self::Badge(_)
             | Self::Sparkline(_)
+            | Self::Gauge(_)
             | Self::Disclosure
             | Self::Checkmark(_) => None,
         }
@@ -421,6 +433,7 @@ impl ListItemSlot {
             Self::Status(_)
             | Self::Badge(_)
             | Self::Sparkline(_)
+            | Self::Gauge(_)
             | Self::Disclosure
             | Self::Checkmark(_) => None,
         }
@@ -433,6 +446,7 @@ impl ListItemSlot {
             | Self::Status(_)
             | Self::Badge(_)
             | Self::Sparkline(_)
+            | Self::Gauge(_)
             | Self::Disclosure
             | Self::Checkmark(_) => None,
         }
@@ -445,6 +459,7 @@ impl ListItemSlot {
             | Self::Status(_)
             | Self::Badge(_)
             | Self::Sparkline(_)
+            | Self::Gauge(_)
             | Self::Disclosure => None,
         }
     }
@@ -455,6 +470,19 @@ impl ListItemSlot {
             Self::Toggle(_)
             | Self::Status(_)
             | Self::Badge(_)
+            | Self::Gauge(_)
+            | Self::Disclosure
+            | Self::Checkmark(_) => None,
+        }
+    }
+
+    fn as_gauge(&self) -> Option<&Gauge> {
+        match self {
+            Self::Gauge(gauge) => Some(gauge),
+            Self::Toggle(_)
+            | Self::Status(_)
+            | Self::Badge(_)
+            | Self::Sparkline(_)
             | Self::Disclosure
             | Self::Checkmark(_) => None,
         }
@@ -660,6 +688,10 @@ impl ListItem {
             .slots()
             .filter_map(ListItemSlot::as_sparkline)
             .any(|sparkline| sparkline.activate.is_some())
+            || self
+                .slots()
+                .filter_map(ListItemSlot::as_gauge)
+                .any(|gauge| gauge.activate.is_some())
         {
             RowPrimaryRole::Command
         } else if self.activate.is_some() {
@@ -680,6 +712,11 @@ impl ListItem {
     #[must_use]
     pub fn primary_checkmark(&self) -> Option<&Checkmark> {
         self.slots().find_map(ListItemSlot::as_checkmark)
+    }
+
+    #[must_use]
+    pub fn primary_gauge(&self) -> Option<&Gauge> {
+        self.slots().find_map(ListItemSlot::as_gauge)
     }
 
     pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
@@ -752,6 +789,24 @@ impl ListItem {
                 "Sparkline is accepted only once in the trailing slot",
             ));
         }
+        let gauges = self
+            .slots()
+            .filter_map(ListItemSlot::as_gauge)
+            .collect::<Vec<_>>();
+        if gauges.len() > 1
+            || (!gauges.is_empty() && !matches!(self.trailing, Some(ListItemSlot::Gauge(_))))
+        {
+            return Err(ComponentValidationError::new(
+                format!("{path}.trailing"),
+                "Gauge is accepted only once in the trailing slot",
+            ));
+        }
+        if !gauges.is_empty() && self.value.is_some() {
+            return Err(ComponentValidationError::new(
+                format!("{path}.value"),
+                "Gauge owns the row's trailing value caption",
+            ));
+        }
         let independent_roles = usize::from(!toggles.is_empty())
             + usize::from(!checkmarks.is_empty())
             + usize::from(disclosures > 0)
@@ -760,6 +815,7 @@ impl ListItem {
                     .iter()
                     .any(|sparkline| sparkline.activate.is_some()),
             )
+            + usize::from(gauges.iter().any(|gauge| gauge.activate.is_some()))
             + usize::from(self.activate.is_some() && disclosures == 0);
         if independent_roles > 1 {
             return Err(ComponentValidationError::new(
@@ -1451,6 +1507,12 @@ impl Page {
         }) {
             capabilities.push(crate::SPARKLINE_COMPONENT_CAPABILITY);
         }
+        if list.items.iter().any(|item| {
+            item.slots()
+                .any(|slot| matches!(slot, ListItemSlot::Gauge(_)))
+        }) {
+            capabilities.push(crate::GAUGE_COMPONENT_CAPABILITY);
+        }
         if list.selected_id.is_some()
             || list.select.is_some()
             || list.scroll_padding != 0
@@ -1740,20 +1802,32 @@ impl Page {
         &mut self,
         replacement: Gauge,
     ) -> Result<(), ComponentValidationError> {
-        let PageBodySlot::Gauge(gauge) = &mut self.body else {
+        if let PageBodySlot::Gauge(gauge) = &mut self.body
+            && gauge.id == replacement.id
+        {
+            gauge.replace_data_from(replacement);
+            return Ok(());
+        }
+        let Some(list) = self.body.as_list_mut() else {
             return Err(ComponentValidationError::new(
                 "delta.nodeId",
-                "Page body is not Gauge",
+                "Page body is neither Gauge nor List",
             ));
         };
-        if gauge.id != replacement.id {
-            return Err(ComponentValidationError::new(
-                "delta.nodeId",
-                format!("Gauge {:?} is not present", replacement.id),
-            ));
+        for item in &mut list.items {
+            for slot in item.slots_mut() {
+                if let ListItemSlot::Gauge(gauge) = slot
+                    && gauge.id == replacement.id
+                {
+                    gauge.replace_data_from(replacement);
+                    return Ok(());
+                }
+            }
         }
-        gauge.replace_data_from(replacement);
-        Ok(())
+        Err(ComponentValidationError::new(
+            "delta.nodeId",
+            format!("Gauge {:?} is not present", replacement.id),
+        ))
     }
 
     pub(crate) fn insert_list_item(
@@ -2208,8 +2282,9 @@ fn render_list_item(
 
     let mut suffix = Vec::new();
     let sparkline = item.trailing.as_ref().and_then(ListItemSlot::as_sparkline);
+    let gauge = item.trailing.as_ref().and_then(ListItemSlot::as_gauge);
     if let Some(slot) = &item.trailing
-        && !matches!(slot, ListItemSlot::Sparkline(_))
+        && !matches!(slot, ListItemSlot::Sparkline(_) | ListItemSlot::Gauge(_))
     {
         append_trailing_slot(&mut suffix, slot, selected, theme);
     }
@@ -2230,18 +2305,23 @@ fn render_list_item(
     }
 
     let suffix_width = Line::from(suffix.clone()).width();
-    let value = item.value.as_deref().filter(|value| {
-        let value_width = UnicodeWidthStr::width(*value);
-        let default_min = value_width
-            .saturating_add(suffix_width)
-            .saturating_add(usize::from(SELECTABLE_LEFT_PADDING))
-            .saturating_add(9);
-        usize::from(area.width)
-            >= usize::from(
-                item.value_min_width
-                    .unwrap_or_else(|| u16::try_from(default_min).unwrap_or(u16::MAX)),
-            )
-    });
+    let gauge_caption = gauge.map(Gauge::value_label);
+    let value = gauge_caption
+        .as_deref()
+        .or(item.value.as_deref())
+        .filter(|value| {
+            let value_width = UnicodeWidthStr::width(*value);
+            let default_min = value_width
+                .saturating_add(suffix_width)
+                .saturating_add(usize::from(SELECTABLE_LEFT_PADDING))
+                .saturating_add(9)
+                .saturating_add(if gauge.is_some() { 19 } else { 0 });
+            usize::from(area.width)
+                >= usize::from(
+                    item.value_min_width
+                        .unwrap_or_else(|| u16::try_from(default_min).unwrap_or(u16::MAX)),
+                )
+        });
     let value_style = value.map(|_| {
         if selected {
             theme.selected_value
@@ -2266,21 +2346,34 @@ fn render_list_item(
         .width()
         .min(usize::from(content.width));
     let text_right_columns = u16::try_from(text_right_width).unwrap_or(content.width);
-    let sparkline_columns = sparkline.map_or(0, |sparkline| {
-        u16::try_from(sparkline.series.len())
-            .unwrap_or(u16::MAX)
-            .min(
-                content
-                    .width
-                    .saturating_sub(18)
-                    .saturating_sub(text_right_columns)
-                    .saturating_sub(u16::from(text_right_columns > 0)),
-            )
-    });
-    let chart_gap = u16::from(text_right_columns > 0 && sparkline_columns > 0);
+    let chart_columns = sparkline.map_or_else(
+        || {
+            gauge.map_or(0, |_| {
+                18.min(
+                    content
+                        .width
+                        .saturating_sub(18)
+                        .saturating_sub(text_right_columns)
+                        .saturating_sub(u16::from(text_right_columns > 0)),
+                )
+            })
+        },
+        |sparkline| {
+            u16::try_from(sparkline.series.len())
+                .unwrap_or(u16::MAX)
+                .min(
+                    content
+                        .width
+                        .saturating_sub(18)
+                        .saturating_sub(text_right_columns)
+                        .saturating_sub(u16::from(text_right_columns > 0)),
+                )
+        },
+    );
+    let chart_gap = u16::from(text_right_columns > 0 && chart_columns > 0);
     let right_columns = text_right_columns
         .saturating_add(chart_gap)
-        .saturating_add(sparkline_columns)
+        .saturating_add(chart_columns)
         .min(content.width);
     let gap = u16::from(right_columns > 0 && right_columns < content.width);
     let [label_area, value_area] = Layout::horizontal([
@@ -2290,7 +2383,7 @@ fn render_list_item(
     .areas(content);
     Paragraph::new(Line::from(left)).render(label_area, buffer);
     if text_right_columns > 0 {
-        let text_area = if sparkline_columns == 0 {
+        let text_area = if chart_columns == 0 {
             value_area
         } else {
             Rect::new(
@@ -2308,7 +2401,7 @@ fn render_list_item(
         }
         paragraph.render(text_area, buffer);
     }
-    if sparkline_columns > 0
+    if chart_columns > 0
         && let Some(sparkline) = sparkline
     {
         let chart_area = Rect::new(
@@ -2318,7 +2411,7 @@ fn render_list_item(
                 .saturating_add(text_right_columns)
                 .saturating_add(chart_gap),
             value_area.y,
-            sparkline_columns,
+            chart_columns,
             value_area.height,
         );
         sparkline
@@ -2328,6 +2421,35 @@ fn render_list_item(
             } else {
                 theme.tone(item.value_tone)
             })
+            .render(chart_area, buffer);
+    } else if chart_columns > 0
+        && let Some(gauge) = gauge
+    {
+        let chart_area = Rect::new(
+            value_area
+                .x
+                .saturating_add(gap)
+                .saturating_add(text_right_columns)
+                .saturating_add(chart_gap),
+            value_area.y,
+            chart_columns,
+            value_area.height,
+        );
+        gauge
+            .widget()
+            .without_label()
+            .styles(
+                if selected {
+                    theme.selected_value
+                } else {
+                    theme.tone(item.value_tone)
+                },
+                if selected {
+                    theme.selected_detail
+                } else {
+                    theme.navigation
+                },
+            )
             .render(chart_area, buffer);
     }
 }
@@ -2371,7 +2493,7 @@ fn append_leading_slot(
                 theme.tone(badge.tone)
             },
         )),
-        ListItemSlot::Sparkline(_) => {}
+        ListItemSlot::Sparkline(_) | ListItemSlot::Gauge(_) => {}
         ListItemSlot::Disclosure => spans.push(Span::styled(
             "› ",
             if selected {
@@ -2422,7 +2544,7 @@ fn append_trailing_slot(
                 theme.tone(badge.tone)
             },
         )),
-        ListItemSlot::Sparkline(_) => {}
+        ListItemSlot::Sparkline(_) | ListItemSlot::Gauge(_) => {}
         ListItemSlot::Disclosure => spans.push(Span::styled(
             "›",
             if selected {
@@ -2987,6 +3109,65 @@ mod tests {
                 page.title
             );
         }
+    }
+
+    #[test]
+    fn list_gauge_keeps_app_caption_and_draws_a_compact_terminal_meter() {
+        let gauge = Gauge::new(
+            "weekly-gauge",
+            0.77,
+            "7-day limit",
+            "7-day limit: 77 percent left",
+        )
+        .caption("77% left · Resets in 5d 14h");
+        let active = ListItem::new("active", "Quota")
+            .trailing(ListItemSlot::gauge(gauge.clone().activate("open-quota")));
+        assert_eq!(active.primary_role(), RowPrimaryRole::Command);
+        assert!(active.validate("item").is_ok());
+        assert!(
+            ListItem::new("invalid-leading", "Quota")
+                .leading(ListItemSlot::gauge(gauge.clone()))
+                .validate("item")
+                .is_err()
+        );
+        assert!(
+            ListItem::new("duplicate-caption", "Quota")
+                .value("renderer-owned copy")
+                .trailing(ListItemSlot::gauge(gauge.clone()))
+                .validate("item")
+                .is_err()
+        );
+        let page = Page::new(
+            "Usage",
+            List::new(
+                "metrics",
+                vec![
+                    ListItem::new("weekly", "7-day limit")
+                        .value_tone(ListItemTone::Info)
+                        .trailing(ListItemSlot::gauge(gauge)),
+                ],
+            ),
+        );
+        let mut input = InputField::new("");
+        let mut state = ListState::default();
+        let mut theme = PageTheme::for_theme(KitTheme::dark());
+        theme.info = Style::new().fg(ratatui::style::Color::Magenta);
+        theme.navigation = Style::new().fg(ratatui::style::Color::DarkGray);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 72, 7));
+
+        page.widget(&mut input, &mut state)
+            .theme(theme)
+            .render(buffer.area, &mut buffer);
+
+        let row = (0..72).map(|x| buffer[(x, 2)].symbol()).collect::<String>();
+        assert!(row.contains("7-day limit"));
+        assert!(row.contains("77% left · Resets in 5d 14h"));
+        assert!((0..72).any(|x| {
+            buffer[(x, 2)].symbol() == "─" && buffer[(x, 2)].fg == ratatui::style::Color::Magenta
+        }));
+        assert!((0..72).any(|x| {
+            buffer[(x, 2)].symbol() == "─" && buffer[(x, 2)].fg == ratatui::style::Color::DarkGray
+        }));
     }
 
     #[test]

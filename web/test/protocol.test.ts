@@ -10,6 +10,7 @@ import {
   isBarChartSpec,
   isCanvasPageNode,
   isGaugeSpec,
+  isGaugeSlot,
   isLineChartSpec,
   isMediaNode,
   isMenuNode,
@@ -31,6 +32,7 @@ import {
   normalizedBarChartValues,
   resolvedLineChartBounds,
   gaugePercentageLabel,
+  gaugeValueLabel,
   uiNodeCapability,
   uiNodeCapabilities,
   verifyMediaBlobBytes,
@@ -49,7 +51,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(42);
+    expect(messages).toHaveLength(44);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -375,6 +377,28 @@ describe("shared protocol", () => {
       || !isGaugeSpec(updatedGauge.root.body)) throw new Error("expected updated Gauge");
     expect(updatedGauge.root.body.ratio).toBe(0.82);
     expect(updatedGauge.root.body.activate).toBe("next-chart");
+
+    const quotaSnapshot = messages[42] as UiSnapshot;
+    if (!isRenderablePageNode(quotaSnapshot.root)) {
+      throw new Error("expected shared List Gauge fixture");
+    }
+    const quotaSlot = quotaSnapshot.root.body.items[0]?.trailing;
+    if (quotaSlot === undefined || !isGaugeSlot(quotaSlot)) {
+      throw new Error("expected trailing Gauge");
+    }
+    expect(quotaSlot.ratio).toBe(0.77);
+    expect(gaugeValueLabel(quotaSlot)).toBe("77% left · Resets in 5d 14h");
+    expect(uiNodeCapabilities(quotaSnapshot.root)).toEqual([
+      "page", "list", "listItem", "listItemPresentation", "gauge",
+    ]);
+    const updatedQuota = applyUiDelta(quotaSnapshot, messages[43] as UiDelta);
+    if (!isRenderablePageNode(updatedQuota.root)) throw new Error("expected updated List Gauge");
+    const updatedQuotaSlot = updatedQuota.root.body.items[0]?.trailing;
+    if (updatedQuotaSlot === undefined || !isGaugeSlot(updatedQuotaSlot)) {
+      throw new Error("List Gauge delta must preserve its slot");
+    }
+    expect(updatedQuotaSlot.ratio).toBe(0.61);
+    expect(gaugeValueLabel(updatedQuotaSlot)).toBe("61% left · Resets in 4d");
   });
 
   test("uses one role-aware Enter and Space decision table", () => {
