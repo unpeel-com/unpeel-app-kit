@@ -30,7 +30,7 @@ public struct SurfaceComponentView<Presenter: View>: View {
                 .background(background(surface.background))
                 .allowsHitTesting(surface.inputPolicy != .none)
                 .focusable(surface.inputPolicy == .pointerAndKeyboard)
-        case .canvasPage, .markdownEditor, .media, .page, .unsupported:
+        case .canvasPage, .markdownEditor, .media, .menu, .page, .tree, .unsupported:
             EmptyView()
         }
     }

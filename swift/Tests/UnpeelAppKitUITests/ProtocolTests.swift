@@ -53,7 +53,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 23)
+    #expect(messages.count == 29)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return
@@ -254,6 +254,49 @@ func sharedProtocolFixturesDecode() throws {
     ])
     #expect(updatedRoles.items[2].primaryCheckmark?.value == false)
     #expect(updatedRoles.selectedID == "row-destructive")
+
+    guard case let .snapshot(treeSnapshot) = messages[23],
+          case let .tree(tree) = treeSnapshot.root.component,
+          case let .delta(treeDelta) = messages[24],
+          case let .tree(updatedTree) = try treeSnapshot.applying(treeDelta).root.component
+    else {
+        Issue.record("final fixtures must contain Tree hierarchy and keyed deltas")
+        return
+    }
+    #expect(tree.location == "Writing")
+    #expect(tree.selectedID == "today")
+    #expect(tree.requiredCapabilities == [
+        "tree", "treeHierarchy", "treeFilter", "treeParent", "button",
+    ])
+    #expect(tree.primaryAction?.action == "create-note")
+    #expect(updatedTree.location == "Writing/Projects")
+    #expect(updatedTree.filter?.value == "draft")
+    #expect(updatedTree.selectedID == "draft")
+    #expect(updatedTree.items[1].children.first?.label == "Draft.md")
+
+    guard case let .snapshot(menuSnapshot) = messages[25],
+          case let .menu(menu) = menuSnapshot.root.component,
+          case let .delta(menuDelta) = messages[26],
+          case let .menu(updatedMenu) = try menuSnapshot.applying(menuDelta).root.component,
+          case let .snapshot(markdownMenuSnapshot) = messages[27],
+          case let .markdownEditor(markdownWithMenus) = markdownMenuSnapshot.root.component,
+          case let .delta(markdownMenuDelta) = messages[28],
+          case let .markdownEditor(markdownWithoutInsert) = try markdownMenuSnapshot
+            .applying(markdownMenuDelta).root.component
+    else {
+        Issue.record("final fixtures must contain root and nested semantic Menus")
+        return
+    }
+    #expect(menu.requiredCapabilities == ["menu", "menuAnchor"])
+    #expect(menu.items[1].disabled)
+    #expect(menu.items[2].role == .danger)
+    #expect(updatedMenu.selectedID == "delete")
+    #expect(markdownWithMenus.insertMenu?.anchor == .caret)
+    #expect(markdownMenuSnapshot.root.component.requiredCapabilities == [
+        "markdownEditor", "menu", "menuAnchor",
+    ])
+    #expect(markdownWithoutInsert.insertMenu == nil)
+    #expect(markdownWithoutInsert.contextMenu != nil)
 }
 
 @Test

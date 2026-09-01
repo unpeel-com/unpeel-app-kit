@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -230,6 +231,8 @@ pub struct Explorer {
     theme: ExplorerTheme,
     area: Rect,
     list_area: Rect,
+    semantic_ids: HashMap<PathBuf, String>,
+    next_semantic_id: u64,
 }
 
 impl Explorer {
@@ -291,6 +294,8 @@ impl Explorer {
             theme,
             area: Rect::default(),
             list_area: Rect::default(),
+            semantic_ids: HashMap::new(),
+            next_semantic_id: 1,
         })
     }
 
@@ -407,6 +412,142 @@ impl Explorer {
     #[must_use]
     pub fn selected(&self) -> Option<&ExplorerEntry> {
         self.entries.get(self.selected_index())
+    }
+
+    /// Projects the current App-owned directory as the closed semantic Tree.
+    ///
+    /// Entry ids are process-local opaque keys. Absolute filesystem paths stay
+    /// exclusively in this Explorer for TUI drag/open behavior.
+    #[must_use]
+    pub fn semantic_tree(&mut self, label: impl Into<String>) -> crate::Tree {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    entry.name.clone(),
+                    entry.directory,
+                    entry.symlink,
+                    entry.parent,
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_path = self.selected().map(|entry| entry.path.clone());
+        let mut selected_id = None;
+        let mut items = Vec::with_capacity(entries.len());
+        for (path, name, directory, symlink, parent) in entries {
+            let id = self.semantic_id_for_path(&path);
+            if selected_path.as_ref() == Some(&path) {
+                selected_id = Some(id.clone());
+            }
+            let item = if parent {
+                crate::TreeItem::parent(id)
+            } else if directory {
+                crate::TreeItem::directory(id, name)
+                    .child_state(crate::TreeChildState::Unloaded)
+                    .symlink(symlink)
+                    .hidden(
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with('.')),
+                    )
+            } else {
+                crate::TreeItem::file(id, name).symlink(symlink).hidden(
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with('.')),
+                )
+            };
+            items.push(item);
+        }
+        let root = self.navigation_root.as_deref().unwrap_or(&self.cwd);
+        let location = crate::display_path_from_root(&self.cwd, root);
+        let mut tree =
+            crate::Tree::new(label, location, items).empty_message(if self.filter().is_empty() {
+                "empty folder"
+            } else {
+                "no matches"
+            });
+        if self.show_filter {
+            tree = tree.filter(
+                crate::TreeFilter::new("explorer-filter", "Filter", self.filter(), "tree-filter")
+                    .placeholder(self.filter.placeholder()),
+            );
+        }
+        if let Some(selected_id) = selected_id {
+            tree = tree.selected_id(selected_id);
+        }
+        tree
+    }
+
+    /// Applies one authenticated semantic Tree action to the same state used
+    /// by Ratatui. The caller publishes/acknowledges the resulting revision.
+    #[cfg(feature = "ui-bridge")]
+    pub fn handle_ui_event(
+        &mut self,
+        revision: u64,
+        tree_node_id: &str,
+        event: &crate::UiEvent,
+    ) -> Result<Option<ExplorerEvent>, String> {
+        if event.base_revision != revision {
+            return Err(format!(
+                "Tree action base revision {} does not match {revision}",
+                event.base_revision
+            ));
+        }
+        let action = event.action.action.as_str();
+        if action == crate::TreeActions::SELECT || action == crate::TreeActions::OPEN {
+            if event.action.node_id.as_str() != tree_node_id {
+                return Ok(None);
+            }
+            let crate::UiEventValue::Text(item_id) = &event.action.value else {
+                return Err("Tree select/open requires an opaque text item id".to_owned());
+            };
+            let Some(index) = self.semantic_index(item_id) else {
+                return Err(format!("Tree item {item_id:?} is not present"));
+            };
+            self.set_selected_index(index);
+            if action == crate::TreeActions::SELECT {
+                if event.action.kind != crate::UiEventKind::Select {
+                    return Err("Tree selection requires a select event".to_owned());
+                }
+                return Ok(Some(ExplorerEvent::SelectionChanged));
+            }
+            if event.action.kind != crate::UiEventKind::Activate {
+                return Err("Tree open requires an activate event".to_owned());
+            }
+            return self
+                .handle(ExplorerInput::Open)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        if action == crate::TreeActions::PARENT {
+            if event.action.node_id.as_str() != tree_node_id
+                || !matches!(
+                    event.action.kind,
+                    crate::UiEventKind::Cancel | crate::UiEventKind::Activate
+                )
+            {
+                return Err("Tree parent action has the wrong target or kind".to_owned());
+            }
+            return self
+                .handle(ExplorerInput::Parent)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        if action == "tree-filter" {
+            if event.action.node_id.as_str() != "explorer-filter"
+                || event.action.kind != crate::UiEventKind::Change
+            {
+                return Err("Tree filter action has the wrong target or kind".to_owned());
+            }
+            let crate::UiEventValue::Text(value) = &event.action.value else {
+                return Err("Tree filter requires a text value".to_owned());
+            };
+            return Ok(self
+                .set_filter(value.clone())
+                .then_some(ExplorerEvent::FilterChanged));
+        }
+        Ok(None)
     }
 
     #[must_use]
@@ -869,6 +1010,25 @@ impl Explorer {
             explorer: self,
             drags,
         }
+    }
+
+    fn semantic_id_for_path(&mut self, path: &Path) -> String {
+        if let Some(id) = self.semantic_ids.get(path) {
+            return id.clone();
+        }
+        let id = format!("entry-{}", self.next_semantic_id);
+        self.next_semantic_id = self.next_semantic_id.saturating_add(1).max(1);
+        self.semantic_ids.insert(path.to_path_buf(), id.clone());
+        id
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    fn semantic_index(&self, id: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| {
+            self.semantic_ids
+                .get(&entry.path)
+                .is_some_and(|candidate| candidate == id)
+        })
     }
 
     fn entry_index_at(&self, position: Position) -> Option<usize> {

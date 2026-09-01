@@ -46,7 +46,7 @@ public struct CanvasPageView<Presenter: View>: View {
             } else {
                 EmptyView()
             }
-        case .markdownEditor, .media, .page, .surface, .unsupported:
+        case .markdownEditor, .media, .menu, .page, .surface, .tree, .unsupported:
             EmptyView()
         }
     }

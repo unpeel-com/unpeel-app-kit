@@ -351,8 +351,10 @@ final class HostedAppSession: ObservableObject, Identifiable {
         case let .page(page): page.title
         case let .markdownEditor(editor): editor.title ?? "Markdown"
         case let .media(media): media.alt
+        case let .menu(menu): menu.label
         case let .surface(surface): "Surface: \(surface.reference.streamID)"
         case let .canvasPage(page): page.title
+        case let .tree(tree): tree.label
         case let .unsupported(kind): "Unsupported: \(kind)"
         }
     }
@@ -513,6 +515,29 @@ final class HostedAppSession: ObservableObject, Identifiable {
                 action: activate,
                 kind: .activate
             )
+        case let .menu(menu):
+            guard let item = menu.items.first(where: { !$0.disabled }) else {
+                action = nil
+                break
+            }
+            action = UIAction(nodeID: item.id, action: item.action, kind: .activate)
+        case let .tree(tree):
+            if let primary = tree.primaryAction {
+                action = UIAction(
+                    nodeID: primary.id,
+                    action: primary.action,
+                    kind: .activate
+                )
+            } else if let item = tree.items.first {
+                action = UIAction(
+                    nodeID: snapshot.root.id,
+                    action: item.kind == .parent ? tree.actions.parent : tree.actions.open,
+                    kind: item.kind == .parent ? .cancel : .activate,
+                    value: item.kind == .parent ? .none : .text(item.id)
+                )
+            } else {
+                action = nil
+            }
         case .surface:
             action = nil
         case .unsupported:

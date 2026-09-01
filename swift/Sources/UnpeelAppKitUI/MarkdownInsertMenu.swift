@@ -69,6 +69,33 @@ struct MarkdownBackspaceEdit {
     let caretUTF16Offset: Int
 }
 
+/// Matches the App's rule for `/` and `\`: a collapsed caret on an otherwise
+/// blank, unfenced line. The renderer only requests a Menu; the App rechecks
+/// this against authoritative state before opening it.
+func canOpenMarkdownMenu(text: String, selection: NSRange) -> Bool {
+    guard selection.location != NSNotFound, selection.length == 0 else { return false }
+    let source = text as NSString
+    guard selection.location <= source.length else { return false }
+    let lineRange = source.lineRange(for: NSRange(location: selection.location, length: 0))
+    var contentEnd = NSMaxRange(lineRange)
+    while contentEnd > lineRange.location,
+          [10, 13].contains(source.character(at: contentEnd - 1))
+    {
+        contentEnd -= 1
+    }
+    let content = source.substring(with: NSRange(
+        location: lineRange.location,
+        length: contentEnd - lineRange.location
+    ))
+    guard content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+    let prefix = source.substring(to: lineRange.location)
+    let fenceCount = prefix
+        .components(separatedBy: .newlines)
+        .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("```") }
+        .count
+    return fenceCount.isMultiple(of: 2)
+}
+
 func markdownBackspaceEdit(text: String, selection: NSRange) -> MarkdownBackspaceEdit? {
     guard selection.location != NSNotFound, selection.length == 0 else { return nil }
     let source = text as NSString

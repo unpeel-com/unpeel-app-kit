@@ -1,6 +1,7 @@
 import {
   type MarkdownEditorNode,
   type MarkdownPresentation,
+  type MenuSpec,
   type TextEdit,
   type TextPosition,
   type TextSelection,
@@ -9,6 +10,7 @@ import {
   isMarkdownEditorNode,
   uiAction,
 } from "./protocol";
+import { renderSemanticMenu } from "./menu";
 
 export interface MarkdownEditorRendererOptions {
   renderMarkdown?: (source: string) => Node | string;
@@ -23,8 +25,10 @@ export class MarkdownEditorRenderer {
   private readonly textarea: HTMLTextAreaElement;
   private readonly preview: HTMLElement;
   private readonly insertMenu: HTMLElement;
+  private readonly contextMenu: HTMLElement;
   private readonly onAction: (action: UiAction) => void;
   private readonly options: MarkdownEditorRendererOptions;
+  private readonly dismissContextMenuOnPointerDown: (event: PointerEvent) => void;
   private snapshot?: UiSnapshot;
   private editor?: MarkdownEditorNode;
   private applyingSnapshot = false;
@@ -37,6 +41,7 @@ export class MarkdownEditorRenderer {
   private flushTimer: number | undefined;
   private visibleInsertItems: MarkdownInsertItem[] = [];
   private selectedInsertIndex = 0;
+  private semanticSelectedId: string | undefined;
 
   constructor(
     container: HTMLElement,
@@ -70,9 +75,27 @@ export class MarkdownEditorRenderer {
     this.insertMenu.style.borderRadius = "8px";
     this.insertMenu.style.background = "Canvas";
     this.insertMenu.style.boxShadow = "0 10px 30px rgb(0 0 0 / 20%)";
+    this.contextMenu = document.createElement("div");
+    this.contextMenu.className = "unpeel-markdown-editor__context-menu";
+    this.contextMenu.hidden = true;
+    this.contextMenu.style.position = "absolute";
+    this.contextMenu.style.zIndex = "30";
+    this.dismissContextMenuOnPointerDown = (event) => {
+      const target = event.target;
+      if (this.contextMenu.hidden
+        || !(target instanceof Node)
+        || this.contextMenu.contains(target)) return;
+      this.contextMenu.hidden = true;
+    };
+    document.addEventListener("pointerdown", this.dismissContextMenuOnPointerDown);
+    this.contextMenu.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      this.contextMenu.hidden = true;
+      this.textarea.focus();
+    }, { capture: true });
     this.body.style.position = "relative";
     this.body.append(this.textarea, this.preview);
-    this.body.append(this.insertMenu);
+    this.body.append(this.insertMenu, this.contextMenu);
     this.element.append(this.toolbar, this.body);
     container.replaceChildren(this.element);
 
@@ -87,6 +110,11 @@ export class MarkdownEditorRenderer {
     });
     this.textarea.addEventListener("mouseup", () => this.selectionChanged());
     this.textarea.addEventListener("blur", () => this.selectionChanged());
+    this.textarea.addEventListener("contextmenu", (event) => {
+      if (this.editor?.contextMenu === undefined) return;
+      event.preventDefault();
+      this.showContextMenu(event, this.editor.contextMenu);
+    });
   }
 
   render(snapshot: UiSnapshot): void {
@@ -146,6 +174,7 @@ export class MarkdownEditorRenderer {
       this.authoritativeSelection = editor.selection;
       this.snapshot = snapshot;
       this.editor = editor;
+      if (editor.contextMenu === undefined) this.contextMenu.hidden = true;
       this.textarea.readOnly = editor.readOnly ?? false;
       this.textarea.placeholder = editor.placeholder ?? "";
       const selection = shouldApplyAuthoritativeSelection
@@ -174,6 +203,7 @@ export class MarkdownEditorRenderer {
 
   destroy(): void {
     if (this.flushTimer !== undefined) window.clearTimeout(this.flushTimer);
+    document.removeEventListener("pointerdown", this.dismissContextMenuOnPointerDown);
     this.element.remove();
   }
 
@@ -254,6 +284,44 @@ export class MarkdownEditorRenderer {
   }
 
   private handleEditorKey(event: KeyboardEvent): void {
+    const openMenu = this.editor?.actions?.openMenu;
+    if (this.editor?.insertMenu === undefined
+      && openMenu !== undefined
+      && (event.key === "/" || event.key === "\\")
+      && !event.metaKey && !event.ctrlKey && !event.altKey
+      && canOpenMarkdownMenu(
+        this.textarea.value,
+        this.textarea.selectionStart,
+        this.textarea.selectionEnd,
+      )) {
+      event.preventDefault();
+      this.onAction(uiAction(
+        this.editor!.id,
+        openMenu,
+        "command",
+        { type: "text", value: event.key === "/" ? "slash" : "palette" },
+      ));
+      return;
+    }
+    if (this.editor?.insertMenu !== undefined) {
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        this.moveSemanticSelection(event.key === "ArrowUp" ? -1 : 1);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        this.activateSemanticItem(this.editor.insertMenu);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (this.editor.insertMenu.dismiss !== undefined) {
+          this.onAction(uiAction(this.editor.id, this.editor.insertMenu.dismiss, "cancel"));
+        }
+        return;
+      }
+    }
     const context = markdownSlashContext(
       this.textarea.value,
       this.textarea.selectionStart,
@@ -297,6 +365,21 @@ export class MarkdownEditorRenderer {
   private refreshInsertMenu(): void {
     if (this.textarea.hidden || this.textarea.readOnly) {
       this.closeInsertMenu();
+      return;
+    }
+    if (this.editor?.insertMenu !== undefined) {
+      const menu = this.editor.insertMenu;
+      const enabled = menu.items.filter((item) => item.disabled !== true);
+      if (this.semanticSelectedId === undefined
+        || !enabled.some((item) => item.id === this.semanticSelectedId)) {
+        this.semanticSelectedId = menu.selectedId ?? enabled[0]?.id;
+      }
+      const projection = { ...menu, selectedId: this.semanticSelectedId };
+      this.insertMenu.hidden = false;
+      renderSemanticMenu(this.insertMenu, projection, this.editor.id, (action) => {
+        this.onAction(action);
+        this.textarea.focus();
+      });
       return;
     }
     const context = markdownSlashContext(
@@ -398,6 +481,35 @@ export class MarkdownEditorRenderer {
     this.insertMenu.replaceChildren();
     this.visibleInsertItems = [];
     this.selectedInsertIndex = 0;
+    this.semanticSelectedId = undefined;
+  }
+
+  private moveSemanticSelection(delta: number): void {
+    const menu = this.editor?.insertMenu;
+    if (menu === undefined) return;
+    const enabled = menu.items.filter((item) => item.disabled !== true);
+    if (enabled.length === 0) return;
+    const current = Math.max(0, enabled.findIndex((item) => item.id === this.semanticSelectedId));
+    this.semanticSelectedId = enabled[(current + delta + enabled.length) % enabled.length]!.id;
+    this.refreshInsertMenu();
+  }
+
+  private activateSemanticItem(menu: MenuSpec): void {
+    const item = menu.items.find((candidate) => candidate.id === this.semanticSelectedId);
+    if (item === undefined || item.disabled === true) return;
+    this.onAction(uiAction(item.id, item.action, "activate"));
+  }
+
+  private showContextMenu(event: MouseEvent, menu: MenuSpec): void {
+    this.contextMenu.hidden = false;
+    this.contextMenu.style.insetInlineStart = `${event.offsetX}px`;
+    this.contextMenu.style.insetBlockStart = `${event.offsetY}px`;
+    renderSemanticMenu(this.contextMenu, menu, this.editor?.id ?? "markdown-editor", (action) => {
+      this.onAction(action);
+      this.contextMenu.hidden = true;
+      this.textarea.focus();
+    });
+    this.contextMenu.focus();
   }
 
   private renderToolbar(editor: MarkdownEditorNode): void {
@@ -526,6 +638,24 @@ interface MarkdownSlashContext {
   lineEnd: number;
   indent: string;
   query: string;
+}
+
+function canOpenMarkdownMenu(
+  text: string,
+  selectionStart: number,
+  selectionEnd: number,
+): boolean {
+  if (selectionStart !== selectionEnd) return false;
+  const lineStart = text.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
+  const newline = text.indexOf("\n", selectionStart);
+  const lineEnd = newline === -1 ? text.length : newline;
+  if (text.slice(lineStart, lineEnd).trim().length !== 0) return false;
+  const fenceCount = text
+    .slice(0, lineStart)
+    .split("\n")
+    .filter((candidate) => candidate.trimStart().startsWith("```"))
+    .length;
+  return fenceCount % 2 === 0;
 }
 
 function markdownSlashContext(

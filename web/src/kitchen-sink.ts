@@ -2,8 +2,10 @@ import {
   CanvasPageRenderer,
   MarkdownEditorRenderer,
   MediaRenderer,
+  MenuRenderer,
   PageRenderer,
   SurfaceRenderer,
+  TreeRenderer,
   type SurfaceNode,
   type SurfacePresenterAdapter,
   type UiAction,
@@ -209,6 +211,8 @@ function makeRenderer(type: string): ComponentRenderer | undefined {
           showError(error.message);
         },
       });
+    case "menu":
+      return new MenuRenderer(container, postAction);
     case "page":
       return new PageRenderer(container, postAction);
     case "surface":
@@ -219,6 +223,8 @@ function makeRenderer(type: string): ComponentRenderer | undefined {
           surface,
         ),
       );
+    case "tree":
+      return new TreeRenderer(container, postAction);
     default:
       return undefined;
   }

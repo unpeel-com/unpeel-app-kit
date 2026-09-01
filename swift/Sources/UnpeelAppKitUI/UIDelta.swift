@@ -11,6 +11,8 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case markdownSetTitle(nodeID: String, title: String?)
     case markdownSetPlaceholder(nodeID: String, placeholder: String)
     case markdownSetActions(nodeID: String, actions: MarkdownEditorActions)
+    case markdownSetMenus(nodeID: String, insertMenu: UIMenuSpec?, contextMenu: UIMenuSpec?)
+    case menuSetSelection(nodeID: String, selectedID: String?)
     case mediaSetSource(nodeID: String, source: MediaSource, intrinsic: MediaPixelSize)
     case surfaceSetReference(nodeID: String, reference: SurfaceReference)
     case toggleSetValue(nodeID: String, value: Bool)
@@ -19,6 +21,18 @@ public enum UIDeltaOperation: Equatable, Sendable {
     case listInsertItem(listID: String, index: Int, item: UIListItemSpec)
     case listSetSelection(listID: String, selectedID: String?)
     case listRemoveItem(listID: String, itemID: String)
+    case treeSetSelection(nodeID: String, selectedID: String?)
+    case treeSetFilter(filterID: String, value: String)
+    case treeSetLocation(nodeID: String, location: String)
+    case treeSpliceChildren(
+        nodeID: String,
+        parentID: String?,
+        index: Int,
+        deleteCount: Int,
+        items: [UITreeItem]
+    )
+    case treeSetChildState(nodeID: String, itemID: String, childState: UITreeChildState)
+    case treeSetExpanded(nodeID: String, itemID: String, expanded: Bool)
 }
 
 extension UIDeltaOperation: Codable {
@@ -34,6 +48,8 @@ extension UIDeltaOperation: Codable {
         case title
         case placeholder
         case actions
+        case insertMenu
+        case contextMenu
         case source
         case intrinsic
         case reference
@@ -43,6 +59,13 @@ extension UIDeltaOperation: Codable {
         case item
         case itemID = "itemId"
         case selectedID = "selectedId"
+        case filterID = "filterId"
+        case location
+        case parentID = "parentId"
+        case deleteCount
+        case items
+        case childState
+        case expanded
     }
 
     enum Operation: String, Codable {
@@ -55,6 +78,8 @@ extension UIDeltaOperation: Codable {
         case markdownSetTitle
         case markdownSetPlaceholder
         case markdownSetActions
+        case markdownSetMenus
+        case menuSetSelection
         case mediaSetSource
         case surfaceSetReference
         case toggleSetValue
@@ -63,6 +88,12 @@ extension UIDeltaOperation: Codable {
         case listInsertItem
         case listSetSelection
         case listRemoveItem
+        case treeSetSelection
+        case treeSetFilter
+        case treeSetLocation
+        case treeSpliceChildren
+        case treeSetChildState
+        case treeSetExpanded
     }
 
     public init(from decoder: Decoder) throws {
@@ -113,6 +144,17 @@ extension UIDeltaOperation: Codable {
                 nodeID: try container.decode(String.self, forKey: .nodeID),
                 actions: try container.decode(MarkdownEditorActions.self, forKey: .actions)
             )
+        case .markdownSetMenus:
+            self = .markdownSetMenus(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                insertMenu: try container.decodeIfPresent(UIMenuSpec.self, forKey: .insertMenu),
+                contextMenu: try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
+            )
+        case .menuSetSelection:
+            self = .menuSetSelection(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                selectedID: try container.decodeIfPresent(String.self, forKey: .selectedID)
+            )
         case .mediaSetSource:
             self = .mediaSetSource(
                 nodeID: try container.decode(String.self, forKey: .nodeID),
@@ -154,6 +196,41 @@ extension UIDeltaOperation: Codable {
             self = .listSetSelection(
                 listID: try container.decode(String.self, forKey: .listID),
                 selectedID: try container.decodeIfPresent(String.self, forKey: .selectedID)
+            )
+        case .treeSetSelection:
+            self = .treeSetSelection(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                selectedID: try container.decodeIfPresent(String.self, forKey: .selectedID)
+            )
+        case .treeSetFilter:
+            self = .treeSetFilter(
+                filterID: try container.decode(String.self, forKey: .filterID),
+                value: try container.decode(String.self, forKey: .value)
+            )
+        case .treeSetLocation:
+            self = .treeSetLocation(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                location: try container.decode(String.self, forKey: .location)
+            )
+        case .treeSpliceChildren:
+            self = .treeSpliceChildren(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                parentID: try container.decodeIfPresent(String.self, forKey: .parentID),
+                index: try container.decode(Int.self, forKey: .index),
+                deleteCount: try container.decode(Int.self, forKey: .deleteCount),
+                items: try container.decode([UITreeItem].self, forKey: .items)
+            )
+        case .treeSetChildState:
+            self = .treeSetChildState(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                itemID: try container.decode(String.self, forKey: .itemID),
+                childState: try container.decode(UITreeChildState.self, forKey: .childState)
+            )
+        case .treeSetExpanded:
+            self = .treeSetExpanded(
+                nodeID: try container.decode(String.self, forKey: .nodeID),
+                itemID: try container.decode(String.self, forKey: .itemID),
+                expanded: try container.decode(Bool.self, forKey: .expanded)
             )
         }
     }
@@ -199,6 +276,19 @@ extension UIDeltaOperation: Codable {
             try container.encode(Operation.markdownSetActions, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
             try container.encode(actions, forKey: .actions)
+        case let .markdownSetMenus(nodeID, insertMenu, contextMenu):
+            try container.encode(Operation.markdownSetMenus, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encodeIfPresent(insertMenu, forKey: .insertMenu)
+            try container.encodeIfPresent(contextMenu, forKey: .contextMenu)
+        case let .menuSetSelection(nodeID, selectedID):
+            try container.encode(Operation.menuSetSelection, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            if let selectedID {
+                try container.encode(selectedID, forKey: .selectedID)
+            } else {
+                try container.encodeNil(forKey: .selectedID)
+            }
         case let .mediaSetSource(nodeID, source, intrinsic):
             try container.encode(Operation.mediaSetSource, forKey: .op)
             try container.encode(nodeID, forKey: .nodeID)
@@ -237,6 +327,39 @@ extension UIDeltaOperation: Codable {
             } else {
                 try container.encodeNil(forKey: .selectedID)
             }
+        case let .treeSetSelection(nodeID, selectedID):
+            try container.encode(Operation.treeSetSelection, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            if let selectedID {
+                try container.encode(selectedID, forKey: .selectedID)
+            } else {
+                try container.encodeNil(forKey: .selectedID)
+            }
+        case let .treeSetFilter(filterID, value):
+            try container.encode(Operation.treeSetFilter, forKey: .op)
+            try container.encode(filterID, forKey: .filterID)
+            try container.encode(value, forKey: .value)
+        case let .treeSetLocation(nodeID, location):
+            try container.encode(Operation.treeSetLocation, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(location, forKey: .location)
+        case let .treeSpliceChildren(nodeID, parentID, index, deleteCount, items):
+            try container.encode(Operation.treeSpliceChildren, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encodeIfPresent(parentID, forKey: .parentID)
+            try container.encode(index, forKey: .index)
+            try container.encode(deleteCount, forKey: .deleteCount)
+            try container.encode(items, forKey: .items)
+        case let .treeSetChildState(nodeID, itemID, childState):
+            try container.encode(Operation.treeSetChildState, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(itemID, forKey: .itemID)
+            try container.encode(childState, forKey: .childState)
+        case let .treeSetExpanded(nodeID, itemID, expanded):
+            try container.encode(Operation.treeSetExpanded, forKey: .op)
+            try container.encode(nodeID, forKey: .nodeID)
+            try container.encode(itemID, forKey: .itemID)
+            try container.encode(expanded, forKey: .expanded)
         }
     }
 }
@@ -383,6 +506,20 @@ private extension UINode {
         case let .markdownSetActions(nodeID, actions):
             let editor = try markdownEditor(nodeID: nodeID).copying(actions: actions)
             return UINode(id: id, component: .markdownEditor(editor))
+        case let .markdownSetMenus(nodeID, insertMenu, contextMenu):
+            let editor = try markdownEditor(nodeID: nodeID).copying(
+                insertMenu: .set(insertMenu),
+                contextMenu: .set(contextMenu)
+            )
+            return UINode(id: id, component: .markdownEditor(editor))
+        case let .menuSetSelection(nodeID, selectedID):
+            var menu = try menu(nodeID: nodeID)
+            let selected = selectedID.flatMap { id in menu.items.first { $0.id == id } }
+            guard selectedID == nil || (selected != nil && selected?.disabled == false) else {
+                throw UIDeltaApplicationError("Delta selects an unavailable Menu item")
+            }
+            menu.selectedID = selectedID
+            return UINode(id: id, component: .menu(menu))
         case let .mediaSetSource(nodeID, source, intrinsic):
             let media = try media(nodeID: nodeID).copying(
                 source: source,
@@ -511,6 +648,72 @@ private extension UINode {
             list.selectedID = selectedID
             page.body = .list(list)
             return UINode(id: id, component: .page(page))
+        case let .treeSetSelection(nodeID, selectedID):
+            var tree = try tree(nodeID: nodeID)
+            let ids = Set(flattenTreeItems(tree.items).map(\.id))
+            guard selectedID.map(ids.contains) ?? true else {
+                throw UIDeltaApplicationError("Delta selects an unavailable Tree item")
+            }
+            tree.selectedID = selectedID
+            return UINode(id: id, component: .tree(tree))
+        case let .treeSetFilter(filterID, value):
+            guard case var .tree(tree) = component,
+                  var filter = tree.filter,
+                  filter.id == filterID
+            else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Tree filter")
+            }
+            filter.value = value
+            tree.filter = filter
+            return UINode(id: id, component: .tree(tree))
+        case let .treeSetLocation(nodeID, location):
+            var tree = try tree(nodeID: nodeID)
+            tree.location = location
+            return UINode(id: id, component: .tree(tree))
+        case let .treeSpliceChildren(nodeID, parentID, index, deleteCount, items):
+            var tree = try tree(nodeID: nodeID)
+            guard index >= 0, deleteCount >= 0 else {
+                throw UIDeltaApplicationError("Tree splice has a negative range")
+            }
+            if let parentID {
+                guard spliceTreeChildren(
+                    in: &tree.items,
+                    parentID: parentID,
+                    index: index,
+                    deleteCount: deleteCount,
+                    replacement: items
+                ) else {
+                    throw UIDeltaApplicationError("Delta targets unavailable Tree children")
+                }
+            } else {
+                guard index <= tree.items.count,
+                      deleteCount <= tree.items.count - index
+                else {
+                    throw UIDeltaApplicationError("Tree root splice is outside its collection")
+                }
+                tree.items.replaceSubrange(index..<(index + deleteCount), with: items)
+            }
+            guard tree.requiredCapabilities != nil else {
+                throw UIDeltaApplicationError("Tree splice produced an invalid hierarchy")
+            }
+            return UINode(id: id, component: .tree(tree))
+        case let .treeSetChildState(nodeID, itemID, childState):
+            var tree = try tree(nodeID: nodeID)
+            guard updateTreeItem(in: &tree.items, id: itemID, update: { item in
+                item.childState = childState
+                if childState != .loaded { item.children.removeAll() }
+            }) else {
+                throw UIDeltaApplicationError("Delta targets an unavailable Tree item")
+            }
+            return UINode(id: id, component: .tree(tree))
+        case let .treeSetExpanded(nodeID, itemID, expanded):
+            var tree = try tree(nodeID: nodeID)
+            guard updateTreeItem(in: &tree.items, id: itemID, update: { item in
+                item.expanded = expanded
+            }), tree.requiredCapabilities != nil else {
+                throw UIDeltaApplicationError("Delta targets an unavailable expandable Tree item")
+            }
+            return UINode(id: id, component: .tree(tree))
         }
     }
 
@@ -528,12 +731,79 @@ private extension UINode {
         return media
     }
 
+    func menu(nodeID: String) throws -> UIMenuSpec {
+        guard id == nodeID, case let .menu(menu) = component else {
+            throw UIDeltaApplicationError("Delta targets an unavailable Menu node")
+        }
+        return menu
+    }
+
     func page() throws -> PageSpec {
         guard case let .page(page) = component else {
             throw UIDeltaApplicationError("Delta targets an unavailable Page")
         }
         return page
     }
+
+    func tree(nodeID: String) throws -> UITreeSpec {
+        guard id == nodeID, case let .tree(tree) = component else {
+            throw UIDeltaApplicationError("Delta targets an unavailable Tree node")
+        }
+        return tree
+    }
+}
+
+private func flattenTreeItems(_ items: [UITreeItem]) -> [UITreeItem] {
+    items.flatMap { item in [item] + flattenTreeItems(item.children) }
+}
+
+private func updateTreeItem(
+    in items: inout [UITreeItem],
+    id: String,
+    update: (inout UITreeItem) -> Void
+) -> Bool {
+    for index in items.indices {
+        if items[index].id == id {
+            update(&items[index])
+            return true
+        }
+        if updateTreeItem(in: &items[index].children, id: id, update: update) {
+            return true
+        }
+    }
+    return false
+}
+
+private func spliceTreeChildren(
+    in items: inout [UITreeItem],
+    parentID: String,
+    index: Int,
+    deleteCount: Int,
+    replacement: [UITreeItem]
+) -> Bool {
+    for itemIndex in items.indices {
+        if items[itemIndex].id == parentID {
+            guard items[itemIndex].kind == .directory,
+                  index <= items[itemIndex].children.count,
+                  deleteCount <= items[itemIndex].children.count - index
+            else { return false }
+            items[itemIndex].children.replaceSubrange(
+                index..<(index + deleteCount),
+                with: replacement
+            )
+            return true
+        }
+        if spliceTreeChildren(
+            in: &items[itemIndex].children,
+            parentID: parentID,
+            index: index,
+            deleteCount: deleteCount,
+            replacement: replacement
+        ) {
+            return true
+        }
+    }
+    return false
 }
 
 private func setToggle(
@@ -573,6 +843,11 @@ private enum OptionalStringChange {
     case set(String?)
 }
 
+private enum OptionalMenuChange {
+    case unchanged
+    case set(UIMenuSpec?)
+}
+
 private extension MarkdownEditorSpec {
     func copying(
         text: String? = nil,
@@ -582,7 +857,9 @@ private extension MarkdownEditorSpec {
         dirty: Bool? = nil,
         placeholder: String? = nil,
         title: OptionalStringChange = .unchanged,
-        actions: MarkdownEditorActions? = nil
+        actions: MarkdownEditorActions? = nil,
+        insertMenu: OptionalMenuChange = .unchanged,
+        contextMenu: OptionalMenuChange = .unchanged
     ) -> Self {
         let nextTitle: String?
         switch title {
@@ -590,6 +867,16 @@ private extension MarkdownEditorSpec {
             nextTitle = self.title
         case let .set(value):
             nextTitle = value
+        }
+        let nextInsertMenu: UIMenuSpec?
+        switch insertMenu {
+        case .unchanged: nextInsertMenu = self.insertMenu
+        case let .set(value): nextInsertMenu = value
+        }
+        let nextContextMenu: UIMenuSpec?
+        switch contextMenu {
+        case .unchanged: nextContextMenu = self.contextMenu
+        case let .set(value): nextContextMenu = value
         }
         return Self(
             text: text ?? self.text,
@@ -599,7 +886,9 @@ private extension MarkdownEditorSpec {
             dirty: dirty ?? self.dirty,
             placeholder: placeholder ?? self.placeholder,
             title: nextTitle,
-            actions: actions ?? self.actions
+            actions: actions ?? self.actions,
+            insertMenu: nextInsertMenu,
+            contextMenu: nextContextMenu
         )
     }
 }

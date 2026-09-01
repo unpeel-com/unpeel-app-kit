@@ -92,13 +92,17 @@ select, double-click a word, or triple-click a line. Type `/` on an empty line
 to open the closed block menu; keep typing to filter, use Up/Down and
 Enter/Tab, and use Escape to remove the pending slash command. Backspace at a
 heading, list, task, or quote marker converts that block back to plain text.
-The same menu and Backspace rules are built into the AppKit and web renderers.
+Type `\` on a blank line for the complete block/auto-save command palette.
+Both entry points request the App-owned semantic Menu, so native, web, and the
+terminal invoke the same reducer rather than maintaining local menu state.
 The terminal menu is a compact bordered shortcut/name/sample dropdown. The
 native popover keeps the document as first responder, so Up/Down, Home/End,
 Enter/Tab, and Escape navigate it without stealing typing. Terminal drag,
 double-click word, triple-click line, and multi-line selections publish
 selection deltas alongside Unicode-safe text deltas, keeping the hosted view
-on the same authoritative range.
+on the same authoritative range. Launch the Markdown session against a folder
+to exercise the semantic Tree picker and its Page + Input new-note flow in all
+three presentations.
 
 ## Standalone TUI usage
 
@@ -170,6 +174,7 @@ The standalone component layer currently provides:
 | Component | Responsibility |
 | --- | --- |
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
+| `Tree` / `TreeWidget` | Closed drill-down/outline hierarchy with opaque ids, parent/filter semantics, bounded children, and the same `SelectableRow`/scrollbar foundation |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
 | `Page` | Top-level standalone Ratatui presentation with constrained Input header/List body slots and one optional back action |
 | `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and named closed slots |
@@ -179,6 +184,7 @@ The standalone component layer currently provides:
 | `Button` | Closed semantic action control with default/primary/destructive native intent rather than arbitrary styling |
 | `CanvasPage` | Exactly one Surface slot plus a bounded fixed top Button toolbar, with Ratatui layout/hit boxes and no generic child tree |
 | `PopupMenu` / `MenuItem` | Gray borderless context menu/dropdown with hover, keyboard selection, disabled items, and danger tones |
+| `SemanticMenu` | Closed action-menu model with disabled/danger roles and local control/caret/pointer anchor hints; `popup()` adapts it to `PopupMenu` without a second terminal painter |
 | `KitTheme` / `ThemeMonitor` | Shared dark/light defaults plus a live hosted project/workspace accent for selectable rows, menus, text, and scrollbars |
 | `DoubleClickTracker` | Target-aware double-click detection shared by mouse-driven Apps |
 | `KeyboardEnhancementGuard` | Scoped unambiguous Escape delivery on capable terminals |
@@ -216,7 +222,8 @@ vocabulary with platform-specific renderers—not a second required runtime.
 | Markdown bridge adapter | Adds `ui_node` and `handle_ui_event` to the Ratatui editor when `markdown-text-area` and `ui-bridge` are both enabled |
 | Media semantic projection | Reference-only image state, cross-renderer sizing, accessibility text, and one optional activation action |
 | Page semantic projection | Closed Page/List/ListItem/Toggle/Input trees, constrained master/detail activation/back actions, compact deltas, and native SwiftUI/DOM wrappers |
-| Explorer semantic projection (planned) | A separate closed Explorer/Tree contract preserving hierarchy, filter focus, wrap/page navigation, and the synthetic parent action; it is not encoded as flat ListItems |
+| Tree semantic projection | Closed Explorer/Tree hierarchy preserving filter focus, wrap/page navigation, the synthetic parent action, opaque path-free ids, compact keyed deltas, and SwiftUI/ARIA-tree wrappers |
+| Menu semantic projection | Root or Markdown-nested action menus with disabled/danger roles, renderer-local anchors, keyboard navigation, native `NSMenu`/popover and web menu interpretations |
 | Surface semantic projection | Opaque session/stream reference, sizing, background, and input policy only; Swift/web wrappers inject existing USRF local-GPU presenters and never consume frames |
 | CanvasPage semantic projection | Closed Surface slot plus Button actions; scene/input stays on USRF while toolbar interaction stays on `unpeel.ui` |
 
@@ -265,8 +272,8 @@ Kit. Its standalone invariant is strict: every App must remain fully
 functional through its TUI, and semantic rendering is only an optional
 presentation path over that fallback.
 
-`MarkdownEditor`, static `Media`, and the Todo-driven Page component family are
-the first vertical slices. Media travels as a local path, a bounded 256 KiB
+`MarkdownEditor`, static `Media`, the Todo-driven Page family, Tree, and Menu
+are complete vertical slices. Media travels as a local path, a bounded 256 KiB
 inline image, or a content-addressed blob reference—never as an unbounded JSON
 payload. `Tabs` and later richer components such as `DataGrid` can join the
 same closed, versioned vocabulary. Containment is slot-based:
@@ -281,11 +288,11 @@ The renderer packages live with the component definitions so the contract
 cannot drift:
 
 - `swift/` — `UnpeelAppKitUI`, including native Page/List/Toggle/Input,
-  Markdown, and asynchronous `NSImage` Media views plus a reconnecting trusted
-  Unix client;
+  Tree, Menu, Markdown, and asynchronous `NSImage` Media views plus a
+  reconnecting trusted Unix client;
 - `web/` — `@unpeel/app-kit-ui`, including native DOM Page/List controls,
-  Markdown, and accessible `<img>` Media renderers plus `WorkspaceUiSession`
-  for the existing Host's `/mobile` extension; and
+  ARIA Tree/Menu, Markdown, and accessible `<img>` Media renderers plus
+  `WorkspaceUiSession` for the existing Host's `/mobile` extension; and
 - `protocol/` — validated, forward-compatible schemas and shared fixtures
   consumed by Rust, Swift, and web tests.
 
@@ -529,16 +536,15 @@ the component, while file activation remains App-owned. `ExplorerTheme`
 contains styles and spacing only. There is intentionally no `Block`, border,
 or mandatory background, so Apps can compose it without inherited chrome.
 
-The current hosted vocabulary does not flatten Explorer rows into semantic
-`ListItem`s. The planned Explorer/Tree projection keeps directory hierarchy,
-the filter/tree focus loop, single-step selection wrapping, and the synthetic
-parent entry as distinct schema semantics. Its first implementation step is an
-internal, parity-tested rebuild of Ratatui Explorer rows and navigation on
-`SelectableRow` and the shared navigation engine; outward page/wrap and filter
-behavior will not change. Until the complete Rust + Swift + web slice lands,
-Filetree and Markdown's picker remain on this fully functional Ratatui Explorer
-and hosted renderers use the pane's terminal fallback. See
-[the Explorer/Tree follow-up contract](docs/ui-components.md#explorertree-follow-up-contract).
+Hosted Explorer rows are never flattened into semantic `ListItem`s.
+`Explorer::semantic_tree` publishes a distinct Tree component retaining
+directory hierarchy, the filter/tree focus loop, single-step selection
+wrapping, and the synthetic parent action. Entry ids are opaque process keys;
+absolute paths remain inside the App for local open/drag behavior. SwiftUI
+uses `TreeView`, web uses an ARIA tree, and unrecognized Tree capabilities use
+the complete terminal pane without failing attachment. Filetree and
+Markdown's vault picker now use this projection over their unchanged Ratatui
+Explorer. See [the Tree v1 contract](docs/ui-components.md#explorertree-v1).
 
 ## Project paths and preferred editor
 

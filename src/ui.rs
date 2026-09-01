@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::components::{ListItem, Page};
 use crate::media::{MediaPixelSize, MediaSource, MediaSpec};
+use crate::semantic_menu::SemanticMenu;
 use crate::surface::{CanvasPage, SurfaceReference, SurfaceSpec};
+use crate::tree::{Tree, TreeChildState, TreeItem};
 
 /// Stable protocol name carried by every independently replayable frame.
 pub const UI_PROTOCOL_NAME: &str = "unpeel.ui";
@@ -525,6 +527,39 @@ pub enum MarkdownPresentation {
     Split,
 }
 
+/// Closed Markdown menu entry points. Renderers request one of these; the App
+/// owns whether it is valid at the current selection and publishes the Menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MarkdownMenuTrigger {
+    Slash,
+    Palette,
+}
+
+impl MarkdownMenuTrigger {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Slash => "slash",
+            Self::Palette => "palette",
+        }
+    }
+}
+
+impl std::str::FromStr for MarkdownMenuTrigger {
+    type Err = UiProtocolError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "slash" => Ok(Self::Slash),
+            "palette" => Ok(Self::Palette),
+            _ => Err(UiProtocolError::InvalidMessage(format!(
+                "unknown Markdown menu trigger {value:?}"
+            ))),
+        }
+    }
+}
+
 impl MarkdownPresentation {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -567,6 +602,10 @@ pub struct MarkdownEditorActions {
     pub redo: Option<ActionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_presentation: Option<ActionId>,
+    /// Optional because plain Markdown editors need not expose App-owned
+    /// slash/palette behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_menu: Option<ActionId>,
 }
 
 impl MarkdownEditorActions {
@@ -576,6 +615,7 @@ impl MarkdownEditorActions {
     pub const UNDO: &'static str = "undo";
     pub const REDO: &'static str = "redo";
     pub const SET_PRESENTATION: &'static str = "set-presentation";
+    pub const OPEN_MENU: &'static str = "open-menu";
 
     #[must_use]
     pub fn editable() -> Self {
@@ -586,6 +626,7 @@ impl MarkdownEditorActions {
             undo: Some(Self::UNDO.into()),
             redo: Some(Self::REDO.into()),
             set_presentation: Some(Self::SET_PRESENTATION.into()),
+            open_menu: None,
         }
     }
 
@@ -598,6 +639,7 @@ impl MarkdownEditorActions {
             undo: None,
             redo: None,
             set_presentation: Some(Self::SET_PRESENTATION.into()),
+            open_menu: None,
         }
     }
 }
@@ -626,6 +668,12 @@ pub struct MarkdownEditorSpec {
     pub title: Option<String>,
     #[serde(default)]
     pub actions: MarkdownEditorActions,
+    /// Server-owned slash/palette menu, anchored to the renderer-local caret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_menu: Option<SemanticMenu>,
+    /// Closed context-menu descriptor. Renderers open it at their own pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_menu: Option<SemanticMenu>,
 }
 
 impl MarkdownEditorSpec {
@@ -640,6 +688,8 @@ impl MarkdownEditorSpec {
             placeholder: String::new(),
             title: None,
             actions: MarkdownEditorActions::editable(),
+            insert_menu: None,
+            context_menu: None,
         }
     }
 
@@ -678,13 +728,39 @@ impl MarkdownEditorSpec {
         self
     }
 
+    #[must_use]
+    pub fn insert_menu(mut self, menu: SemanticMenu) -> Self {
+        self.insert_menu = Some(menu);
+        self
+    }
+
+    #[must_use]
+    pub fn context_menu(mut self, menu: SemanticMenu) -> Self {
+        self.context_menu = Some(menu);
+        self
+    }
+
     fn validate(&self, path: &str) -> Result<(), UiValidationError> {
         validate_position(&self.text, self.selection.anchor).map_err(|message| {
             UiValidationError::new(format!("{path}.selection.anchor"), message)
         })?;
         validate_position(&self.text, self.selection.head)
             .map_err(|message| UiValidationError::new(format!("{path}.selection.head"), message))?;
-        validate_action_set(&self.actions, self.read_only, path)
+        validate_action_set(&self.actions, self.read_only, path)?;
+        for (slot, menu) in [
+            ("insertMenu", self.insert_menu.as_ref()),
+            ("contextMenu", self.context_menu.as_ref()),
+        ] {
+            if let Some(menu) = menu {
+                menu.validate().map_err(|error| {
+                    UiValidationError::new(
+                        format!("{path}.{slot}.{}", error.path.replacen("menu.", "", 1)),
+                        error.message,
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -695,8 +771,10 @@ pub enum UiComponent {
     CanvasPage(CanvasPage),
     MarkdownEditor(MarkdownEditorSpec),
     Media(MediaSpec),
+    Menu(SemanticMenu),
     Page(Page),
     Surface(SurfaceSpec),
+    Tree(Tree),
 }
 
 impl UiComponent {
@@ -707,8 +785,10 @@ impl UiComponent {
             Self::CanvasPage(_) => "canvasPage",
             Self::MarkdownEditor(_) => "markdownEditor",
             Self::Media(_) => "media",
+            Self::Menu(_) => "menu",
             Self::Page(_) => "page",
             Self::Surface(_) => "surface",
+            Self::Tree(_) => "tree",
         }
     }
 
@@ -719,8 +799,10 @@ impl UiComponent {
             Self::CanvasPage(_) => crate::CANVAS_PAGE_COMPONENT_CAPABILITY,
             Self::MarkdownEditor(_) => UI_MARKDOWN_EDITOR_CAPABILITY,
             Self::Media(_) => crate::MEDIA_COMPONENT_CAPABILITY,
+            Self::Menu(_) => crate::MENU_COMPONENT_CAPABILITY,
             Self::Page(_) => crate::PAGE_COMPONENT_CAPABILITY,
             Self::Surface(_) => crate::SURFACE_COMPONENT_CAPABILITY,
+            Self::Tree(_) => crate::TREE_COMPONENT_CAPABILITY,
         }
     }
 
@@ -729,10 +811,21 @@ impl UiComponent {
     pub fn required_capabilities(&self) -> Vec<&'static str> {
         match self {
             Self::CanvasPage(page) => page.required_capabilities(),
-            Self::MarkdownEditor(_) => vec![UI_MARKDOWN_EDITOR_CAPABILITY],
+            Self::MarkdownEditor(editor) => {
+                let mut capabilities = vec![UI_MARKDOWN_EDITOR_CAPABILITY];
+                if editor.insert_menu.is_some() || editor.context_menu.is_some() {
+                    capabilities.extend([
+                        crate::MENU_COMPONENT_CAPABILITY,
+                        crate::MENU_ANCHOR_CAPABILITY,
+                    ]);
+                }
+                capabilities
+            }
             Self::Media(_) => vec![crate::MEDIA_COMPONENT_CAPABILITY],
+            Self::Menu(menu) => menu.required_capabilities().to_vec(),
             Self::Page(page) => page.required_capabilities(),
             Self::Surface(_) => vec![crate::SURFACE_COMPONENT_CAPABILITY],
+            Self::Tree(tree) => tree.required_capabilities(),
         }
     }
 }
@@ -771,6 +864,14 @@ impl UiNode {
     }
 
     #[must_use]
+    pub fn menu(id: impl Into<NodeId>, menu: SemanticMenu) -> Self {
+        Self {
+            id: id.into(),
+            element: UiComponent::Menu(menu),
+        }
+    }
+
+    #[must_use]
     pub fn page(id: impl Into<NodeId>, page: Page) -> Self {
         Self {
             id: id.into(),
@@ -786,6 +887,14 @@ impl UiNode {
         }
     }
 
+    #[must_use]
+    pub fn tree(id: impl Into<NodeId>, tree: Tree) -> Self {
+        Self {
+            id: id.into(),
+            element: UiComponent::Tree(tree),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), UiValidationError> {
         validate_identifier(self.id.as_str(), "root.id")?;
         match &self.element {
@@ -796,11 +905,17 @@ impl UiNode {
             UiComponent::Media(media) => media.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("media", "root", 1), error.message)
             }),
+            UiComponent::Menu(menu) => menu.validate().map_err(|error| {
+                UiValidationError::new(error.path.replacen("menu", "root", 1), error.message)
+            }),
             UiComponent::Page(page) => page.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("page", "root", 1), error.message)
             }),
             UiComponent::Surface(surface) => surface.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("surface", "root", 1), error.message)
+            }),
+            UiComponent::Tree(tree) => tree.validate().map_err(|error| {
+                UiValidationError::new(error.path.replacen("tree", "root", 1), error.message)
             }),
         }
     }
@@ -883,6 +998,86 @@ pub fn markdown_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDelt
         operations.push(UiDeltaOperation::MarkdownSetActions {
             node_id: next.id.clone(),
             actions: next_editor.actions.clone(),
+        });
+    }
+    if previous_editor.insert_menu != next_editor.insert_menu
+        || previous_editor.context_menu != next_editor.context_menu
+    {
+        operations.push(UiDeltaOperation::MarkdownSetMenus {
+            node_id: next.id.clone(),
+            insert_menu: next_editor.insert_menu.clone(),
+            context_menu: next_editor.context_menu.clone(),
+        });
+    }
+    operations
+}
+
+/// Builds compact operations between two authoritative Tree projections.
+///
+/// Entry collections are replaced through the keyed child-splice primitive;
+/// selection, filter text, and display location remain independent so focus
+/// updates do not resend a large hierarchy.
+#[must_use]
+pub fn tree_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOperation> {
+    let (UiComponent::Tree(previous_tree), UiComponent::Tree(next_tree)) =
+        (&previous.element, &next.element)
+    else {
+        return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+    };
+    if previous.id != next.id
+        || previous_tree.label != next_tree.label
+        || previous_tree.presentation != next_tree.presentation
+        || previous_tree.empty_message != next_tree.empty_message
+        || previous_tree.primary_action != next_tree.primary_action
+        || previous_tree.actions != next_tree.actions
+        || previous_tree.filter.as_ref().map(|filter| {
+            (
+                &filter.id,
+                &filter.label,
+                &filter.placeholder,
+                &filter.set_value,
+            )
+        }) != next_tree.filter.as_ref().map(|filter| {
+            (
+                &filter.id,
+                &filter.label,
+                &filter.placeholder,
+                &filter.set_value,
+            )
+        })
+    {
+        return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
+    }
+
+    let mut operations = Vec::new();
+    if previous_tree.location != next_tree.location {
+        operations.push(UiDeltaOperation::TreeSetLocation {
+            node_id: next.id.clone(),
+            location: next_tree.location.clone(),
+        });
+    }
+    if previous_tree.filter.as_ref().map(|filter| &filter.value)
+        != next_tree.filter.as_ref().map(|filter| &filter.value)
+        && let Some(filter) = &next_tree.filter
+    {
+        operations.push(UiDeltaOperation::TreeSetFilter {
+            filter_id: filter.id.clone(),
+            value: filter.value.clone(),
+        });
+    }
+    if previous_tree.items != next_tree.items {
+        operations.push(UiDeltaOperation::TreeSpliceChildren {
+            node_id: next.id.clone(),
+            parent_id: None,
+            index: 0,
+            delete_count: u64::try_from(previous_tree.items.len()).unwrap_or(u64::MAX),
+            items: next_tree.items.clone(),
+        });
+    }
+    if previous_tree.selected_id != next_tree.selected_id {
+        operations.push(UiDeltaOperation::TreeSetSelection {
+            node_id: next.id.clone(),
+            selected_id: next_tree.selected_id.clone(),
         });
     }
     operations
@@ -1032,6 +1227,17 @@ pub enum UiDeltaOperation {
         node_id: NodeId,
         actions: MarkdownEditorActions,
     },
+    MarkdownSetMenus {
+        node_id: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        insert_menu: Option<SemanticMenu>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_menu: Option<SemanticMenu>,
+    },
+    MenuSetSelection {
+        node_id: NodeId,
+        selected_id: Option<String>,
+    },
     /// Swaps image bytes by reference and updates their intrinsic metadata.
     MediaSetSource {
         node_id: NodeId,
@@ -1069,6 +1275,36 @@ pub enum UiDeltaOperation {
     ListRemoveItem {
         list_id: String,
         item_id: String,
+    },
+    TreeSetSelection {
+        node_id: NodeId,
+        selected_id: Option<String>,
+    },
+    TreeSetFilter {
+        filter_id: String,
+        value: String,
+    },
+    TreeSetLocation {
+        node_id: NodeId,
+        location: String,
+    },
+    TreeSpliceChildren {
+        node_id: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        index: u64,
+        delete_count: u64,
+        items: Vec<TreeItem>,
+    },
+    TreeSetChildState {
+        node_id: NodeId,
+        item_id: String,
+        child_state: TreeChildState,
+    },
+    TreeSetExpanded {
+        node_id: NodeId,
+        item_id: String,
+        expanded: bool,
     },
 }
 
@@ -1159,6 +1395,22 @@ impl UiDeltaOperation {
         }
     }
 
+    #[must_use]
+    pub fn tree_set_selection(node_id: impl Into<NodeId>, selected_id: Option<String>) -> Self {
+        Self::TreeSetSelection {
+            node_id: node_id.into(),
+            selected_id,
+        }
+    }
+
+    #[must_use]
+    pub fn tree_set_filter(filter_id: impl Into<String>, value: impl Into<String>) -> Self {
+        Self::TreeSetFilter {
+            filter_id: filter_id.into(),
+            value: value.into(),
+        }
+    }
+
     fn validate(&self, path: &str) -> Result<(), UiProtocolError> {
         match self {
             Self::ReplaceRoot { root } => root.validate().map_err(UiProtocolError::InvalidView),
@@ -1240,13 +1492,77 @@ impl UiDeltaOperation {
                 }
                 Ok(())
             }
+            Self::TreeSetSelection {
+                node_id,
+                selected_id,
+            } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if let Some(selected_id) = selected_id {
+                    validate_identifier(selected_id, &format!("{path}.selectedId"))
+                        .map_err(UiProtocolError::InvalidView)?;
+                }
+                Ok(())
+            }
+            Self::MenuSetSelection {
+                node_id,
+                selected_id,
+            } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if let Some(selected_id) = selected_id {
+                    validate_identifier(selected_id, &format!("{path}.selectedId"))
+                        .map_err(UiProtocolError::InvalidView)?;
+                }
+                Ok(())
+            }
+            Self::TreeSetFilter { filter_id, .. } => {
+                validate_identifier(filter_id, &format!("{path}.filterId"))
+                    .map_err(UiProtocolError::InvalidView)
+            }
+            Self::TreeSetLocation { node_id, .. } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)
+            }
+            Self::TreeSpliceChildren {
+                node_id,
+                parent_id,
+                index,
+                delete_count,
+                ..
+            } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                if let Some(parent_id) = parent_id {
+                    validate_identifier(parent_id, &format!("{path}.parentId"))
+                        .map_err(UiProtocolError::InvalidView)?;
+                }
+                if *index > MAX_SAFE_UI_INTEGER || *delete_count > MAX_SAFE_UI_INTEGER {
+                    return Err(UiProtocolError::InvalidMessage(format!(
+                        "{path} Tree splice exceeds the cross-platform safe integer {MAX_SAFE_UI_INTEGER}"
+                    )));
+                }
+                Ok(())
+            }
+            Self::TreeSetChildState {
+                node_id, item_id, ..
+            }
+            | Self::TreeSetExpanded {
+                node_id, item_id, ..
+            } => {
+                validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
+                    .map_err(UiProtocolError::InvalidView)?;
+                validate_identifier(item_id, &format!("{path}.itemId"))
+                    .map_err(UiProtocolError::InvalidView)
+            }
             Self::MarkdownSetSelection { node_id, .. }
             | Self::MarkdownSetPresentation { node_id, .. }
             | Self::MarkdownSetDirty { node_id, .. }
             | Self::MarkdownSetReadOnly { node_id, .. }
             | Self::MarkdownSetTitle { node_id, .. }
             | Self::MarkdownSetPlaceholder { node_id, .. }
-            | Self::MarkdownSetActions { node_id, .. } => {
+            | Self::MarkdownSetActions { node_id, .. }
+            | Self::MarkdownSetMenus { node_id, .. } => {
                 validate_identifier(node_id.as_str(), &format!("{path}.nodeId"))
                     .map_err(UiProtocolError::InvalidView)
             }
@@ -1295,6 +1611,22 @@ impl UiNode {
                 }
                 UiDeltaOperation::MarkdownSetActions { node_id, actions } => {
                     self.markdown_editor_mut(node_id, index)?.actions = actions.clone();
+                }
+                UiDeltaOperation::MarkdownSetMenus {
+                    node_id,
+                    insert_menu,
+                    context_menu,
+                } => {
+                    let editor = self.markdown_editor_mut(node_id, index)?;
+                    editor.insert_menu = insert_menu.clone();
+                    editor.context_menu = context_menu.clone();
+                }
+                UiDeltaOperation::MenuSetSelection {
+                    node_id,
+                    selected_id,
+                } => {
+                    let menu = self.menu_mut(node_id, index)?;
+                    menu.selected_id = selected_id.clone();
                 }
                 UiDeltaOperation::MediaSetSource {
                     node_id,
@@ -1351,6 +1683,68 @@ impl UiNode {
                         .set_list_selection(list_id, selected_id.clone())
                         .map_err(|error| component_delta_error(index, error))?;
                 }
+                UiDeltaOperation::TreeSetSelection {
+                    node_id,
+                    selected_id,
+                } => {
+                    self.tree_mut(node_id, index)?
+                        .set_selection(selected_id.clone())
+                        .map_err(|error| tree_delta_error(index, error))?;
+                }
+                UiDeltaOperation::TreeSetFilter { filter_id, value } => {
+                    self.tree_mut_for_operation(index)?
+                        .set_filter_value(filter_id, value.clone())
+                        .map_err(|error| tree_delta_error(index, error))?;
+                }
+                UiDeltaOperation::TreeSetLocation { node_id, location } => {
+                    self.tree_mut(node_id, index)?.location = location.clone();
+                }
+                UiDeltaOperation::TreeSpliceChildren {
+                    node_id,
+                    parent_id,
+                    index: child_index,
+                    delete_count,
+                    items,
+                } => {
+                    let child_index = usize::try_from(*child_index).map_err(|_| {
+                        UiValidationError::new(
+                            format!("delta.operations[{index}].index"),
+                            "Tree splice index does not fit this renderer",
+                        )
+                    })?;
+                    let delete_count = usize::try_from(*delete_count).map_err(|_| {
+                        UiValidationError::new(
+                            format!("delta.operations[{index}].deleteCount"),
+                            "Tree splice count does not fit this renderer",
+                        )
+                    })?;
+                    self.tree_mut(node_id, index)?
+                        .splice_children(
+                            parent_id.as_deref(),
+                            child_index,
+                            delete_count,
+                            items.clone(),
+                        )
+                        .map_err(|error| tree_delta_error(index, error))?;
+                }
+                UiDeltaOperation::TreeSetChildState {
+                    node_id,
+                    item_id,
+                    child_state,
+                } => {
+                    self.tree_mut(node_id, index)?
+                        .set_child_state(item_id, *child_state)
+                        .map_err(|error| tree_delta_error(index, error))?;
+                }
+                UiDeltaOperation::TreeSetExpanded {
+                    node_id,
+                    item_id,
+                    expanded,
+                } => {
+                    self.tree_mut(node_id, index)?
+                        .set_expanded(item_id, *expanded)
+                        .map_err(|error| tree_delta_error(index, error))?;
+                }
             }
         }
         self.validate()
@@ -1371,8 +1765,10 @@ impl UiNode {
             UiComponent::MarkdownEditor(editor) => Ok(editor),
             UiComponent::CanvasPage(_)
             | UiComponent::Media(_)
+            | UiComponent::Menu(_)
             | UiComponent::Page(_)
-            | UiComponent::Surface(_) => Err(UiValidationError::new(
+            | UiComponent::Surface(_)
+            | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires a Markdown editor",
             )),
@@ -1394,8 +1790,10 @@ impl UiNode {
             UiComponent::Media(media) => Ok(media),
             UiComponent::CanvasPage(_)
             | UiComponent::MarkdownEditor(_)
+            | UiComponent::Menu(_)
             | UiComponent::Page(_)
-            | UiComponent::Surface(_) => Err(UiValidationError::new(
+            | UiComponent::Surface(_)
+            | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires Media",
             )),
@@ -1415,8 +1813,10 @@ impl UiNode {
             UiComponent::CanvasPage(_)
             | UiComponent::MarkdownEditor(_)
             | UiComponent::Media(_)
+            | UiComponent::Menu(_)
             | UiComponent::Page(_)
-            | UiComponent::Surface(_) => Err(UiValidationError::new(
+            | UiComponent::Surface(_)
+            | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 format!("Surface node {expected_id:?} is not present"),
             )),
@@ -1429,9 +1829,68 @@ impl UiNode {
             UiComponent::CanvasPage(_)
             | UiComponent::MarkdownEditor(_)
             | UiComponent::Media(_)
-            | UiComponent::Surface(_) => Err(UiValidationError::new(
+            | UiComponent::Menu(_)
+            | UiComponent::Surface(_)
+            | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}]"),
                 "operation requires Page",
+            )),
+        }
+    }
+
+    fn tree_mut(
+        &mut self,
+        expected_id: &NodeId,
+        operation_index: usize,
+    ) -> Result<&mut Tree, UiValidationError> {
+        if &self.id != expected_id {
+            return Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                format!("Tree node {expected_id:?} is not present"),
+            ));
+        }
+        self.tree_mut_for_operation(operation_index)
+    }
+
+    fn menu_mut(
+        &mut self,
+        expected_id: &NodeId,
+        operation_index: usize,
+    ) -> Result<&mut SemanticMenu, UiValidationError> {
+        if &self.id != expected_id {
+            return Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                format!("Menu node {expected_id:?} is not present"),
+            ));
+        }
+        match &mut self.element {
+            UiComponent::Menu(menu) => Ok(menu),
+            UiComponent::CanvasPage(_)
+            | UiComponent::MarkdownEditor(_)
+            | UiComponent::Media(_)
+            | UiComponent::Page(_)
+            | UiComponent::Surface(_)
+            | UiComponent::Tree(_) => Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}].nodeId"),
+                "operation requires Menu",
+            )),
+        }
+    }
+
+    fn tree_mut_for_operation(
+        &mut self,
+        operation_index: usize,
+    ) -> Result<&mut Tree, UiValidationError> {
+        match &mut self.element {
+            UiComponent::Tree(tree) => Ok(tree),
+            UiComponent::CanvasPage(_)
+            | UiComponent::MarkdownEditor(_)
+            | UiComponent::Media(_)
+            | UiComponent::Menu(_)
+            | UiComponent::Page(_)
+            | UiComponent::Surface(_) => Err(UiValidationError::new(
+                format!("delta.operations[{operation_index}]"),
+                "operation requires Tree",
             )),
         }
     }
@@ -1440,6 +1899,16 @@ impl UiNode {
 fn component_delta_error(
     operation_index: usize,
     error: crate::ComponentValidationError,
+) -> UiValidationError {
+    UiValidationError::new(
+        format!("delta.operations[{operation_index}].{}", error.path),
+        error.message,
+    )
+}
+
+fn tree_delta_error(
+    operation_index: usize,
+    error: crate::TreeValidationError,
 ) -> UiValidationError {
     UiValidationError::new(
         format!("delta.operations[{operation_index}].{}", error.path),
@@ -1741,6 +2210,9 @@ impl UiErrorMessage {
 }
 
 /// Every NDJSON frame has a visible camelCase `type` discriminator.
+// Keep protocol frames as direct values: boxing only the snapshot variant would
+// complicate every App reducer and fixture without changing the NDJSON wire size.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum UiMessage {
@@ -2360,13 +2832,17 @@ fn validate_action_set(
         ("undo", actions.undo.as_ref()),
         ("redo", actions.redo.as_ref()),
         ("setPresentation", actions.set_presentation.as_ref()),
+        ("openMenu", actions.open_menu.as_ref()),
     ] {
         if let Some(action) = action {
             validate_identifier(action.as_str(), &format!("{path}.actions.{name}"))?;
         }
     }
     if read_only
-        && (actions.replace_range.is_some() || actions.undo.is_some() || actions.redo.is_some())
+        && (actions.replace_range.is_some()
+            || actions.undo.is_some()
+            || actions.redo.is_some()
+            || actions.open_menu.is_some())
     {
         return Err(UiValidationError::new(
             format!("{path}.actions"),

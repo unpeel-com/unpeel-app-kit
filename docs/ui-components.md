@@ -548,7 +548,7 @@ action. Rich Ratatui meters remain App-owned, but native/web users can navigate
 and refresh the same authoritative provider model without introducing a
 generic dashboard or flex container.
 
-## Explorer/Tree follow-up contract
+## Explorer/Tree v1
 
 Filetree and Markdown's note picker are not flat Lists. Their standalone TUIs
 keep the existing `Explorer` outward contract unchanged, including its
@@ -558,7 +558,14 @@ registration. They must not be migrated by serializing the visible rows as
 `ListItem`s: doing so would erase hierarchy and make parent navigation look
 like file activation.
 
-### Shared primitives before a wire component
+The complete semantic slice now ships as `Tree`: a standalone Ratatui
+`TreeWidget`, `Explorer::semantic_tree`/`handle_ui_event` adapters, SwiftUI
+`TreeView`, DOM `TreeRenderer`, validation, capability negotiation, shared
+fixtures, and compact deltas. Markdown's vault picker and unpeel-app-filetree
+publish it from their existing Explorer state. Their TUI behavior and painter
+remain unchanged.
+
+### Shared primitives and wire component
 
 The prerequisite internal refactor is complete. Ratatui `Explorer` now paints
 every selectable entry through `SelectableRow`, uses `VerticalScrollbar`, and
@@ -578,16 +585,16 @@ shared mechanics, not identical public bindings in incompatible focus modes.
 The refactor is guarded by a frozen legacy painter comparison that checks the
 Ratatui row buffer cell for cell, plus key-sequence tests for selection,
 scroll, filter focus, directory, parent-row, and activation behavior. Filetree
-and Markdown's picker consume the same adapter. The later Explorer/Tree wire
-snapshot and Swift/web renderers remain a separate step; this ordering keeps
-terminal behavior fixed before adding a second presentation generation.
+and Markdown's picker consume the same adapter. The semantic projection was
+added only after that terminal contract was frozen.
 
-The later hosted component is one closed `Explorer`/`Tree` family, not an
-arbitrary recursive `UiNode` container. Its proposed snapshot has:
+The hosted component is one closed `Explorer`/`Tree` family, not an arbitrary
+recursive `UiNode` container. Its snapshot has:
 
 - one keyed Explorer root with a display location, optional named filter,
   selected entry id, empty-state text, and declared select/open/parent/filter
-  actions plus one idempotent set-expanded action when outline mode is used;
+  actions, an optional constrained primary Button, plus one idempotent
+  set-expanded action when outline mode is used;
 - ordered `ExplorerItem` values whose closed kind is `parent`, `directory`, or
   `file`, plus label, symlink/hidden metadata, and only directory-owned
   `ExplorerItem` children;
@@ -632,18 +639,60 @@ state (or a participant-targeted projection when the App wants private
 selection). Native Swift uses a `TextField` plus `List`/`OutlineGroup`; web uses
 an input plus an ARIA `tree` with roving focus and `treeitem`
 `aria-expanded`/`aria-selected` state. Both implement the same keys above.
+`TreeWidget` is the direct Ratatui interpretation when an App wants to render
+the owned specification; existing Explorer Apps keep rendering Explorer so
+their frozen path drag/hit behavior remains exact.
 
-The delta vocabulary should start with keyed selection, filter replacement,
-location replacement, child splice, child loading-state, and expansion
-updates. Any non-contiguous base or invalid hierarchy requests a complete
-snapshot. Renderers must advertise Explorer, hierarchy, filter, and parent-row
-capabilities required by a projection; an older renderer falls back to the
-terminal for the whole pane without failing attach.
+The delta vocabulary includes keyed selection, filter replacement, location
+replacement, child splice, child loading-state, and expansion updates. Any
+non-contiguous base or invalid hierarchy requests a complete snapshot.
+Renderers advertise `tree`, `treeHierarchy`, `treeFilter`, `treeParent`, and
+`button` only as required by the exact projection; an older renderer falls
+back to the terminal for the whole pane without failing attach.
 
 This is a bounded file/document-navigation primitive for Apps such as a file
 browser or note picker, not IDE project chrome. It remains the D16 semantic
 side of those Apps; editing stays in `MarkdownEditor`, while canvas scenes stay
 on the D14 Surface path.
+
+## Menu v1
+
+`SemanticMenu` is a bounded action list, not a generic popup container. Each
+item has one opaque id, label, action, optional hint, disabled state, and a
+closed `default` or `danger` role. The Menu declares a `popup` or `context`
+presentation and a `control`, `caret`, or `pointer` anchor hint. Anchors never
+carry global coordinates: terminal, native, and web resolve them inside their
+own current layout, so stale geometry cannot cross clients.
+
+The standalone terminal path reuses the existing painter exactly:
+`SemanticMenu::popup(position, theme)` adapts the specification into
+`PopupMenu<String>`, including disabled-row skipping, danger tones, scrolling,
+hover, and keyboard selection. Markdown retains its compact bordered
+shortcut/name/sample insert layout as a specialized terminal interpretation,
+but its items, selected id, actions, and reducer are the same semantic Menu
+published to other renderers.
+
+Swift maps a root Menu to `SemanticMenuView`, caret menus to an `NSPopover`
+that leaves `NSTextView` first responder, and context menus to `NSMenu`. Web
+maps both root and nested menus to an ARIA menu with roving selection. All
+interpretations support Up/Down, Home/End, Enter/Space, Escape dismissal,
+disabled items, and danger styling. A root Menu uses `menuSetSelection`;
+Markdown changes both nested menu descriptors with `markdownSetMenus`, so
+snapshots remain small and menu state follows the App revision.
+
+Markdown declares an optional `openMenu` action with a closed `slash` or
+`palette` value. Native and web intercept `/` or `\` only on a blank,
+unselected, unfenced line and request that action; the Rust reducer rechecks
+authoritative state, inserts the slash only for the slash flow, and publishes
+the Menu. No renderer owns routing or smuggles a palette trigger through a
+text edit. Context actions likewise return the declared item id/action to the
+same reducer.
+
+`menu` and `menuAnchor` are explicit capabilities. If either is absent, a
+renderer keeps the attachment and uses the complete terminal pane rather than
+rejecting the App. The shared NDJSON stream covers a root context Menu,
+selection delta, and Markdown-nested insert/context menus across Rust, Swift,
+and web.
 
 ## MarkdownEditor v1
 
@@ -657,7 +706,9 @@ Renderer-to-App actions are:
 - `replace-range` with a half-open `TextEdit`;
 - `set-selection` with oriented anchor/head positions;
 - `save`, `undo`, and `redo` commands; and
-- `set-presentation` with `source`, `preview`, or `split`.
+- `set-presentation` with `source`, `preview`, or `split`; plus
+- optional `open-menu` with the closed `slash` or `palette` trigger when the
+  App publishes semantic insert commands.
 
 Positions use zero-based lines and UTF-16 columns. Cocoa and JavaScript use
 UTF-16 natively; the Ratatui adapter validates scalar boundaries and converts
@@ -679,18 +730,17 @@ adds drag selection, double-click word selection, triple-click line selection,
 Markdown-aware Enter/Backspace, and a closed `/` insert menu. The vocabulary is
 Heading 1–6, Text, Bulleted list, Numbered list, To-do, Quote, Code, and
 Divider; it is intentionally Markdown-specific rather than arbitrary child
-nodes. AppKit and web implement the same vocabulary locally over their native
-text controls. The terminal App remains authoritative: choosing a native/web
-menu item becomes the same range edit as ordinary typing, then returns through
-the existing revision/ack path.
+nodes. The Rust App projects that vocabulary as `SemanticMenu`; Swift and web
+render the App-owned descriptor over their native text controls. Choosing any
+item returns its declared action to the same reducer and revision/ack path.
 
 The terminal insert menu uses a compact bordered shortcut/name/sample layout
 anchored to the caret, with a full-row gray keyboard or pointer selection.
-The native popover deliberately contains no focusable row controls: the
-`NSTextView` remains first responder, and a scoped key monitor routes Up/Down,
-Home/End, Return/Tab, and Escape while the menu is open. This prevents the
-popover from stealing document typing. Web keeps focus in its textarea for
-the same reason.
+The native popover leaves `NSTextView` as first responder, and a scoped key
+monitor routes Up/Down, Home/End, Return/Tab, and Escape while the menu is
+open. This prevents the popover from stealing document typing. Web keeps focus
+in its textarea for the same reason. The standalone root Menu interpretation
+remains focusable and keyboard navigable.
 
 `markdown_delta_operations(previous, next)` turns an App-owned projection
 change into one Unicode-safe contiguous range edit plus independent selection,
@@ -731,6 +781,36 @@ The trusted native Host uses the same split: `MarkdownEditorView` emits a
 Its message callback should move snapshots onto the main actor before updating
 SwiftUI state. A remote Swift client should use the authenticated workspace
 transport rather than receiving any local participant token or signing key.
+
+### Markdown semantic migration audit
+
+The active navigation and editing surface graph is now fully projected:
+
+- vault browsing is Tree, including filter, parent/directory/file roles,
+  selection, open actions, location, and new-note primary action;
+- new-note naming is a Page with Input and an App-owned back action;
+- editing is MarkdownEditor with text, oriented selection, dirty/title,
+  presentation, save/undo/redo, and compact deltas; and
+- slash, backslash command palette, and selection context menus are
+  SemanticMenu descriptors handled by the same reducer in every renderer.
+
+No dialog, picker, or menu inside an attached Markdown App session remains
+terminal-only. The audit did find three smaller gaps to close before calling
+the entire App 100% interaction-equivalent:
+
+- the first-ever folder chooser still runs as a TUI bootstrap before a
+  document/vault projection exists, only when there is no explicit path and no
+  remembered workspace;
+- the terminal footer's transient save/error message and current auto-save
+  indicator are not yet fields of `MarkdownEditor` (title, dirty state,
+  selection, and the palette action itself are already semantic); and
+- clicking task markers and dropping trusted-local filesystem paths are still
+  terminal-local editor gestures. Their resulting text edits synchronize, but
+  native/web do not yet expose equivalent gestures.
+
+Caret/drop-hover visuals, local drag maps, and syntax colors remain
+platform-specific presentation rather than alternate App state surfaces.
+Unsupported renderers still receive the complete TUI.
 
 ## Media v1
 
@@ -994,17 +1074,16 @@ component version.
 
 ## Next components
 
-The next useful vocabulary is intentionally conventional:
+Tree and Menu now ship with all three interpretations. The remaining useful
+vocabulary is intentionally conventional:
 
 | Component | Ratatui foundation | Native/web meaning |
 | --- | --- | --- |
 | `Tabs` / `TabItem` | `ratatui::widgets::Tabs` | keyed tabs, `selectedId`, and one idempotent `select(id)` action; SwiftUI segmented control or `TabView`; web `tablist`/`tab` semantics with ARIA |
-| `Menu` | existing `PopupMenu` | native menu with disabled/danger roles |
-| `Explorer` / `Tree` | existing `Explorer`, now backed by shared `SelectableRow` and `RowNavigationState` with its established page-wrap policy intact | closed hierarchical file/document navigation with filter-focus and a distinct parent-entry action; design above, not yet a wire component |
 | `DataGrid` | table + virtual viewport | virtualized sheet with range/cell deltas |
 
 Each should be added only with all three renderer interpretations and shared
-fixtures. Media established, and Page now exercises, the required pane-level
+fixtures. Media, Page, Tree, and Menu exercise the required pane-level
 terminal fallback for renderers that do not advertise or recognize a kind;
 every later component inherits that rule. This keeps App Kit opinionated and
 prevents its public API from becoming an unbounded remote widget toolkit.

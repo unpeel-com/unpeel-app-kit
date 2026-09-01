@@ -36,4 +36,13 @@ func markdownSlashMenuIgnoresCodeFencesAndBackspaceRemovesMarkers() {
     )
     #expect(edit?.replacement == "write tests")
     #expect(edit?.caretUTF16Offset == 0)
+
+    #expect(canOpenMarkdownMenu(
+        text: "title\n  ",
+        selection: NSRange(location: 8, length: 0)
+    ))
+    #expect(!canOpenMarkdownMenu(
+        text: "```\n",
+        selection: NSRange(location: 4, length: 0)
+    ))
 }

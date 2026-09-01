@@ -182,6 +182,132 @@ textarea {
   background: var(--accent-soft) !important;
 }
 
+.unpeel-tree {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 18px;
+}
+
+.unpeel-menu-host {
+  align-items: flex-start;
+  display: flex;
+  height: 100%;
+  justify-content: flex-start;
+  padding: 18px;
+}
+
+.unpeel-menu {
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 22%);
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: 5px;
+}
+
+.unpeel-menu__item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, auto) 1fr;
+  min-height: 28px;
+  padding: 5px 8px;
+  text-align: start;
+}
+
+.unpeel-menu__item[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+
+.unpeel-menu__item--danger {
+  color: var(--danger);
+}
+
+.unpeel-menu__item:disabled {
+  opacity: 0.42;
+}
+
+.unpeel-menu__hint {
+  color: var(--muted);
+  min-width: 42px;
+}
+
+.unpeel-markdown-editor__context-menu {
+  max-width: min(280px, calc(100% - 16px));
+}
+
+.unpeel-tree__filter {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.unpeel-tree__filter input {
+  background: var(--surface-solid);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: inherit;
+  font: inherit;
+  padding: 8px 10px;
+}
+
+.unpeel-tree__location {
+  font-weight: 650;
+  padding: 12px 2px 9px;
+}
+
+.unpeel-tree__primary-action {
+  align-self: flex-start;
+  margin: 0 0 9px 2px;
+}
+
+.unpeel-tree__items {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  list-style: none;
+  margin: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0;
+}
+
+.unpeel-tree__item {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  min-height: 28px;
+  padding-inline-end: 10px;
+  user-select: none;
+}
+
+.unpeel-tree__item[aria-selected="true"] {
+  background: var(--accent-soft);
+}
+
+.unpeel-tree__disclosure {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+}
+
+.unpeel-tree__icon {
+  color: var(--muted);
+  width: 12px;
+}
+
+.unpeel-tree__busy {
+  margin-left: auto;
+}
+
 .unpeel-page {
   flex: 1;
   min-width: 0;

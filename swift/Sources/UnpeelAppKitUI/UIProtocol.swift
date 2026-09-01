@@ -7,6 +7,8 @@ public enum UnpeelUIProtocol {
     public static let version = maximumVersion
     public static let deltaCapability = "serverDelta"
     public static let markdownEditorCapability = "markdownEditor"
+    public static let menuCapability = "menu"
+    public static let menuAnchorCapability = "menuAnchor"
     public static let mediaCapability = "media"
     public static let pageCapability = "page"
     public static let listCapability = "list"
@@ -24,11 +26,17 @@ public enum UnpeelUIProtocol {
     public static let pageBackCapability = "pageBack"
     public static let surfaceCapability = "surface"
     public static let canvasPageCapability = "canvasPage"
+    public static let treeCapability = "tree"
+    public static let treeHierarchyCapability = "treeHierarchy"
+    public static let treeFilterCapability = "treeFilter"
+    public static let treeParentCapability = "treeParent"
     /// Components renderable without an injected Host-owned presenter.
     /// A Host adds `surfaceCapability` only after wiring its authorized USRF
     /// route to unpeel-surface's local-GPU presenter.
     public static let supportedComponentCapabilities = [
         markdownEditorCapability,
+        menuCapability,
+        menuAnchorCapability,
         mediaCapability,
         pageCapability,
         listCapability,
@@ -44,6 +52,10 @@ public enum UnpeelUIProtocol {
         inputCapability,
         buttonCapability,
         pageBackCapability,
+        treeCapability,
+        treeHierarchyCapability,
+        treeFilterCapability,
+        treeParentCapability,
     ]
     private static let maximumWireVersion = Int(UInt32.max)
 
@@ -365,6 +377,110 @@ public enum MarkdownPresentation: String, Codable, Equatable, Sendable {
     case split
 }
 
+public enum UIMenuItemRole: String, Codable, Equatable, Hashable, Sendable {
+    case standard = "default"
+    case danger
+}
+
+public enum UIMenuAnchor: String, Codable, Equatable, Hashable, Sendable {
+    case control
+    case caret
+    case pointer
+}
+
+public enum UIMenuPresentation: String, Codable, Equatable, Hashable, Sendable {
+    case popup
+    case context
+}
+
+public struct UIMenuItemSpec: Codable, Equatable, Hashable, Identifiable, Sendable {
+    public let id: String
+    public let label: String
+    public let action: String
+    public let hint: String?
+    public let disabled: Bool
+    public let role: UIMenuItemRole
+
+    public init(
+        id: String,
+        label: String,
+        action: String,
+        hint: String? = nil,
+        disabled: Bool = false,
+        role: UIMenuItemRole = .standard
+    ) {
+        self.id = id
+        self.label = label
+        self.action = action
+        self.hint = hint
+        self.disabled = disabled
+        self.role = role
+    }
+
+    enum CodingKeys: String, CodingKey { case id, label, action, hint, disabled, role }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        action = try container.decode(String.self, forKey: .action)
+        hint = try container.decodeIfPresent(String.self, forKey: .hint)
+        disabled = try container.decodeIfPresent(Bool.self, forKey: .disabled) ?? false
+        role = try container.decodeIfPresent(UIMenuItemRole.self, forKey: .role) ?? .standard
+    }
+}
+
+public struct UIMenuSpec: Codable, Equatable, Hashable, Sendable {
+    public let label: String
+    public let presentation: UIMenuPresentation
+    public let anchor: UIMenuAnchor
+    public let items: [UIMenuItemSpec]
+    public var selectedID: String?
+    public let dismiss: String?
+
+    public init(
+        label: String,
+        presentation: UIMenuPresentation = .popup,
+        anchor: UIMenuAnchor = .control,
+        items: [UIMenuItemSpec],
+        selectedID: String? = nil,
+        dismiss: String? = nil
+    ) {
+        self.label = label
+        self.presentation = presentation
+        self.anchor = anchor
+        self.items = items
+        self.selectedID = selectedID
+        self.dismiss = dismiss
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case label, presentation, anchor, items, selectedID = "selectedId", dismiss
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decode(String.self, forKey: .label)
+        presentation = try container.decodeIfPresent(
+            UIMenuPresentation.self,
+            forKey: .presentation
+        ) ?? .popup
+        anchor = try container.decodeIfPresent(UIMenuAnchor.self, forKey: .anchor) ?? .control
+        items = try container.decode([UIMenuItemSpec].self, forKey: .items)
+        selectedID = try container.decodeIfPresent(String.self, forKey: .selectedID)
+        dismiss = try container.decodeIfPresent(String.self, forKey: .dismiss)
+    }
+
+    public var requiredCapabilities: [String]? {
+        let ids = Set(items.map(\.id))
+        guard items.count <= 256, ids.count == items.count,
+              selectedID.map(ids.contains) ?? true,
+              !items.contains(where: { $0.id == selectedID && $0.disabled })
+        else { return nil }
+        return [UnpeelUIProtocol.menuCapability, UnpeelUIProtocol.menuAnchorCapability]
+    }
+}
+
 public struct MarkdownEditorActions: Codable, Equatable, Sendable {
     public let replaceRange: String?
     public let setSelection: String?
@@ -372,6 +488,7 @@ public struct MarkdownEditorActions: Codable, Equatable, Sendable {
     public let undo: String?
     public let redo: String?
     public let setPresentation: String?
+    public let openMenu: String?
 
     public init(
         replaceRange: String? = "replace-range",
@@ -379,7 +496,8 @@ public struct MarkdownEditorActions: Codable, Equatable, Sendable {
         save: String? = "save",
         undo: String? = "undo",
         redo: String? = "redo",
-        setPresentation: String? = "set-presentation"
+        setPresentation: String? = "set-presentation",
+        openMenu: String? = nil
     ) {
         self.replaceRange = replaceRange
         self.setSelection = setSelection
@@ -387,6 +505,7 @@ public struct MarkdownEditorActions: Codable, Equatable, Sendable {
         self.undo = undo
         self.redo = redo
         self.setPresentation = setPresentation
+        self.openMenu = openMenu
     }
 }
 
@@ -399,6 +518,8 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
     public let placeholder: String
     public let title: String?
     public let actions: MarkdownEditorActions
+    public let insertMenu: UIMenuSpec?
+    public let contextMenu: UIMenuSpec?
 
     public init(
         text: String,
@@ -408,7 +529,9 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         dirty: Bool = false,
         placeholder: String = "",
         title: String? = nil,
-        actions: MarkdownEditorActions = .init()
+        actions: MarkdownEditorActions = .init(),
+        insertMenu: UIMenuSpec? = nil,
+        contextMenu: UIMenuSpec? = nil
     ) {
         self.text = text
         self.selection = selection
@@ -418,6 +541,8 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         self.placeholder = placeholder
         self.title = title
         self.actions = actions
+        self.insertMenu = insertMenu
+        self.contextMenu = contextMenu
     }
 
     enum CodingKeys: String, CodingKey {
@@ -429,6 +554,8 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         case placeholder
         case title
         case actions
+        case insertMenu
+        case contextMenu
     }
 
     public init(from decoder: Decoder) throws {
@@ -447,6 +574,8 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
             MarkdownEditorActions.self,
             forKey: .actions
         ) ?? .init()
+        insertMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .insertMenu)
+        contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
     }
 }
 
@@ -1733,12 +1862,248 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
     }
 }
 
+public enum UITreePresentation: String, Codable, Equatable, Hashable, Sendable {
+    case drillDown
+    case outline
+}
+
+public enum UITreeItemKind: String, Codable, Equatable, Hashable, Sendable {
+    case parent
+    case directory
+    case file
+}
+
+public enum UITreeChildState: String, Codable, Equatable, Hashable, Sendable {
+    case loaded
+    case unloaded
+    case loading
+}
+
+public struct UITreeItem: Codable, Equatable, Hashable, Sendable, Identifiable {
+    public let id: String
+    public let label: String
+    public let kind: UITreeItemKind
+    public let hidden: Bool
+    public let symlink: Bool
+    public var childState: UITreeChildState
+    public var expanded: Bool
+    public var children: [UITreeItem]
+
+    public init(
+        id: String,
+        label: String,
+        kind: UITreeItemKind,
+        hidden: Bool = false,
+        symlink: Bool = false,
+        childState: UITreeChildState = .loaded,
+        expanded: Bool = false,
+        children: [UITreeItem] = []
+    ) {
+        self.id = id
+        self.label = label
+        self.kind = kind
+        self.hidden = hidden
+        self.symlink = symlink
+        self.childState = childState
+        self.expanded = expanded
+        self.children = children
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, kind, hidden, symlink, childState, expanded, children
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        kind = try container.decode(UITreeItemKind.self, forKey: .kind)
+        hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
+        symlink = try container.decodeIfPresent(Bool.self, forKey: .symlink) ?? false
+        childState = try container.decodeIfPresent(
+            UITreeChildState.self,
+            forKey: .childState
+        ) ?? .loaded
+        expanded = try container.decodeIfPresent(Bool.self, forKey: .expanded) ?? false
+        children = try container.decodeIfPresent([UITreeItem].self, forKey: .children) ?? []
+    }
+}
+
+public struct UITreeFilter: Codable, Equatable, Hashable, Sendable {
+    public let id: String
+    public let label: String
+    public var value: String
+    public let placeholder: String
+    public let setValue: String
+
+    public init(
+        id: String,
+        label: String,
+        value: String = "",
+        placeholder: String = "",
+        setValue: String
+    ) {
+        self.id = id
+        self.label = label
+        self.value = value
+        self.placeholder = placeholder
+        self.setValue = setValue
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, value, placeholder, setValue
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        value = try container.decodeIfPresent(String.self, forKey: .value) ?? ""
+        placeholder = try container.decodeIfPresent(String.self, forKey: .placeholder) ?? ""
+        setValue = try container.decode(String.self, forKey: .setValue)
+    }
+}
+
+public struct UITreeActions: Codable, Equatable, Hashable, Sendable {
+    public let select: String
+    public let open: String
+    public let parent: String
+    public let setExpanded: String?
+
+    public init(
+        select: String = "tree-select",
+        open: String = "tree-open",
+        parent: String = "tree-parent",
+        setExpanded: String? = nil
+    ) {
+        self.select = select
+        self.open = open
+        self.parent = parent
+        self.setExpanded = setExpanded
+    }
+}
+
+public struct UITreeSpec: Codable, Equatable, Hashable, Sendable {
+    public let label: String
+    public var location: String
+    public let presentation: UITreePresentation
+    public var filter: UITreeFilter?
+    public var items: [UITreeItem]
+    public var selectedID: String?
+    public let emptyMessage: String?
+    public let primaryAction: UIButtonSpec?
+    public let actions: UITreeActions
+
+    public init(
+        label: String,
+        location: String,
+        presentation: UITreePresentation = .drillDown,
+        filter: UITreeFilter? = nil,
+        items: [UITreeItem],
+        selectedID: String? = nil,
+        emptyMessage: String? = nil,
+        primaryAction: UIButtonSpec? = nil,
+        actions: UITreeActions = .init()
+    ) {
+        self.label = label
+        self.location = location
+        self.presentation = presentation
+        self.filter = filter
+        self.items = items
+        self.selectedID = selectedID
+        self.emptyMessage = emptyMessage
+        self.primaryAction = primaryAction
+        self.actions = actions
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case label, location, presentation, filter, items, selectedID = "selectedId"
+        case emptyMessage, primaryAction, actions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decode(String.self, forKey: .label)
+        location = try container.decode(String.self, forKey: .location)
+        presentation = try container.decodeIfPresent(
+            UITreePresentation.self,
+            forKey: .presentation
+        ) ?? .drillDown
+        filter = try container.decodeIfPresent(UITreeFilter.self, forKey: .filter)
+        items = try container.decodeIfPresent([UITreeItem].self, forKey: .items) ?? []
+        selectedID = try container.decodeIfPresent(String.self, forKey: .selectedID)
+        emptyMessage = try container.decodeIfPresent(String.self, forKey: .emptyMessage)
+        primaryAction = try container.decodeIfPresent(UIButtonSpec.self, forKey: .primaryAction)
+        actions = try container.decodeIfPresent(UITreeActions.self, forKey: .actions) ?? .init()
+    }
+
+    public var requiredCapabilities: [String]? {
+        var ids = Set<String>()
+        var count = 0
+        var parentCount = 0
+        guard validateTreeItems(
+            items,
+            depth: 0,
+            ids: &ids,
+            count: &count,
+            parentCount: &parentCount
+        ), parentCount <= 1,
+              selectedID.map(ids.contains) ?? true,
+              presentation != .outline || actions.setExpanded != nil
+        else { return nil }
+        var capabilities = [UnpeelUIProtocol.treeCapability]
+        if presentation == .outline || items.contains(where: { !$0.children.isEmpty }) {
+            capabilities.append(UnpeelUIProtocol.treeHierarchyCapability)
+        }
+        if filter != nil { capabilities.append(UnpeelUIProtocol.treeFilterCapability) }
+        if parentCount > 0 { capabilities.append(UnpeelUIProtocol.treeParentCapability) }
+        if primaryAction != nil { capabilities.append(UnpeelUIProtocol.buttonCapability) }
+        return capabilities
+    }
+}
+
+private func validateTreeItems(
+    _ items: [UITreeItem],
+    depth: Int,
+    ids: inout Set<String>,
+    count: inout Int,
+    parentCount: inout Int
+) -> Bool {
+    guard depth <= 32 else { return false }
+    for item in items {
+        count += 1
+        guard count <= 100_000, ids.insert(item.id).inserted,
+              !item.label.contains("\n"), !item.label.contains("\r")
+        else { return false }
+        switch item.kind {
+        case .parent:
+            parentCount += 1
+            guard depth == 0, item.children.isEmpty, !item.expanded else { return false }
+        case .file:
+            guard item.children.isEmpty, !item.expanded else { return false }
+        case .directory:
+            guard item.childState == .loaded || item.children.isEmpty,
+                  validateTreeItems(
+                      item.children,
+                      depth: depth + 1,
+                      ids: &ids,
+                      count: &count,
+                      parentCount: &parentCount
+                  )
+            else { return false }
+        }
+    }
+    return true
+}
+
 public enum UIComponent: Equatable, Sendable {
     case canvasPage(CanvasPageSpec)
     case markdownEditor(MarkdownEditorSpec)
     case media(MediaSpec)
+    case menu(UIMenuSpec)
     case page(PageSpec)
     case surface(SurfaceSpec)
+    case tree(UITreeSpec)
     case unsupported(kind: String)
 
     public var kind: String {
@@ -1749,10 +2114,14 @@ public enum UIComponent: Equatable, Sendable {
             "markdownEditor"
         case .media:
             "media"
+        case .menu:
+            "menu"
         case .page:
             "page"
         case .surface:
             "surface"
+        case .tree:
+            "tree"
         case let .unsupported(kind):
             kind
         }
@@ -1765,17 +2134,31 @@ public enum UIComponent: Equatable, Sendable {
     public var requiredCapabilities: [String]? {
         switch self {
         case let .canvasPage(page):
-            page.requiredCapabilities
-        case .markdownEditor:
-            [UnpeelUIProtocol.markdownEditorCapability]
+            return page.requiredCapabilities
+        case let .markdownEditor(editor):
+            guard editor.insertMenu?.requiredCapabilities != nil || editor.insertMenu == nil,
+                  editor.contextMenu?.requiredCapabilities != nil || editor.contextMenu == nil
+            else { return nil }
+            var capabilities = [UnpeelUIProtocol.markdownEditorCapability]
+            if editor.insertMenu != nil || editor.contextMenu != nil {
+                capabilities += [
+                    UnpeelUIProtocol.menuCapability,
+                    UnpeelUIProtocol.menuAnchorCapability,
+                ]
+            }
+            return capabilities
         case .media:
-            [UnpeelUIProtocol.mediaCapability]
+            return [UnpeelUIProtocol.mediaCapability]
+        case let .menu(menu):
+            return menu.requiredCapabilities
         case let .page(page):
-            page.requiredCapabilities
+            return page.requiredCapabilities
         case .surface:
-            [UnpeelUIProtocol.surfaceCapability]
+            return [UnpeelUIProtocol.surfaceCapability]
+        case let .tree(tree):
+            return tree.requiredCapabilities
         case .unsupported:
-            nil
+            return nil
         }
     }
 }
@@ -1807,10 +2190,14 @@ extension UINode: Codable {
             component = .markdownEditor(try MarkdownEditorSpec(from: decoder))
         case "media":
             component = .media(try MediaSpec(from: decoder))
+        case "menu":
+            component = .menu(try UIMenuSpec(from: decoder))
         case "page":
             component = .page(try PageSpec(from: decoder))
         case "surface":
             component = .surface(try SurfaceSpec(from: decoder))
+        case "tree":
+            component = .tree(try UITreeSpec(from: decoder))
         default:
             component = .unsupported(kind: kind)
         }
@@ -1829,12 +2216,18 @@ extension UINode: Codable {
         case let .media(media):
             try container.encode("media", forKey: .type)
             try media.encode(to: encoder)
+        case let .menu(menu):
+            try container.encode("menu", forKey: .type)
+            try menu.encode(to: encoder)
         case let .page(page):
             try container.encode("page", forKey: .type)
             try page.encode(to: encoder)
         case let .surface(surface):
             try container.encode("surface", forKey: .type)
             try surface.encode(to: encoder)
+        case let .tree(tree):
+            try container.encode("tree", forKey: .type)
+            try tree.encode(to: encoder)
         case let .unsupported(kind):
             try container.encode(kind, forKey: .type)
         }

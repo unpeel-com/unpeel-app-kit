@@ -50,7 +50,7 @@ public struct MarkdownEditorView: View {
                 Divider()
                 editorContent(editor)
             }
-        case .canvasPage, .media, .page, .surface, .unsupported:
+        case .canvasPage, .media, .menu, .page, .surface, .tree, .unsupported:
             EmptyView()
         }
     }
@@ -235,7 +235,9 @@ private struct MarkdownTextView: NSViewRepresentable {
         private var insertContext: MarkdownSlashContext?
         private var visibleInsertItems: [MarkdownInsertItem] = []
         private var selectedInsertIndex = 0
+        private var semanticSelectedID: String?
         private var insertKeyMonitor: MarkdownInsertKeyMonitor?
+        private var contextItems: [String: UIMenuItemSpec] = [:]
 
         init(
             nodeID: String,
@@ -274,6 +276,7 @@ private struct MarkdownTextView: NSViewRepresentable {
             applyingSnapshot = true
             defer {
                 applyingSnapshot = false
+                configureContextMenu(for: textView)
                 refreshInsertMenu(in: textView)
             }
             textView.isEditable = !editor.readOnly && editor.actions.replaceRange != nil
@@ -359,6 +362,20 @@ private struct MarkdownTextView: NSViewRepresentable {
                   NSMaxRange(affectedCharRange) <= (textView.string as NSString).length
             else { return false }
 
+            if let action = editor.actions.openMenu,
+               let replacementString,
+               replacementString == "/" || replacementString == "\\",
+               canOpenMarkdownMenu(text: textView.string, selection: affectedCharRange)
+            {
+                onAction(UIAction(
+                    nodeID: nodeID,
+                    action: action,
+                    kind: .command,
+                    value: .text(replacementString == "/" ? "slash" : "palette")
+                ))
+                return false
+            }
+
             return true
         }
 
@@ -395,7 +412,7 @@ private struct MarkdownTextView: NSViewRepresentable {
             doCommandBy commandSelector: Selector
         ) -> Bool {
             let command = NSStringFromSelector(commandSelector)
-            if insertContext != nil {
+            if insertContext != nil || editor.insertMenu != nil {
                 switch command {
                 case "moveUp:":
                     moveInsertSelection(-1, in: textView)
@@ -458,16 +475,35 @@ private struct MarkdownTextView: NSViewRepresentable {
         }
 
         private func refreshInsertMenu(in textView: NSTextView) {
-            guard !editor.readOnly,
-                  let context = markdownSlashContext(
-                      text: textView.string,
-                      selection: textView.selectedRange()
-                  )
-            else {
+            guard !editor.readOnly else {
+                closeInsertMenu()
+                return
+            }
+            if let menu = editor.insertMenu {
+                insertContext = markdownSlashContext(
+                    text: textView.string,
+                    selection: textView.selectedRange()
+                )
+                let enabled = menu.items.filter { !$0.disabled }
+                if semanticSelectedID == nil
+                    || !enabled.contains(where: { $0.id == semanticSelectedID })
+                {
+                    semanticSelectedID = menu.selectedID ?? enabled.first?.id
+                }
+                visibleInsertItems = []
+                installInsertKeyMonitor(for: textView)
+                showInsertPopover(relativeTo: textView)
+                return
+            }
+            guard let context = markdownSlashContext(
+                text: textView.string,
+                selection: textView.selectedRange()
+            ) else {
                 closeInsertMenu()
                 return
             }
             insertContext = context
+            semanticSelectedID = nil
             visibleInsertItems = visibleMarkdownInsertItems(query: context.query)
             selectedInsertIndex = min(
                 selectedInsertIndex,
@@ -487,18 +523,39 @@ private struct MarkdownTextView: NSViewRepresentable {
                 popover.animates = false
                 insertPopover = popover
             }
-            let menu = MarkdownInsertMenuView(
-                items: visibleInsertItems,
-                selectedIndex: selectedInsertIndex,
-                onSelect: { [weak self, weak textView] kind in
-                    guard let self, let textView else { return }
-                    self.applyInsert(kind, in: textView)
-                }
-            )
-            popover.contentViewController = NSHostingController(rootView: menu)
+            if let semantic = editor.insertMenu {
+                let menu = UIMenuSpec(
+                    label: semantic.label,
+                    presentation: semantic.presentation,
+                    anchor: semantic.anchor,
+                    items: semantic.items,
+                    selectedID: semanticSelectedID,
+                    dismiss: semantic.dismiss
+                )
+                popover.contentViewController = NSHostingController(rootView:
+                    SemanticMenuContent(ownerID: nodeID, menu: menu) {
+                        [weak self, weak textView] action in
+                        guard let self else { return }
+                        self.onAction(action)
+                        self.insertPopover?.performClose(nil)
+                        textView?.window?.makeFirstResponder(textView)
+                    }
+                )
+            } else {
+                let menu = MarkdownInsertMenuView(
+                    items: visibleInsertItems,
+                    selectedIndex: selectedInsertIndex,
+                    onSelect: { [weak self, weak textView] kind in
+                        guard let self, let textView else { return }
+                        self.applyInsert(kind, in: textView)
+                    }
+                )
+                popover.contentViewController = NSHostingController(rootView: menu)
+            }
+            let itemCount = editor.insertMenu?.items.count ?? visibleInsertItems.count
             popover.contentSize = NSSize(
                 width: 238,
-                height: min(330, CGFloat(max(1, visibleInsertItems.count) * 30 + 12))
+                height: min(330, CGFloat(max(1, itemCount) * 30 + 12))
             )
             guard let window = textView.window else { return }
             if !popover.isShown {
@@ -528,7 +585,8 @@ private struct MarkdownTextView: NSViewRepresentable {
         private func installInsertKeyMonitor(for textView: NSTextView) {
             guard insertKeyMonitor == nil else { return }
             insertKeyMonitor = MarkdownInsertKeyMonitor { [weak self, weak textView] event in
-                guard let self, let textView, self.insertContext != nil,
+                guard let self, let textView,
+                      self.insertContext != nil || self.editor.insertMenu != nil,
                       textView.window?.isKeyWindow == true
                 else { return event }
                 return self.handleInsertMenuKey(event, in: textView) ? nil : event
@@ -544,7 +602,7 @@ private struct MarkdownTextView: NSViewRepresentable {
             case 115: // Home
                 setInsertSelection(0, in: textView)
             case 119: // End
-                setInsertSelection(visibleInsertItems.count - 1, in: textView)
+                setInsertSelection(Int.max, in: textView)
             case 36, 76, 48: // Return, keypad Enter, Tab
                 applySelectedInsert(in: textView)
             case 53: // Escape
@@ -556,6 +614,17 @@ private struct MarkdownTextView: NSViewRepresentable {
         }
 
         private func moveInsertSelection(_ delta: Int, in textView: NSTextView) {
+            if let menu = editor.insertMenu {
+                let enabled = menu.items.filter { !$0.disabled }
+                guard !enabled.isEmpty else { return }
+                let current = max(
+                    0,
+                    enabled.firstIndex(where: { $0.id == semanticSelectedID }) ?? 0
+                )
+                semanticSelectedID = enabled[(current + delta + enabled.count) % enabled.count].id
+                showInsertPopover(relativeTo: textView)
+                return
+            }
             guard !visibleInsertItems.isEmpty else { return }
             selectedInsertIndex = (
                 selectedInsertIndex + delta + visibleInsertItems.count
@@ -564,12 +633,28 @@ private struct MarkdownTextView: NSViewRepresentable {
         }
 
         private func setInsertSelection(_ index: Int, in textView: NSTextView) {
+            if let menu = editor.insertMenu {
+                let enabled = menu.items.filter { !$0.disabled }
+                guard !enabled.isEmpty else { return }
+                semanticSelectedID = enabled[min(max(0, index), enabled.count - 1)].id
+                showInsertPopover(relativeTo: textView)
+                return
+            }
             guard !visibleInsertItems.isEmpty else { return }
             selectedInsertIndex = min(max(0, index), visibleInsertItems.count - 1)
             showInsertPopover(relativeTo: textView)
         }
 
         private func applySelectedInsert(in textView: NSTextView) {
+            if let menu = editor.insertMenu,
+               let item = menu.items.first(where: { $0.id == semanticSelectedID }),
+               !item.disabled
+            {
+                onAction(UIAction(nodeID: item.id, action: item.action, kind: .activate))
+                insertPopover?.performClose(nil)
+                textView.window?.makeFirstResponder(textView)
+                return
+            }
             guard visibleInsertItems.indices.contains(selectedInsertIndex) else { return }
             applyInsert(visibleInsertItems[selectedInsertIndex].kind, in: textView)
         }
@@ -594,6 +679,12 @@ private struct MarkdownTextView: NSViewRepresentable {
         }
 
         private func clearSlashCommand(in textView: NSTextView) {
+            if let menu = editor.insertMenu, let dismiss = menu.dismiss {
+                onAction(UIAction(nodeID: nodeID, action: dismiss, kind: .cancel))
+                insertPopover?.performClose(nil)
+                textView.window?.makeFirstResponder(textView)
+                return
+            }
             guard let context = insertContext else {
                 closeInsertMenu()
                 return
@@ -631,6 +722,42 @@ private struct MarkdownTextView: NSViewRepresentable {
             insertContext = nil
             visibleInsertItems = []
             selectedInsertIndex = 0
+            semanticSelectedID = nil
+        }
+
+        private func configureContextMenu(for textView: NSTextView) {
+            guard let semantic = editor.contextMenu else {
+                textView.menu = nil
+                contextItems.removeAll()
+                return
+            }
+            let menu = NSMenu(title: semantic.label)
+            contextItems = Dictionary(uniqueKeysWithValues: semantic.items.map { ($0.id, $0) })
+            for item in semantic.items {
+                let native = NSMenuItem(
+                    title: item.label,
+                    action: #selector(activateSemanticContextItem(_:)),
+                    keyEquivalent: ""
+                )
+                native.target = self
+                native.representedObject = item.id
+                native.isEnabled = !item.disabled
+                if item.role == .danger {
+                    native.attributedTitle = NSAttributedString(
+                        string: item.label,
+                        attributes: [.foregroundColor: NSColor.systemRed]
+                    )
+                }
+                menu.addItem(native)
+            }
+            textView.menu = menu
+        }
+
+        @objc private func activateSemanticContextItem(_ sender: NSMenuItem) {
+            guard let id = sender.representedObject as? String,
+                  let item = contextItems[id], !item.disabled
+            else { return }
+            onAction(UIAction(nodeID: item.id, action: item.action, kind: .activate))
         }
 
         private static func diffText(before: String, after: String) -> UITextEdit? {

@@ -1,0 +1,982 @@
+//! Closed semantic Tree/Explorer vocabulary and its standalone Ratatui view.
+//!
+//! Filesystem ownership stays with the App. `TreeItem::id` is an opaque App
+//! key; host paths and drag payloads never belong in this model.
+
+#![cfg_attr(not(feature = "ui-bridge"), allow(dead_code))]
+
+use std::collections::HashSet;
+use std::fmt;
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
+use ratatui::widgets::Widget;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, KitTheme, ListPageBehavior,
+    RowBoundaryBehavior, RowNavigationState, SELECTABLE_LEFT_PADDING, SelectableRow,
+    VerticalScrollbar,
+};
+
+pub const TREE_COMPONENT_CAPABILITY: &str = "tree";
+pub const TREE_HIERARCHY_CAPABILITY: &str = "treeHierarchy";
+pub const TREE_FILTER_CAPABILITY: &str = "treeFilter";
+pub const TREE_PARENT_CAPABILITY: &str = "treeParent";
+
+const MAX_TREE_NODES: usize = 100_000;
+const MAX_TREE_DEPTH: usize = 32;
+const MAX_TREE_TEXT_BYTES: usize = 16 * 1024;
+const MAX_FILTER_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TreePresentation {
+    #[default]
+    DrillDown,
+    Outline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TreeItemKind {
+    Parent,
+    Directory,
+    File,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TreeChildState {
+    #[default]
+    Loaded,
+    Unloaded,
+    Loading,
+}
+
+/// One bounded semantic entry. Only directories may own child entries.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeItem {
+    pub id: String,
+    pub label: String,
+    pub kind: TreeItemKind,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub symlink: bool,
+    #[serde(default)]
+    pub child_state: TreeChildState,
+    #[serde(default)]
+    pub expanded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<TreeItem>,
+}
+
+impl TreeItem {
+    #[must_use]
+    pub fn new(id: impl Into<String>, label: impl Into<String>, kind: TreeItemKind) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            kind,
+            hidden: false,
+            symlink: false,
+            child_state: TreeChildState::Loaded,
+            expanded: false,
+            children: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn parent(id: impl Into<String>) -> Self {
+        Self::new(id, "..", TreeItemKind::Parent)
+    }
+
+    #[must_use]
+    pub fn directory(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(id, label, TreeItemKind::Directory)
+    }
+
+    #[must_use]
+    pub fn file(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self::new(id, label, TreeItemKind::File)
+    }
+
+    #[must_use]
+    pub const fn hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
+    }
+
+    #[must_use]
+    pub const fn symlink(mut self, symlink: bool) -> Self {
+        self.symlink = symlink;
+        self
+    }
+
+    #[must_use]
+    pub const fn child_state(mut self, child_state: TreeChildState) -> Self {
+        self.child_state = child_state;
+        self
+    }
+
+    #[must_use]
+    pub fn children(mut self, children: impl IntoIterator<Item = TreeItem>) -> Self {
+        self.children = children.into_iter().collect();
+        self.child_state = TreeChildState::Loaded;
+        self
+    }
+
+    #[must_use]
+    pub const fn expanded(mut self, expanded: bool) -> Self {
+        self.expanded = expanded;
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeFilter {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub placeholder: String,
+    pub set_value: String,
+}
+
+impl TreeFilter {
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        value: impl Into<String>,
+        set_value: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            value: value.into(),
+            placeholder: String::new(),
+            set_value: set_value.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+}
+
+/// Actions owned by the App's reducer/router.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TreeActions {
+    pub select: String,
+    pub open: String,
+    pub parent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_expanded: Option<String>,
+}
+
+impl TreeActions {
+    pub const SELECT: &'static str = "tree-select";
+    pub const OPEN: &'static str = "tree-open";
+    pub const PARENT: &'static str = "tree-parent";
+    pub const SET_EXPANDED: &'static str = "tree-set-expanded";
+
+    #[must_use]
+    pub fn drill_down() -> Self {
+        Self {
+            select: Self::SELECT.to_owned(),
+            open: Self::OPEN.to_owned(),
+            parent: Self::PARENT.to_owned(),
+            set_expanded: None,
+        }
+    }
+
+    #[must_use]
+    pub fn outline() -> Self {
+        Self {
+            set_expanded: Some(Self::SET_EXPANDED.to_owned()),
+            ..Self::drill_down()
+        }
+    }
+}
+
+impl Default for TreeActions {
+    fn default() -> Self {
+        Self::drill_down()
+    }
+}
+
+/// One semantic file/document navigator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tree {
+    pub label: String,
+    pub location: String,
+    #[serde(default)]
+    pub presentation: TreePresentation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<TreeFilter>,
+    #[serde(default)]
+    pub items: Vec<TreeItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_message: Option<String>,
+    /// One named, constrained toolbar action. This keeps document creation
+    /// available in native renderers without turning Tree into a generic
+    /// child container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_action: Option<Button>,
+    #[serde(default)]
+    pub actions: TreeActions,
+}
+
+impl Tree {
+    #[must_use]
+    pub fn new(
+        label: impl Into<String>,
+        location: impl Into<String>,
+        items: impl IntoIterator<Item = TreeItem>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            location: location.into(),
+            presentation: TreePresentation::DrillDown,
+            filter: None,
+            items: items.into_iter().collect(),
+            selected_id: None,
+            empty_message: None,
+            primary_action: None,
+            actions: TreeActions::drill_down(),
+        }
+    }
+
+    #[must_use]
+    pub fn presentation(mut self, presentation: TreePresentation) -> Self {
+        self.presentation = presentation;
+        self.actions = match presentation {
+            TreePresentation::DrillDown => TreeActions::drill_down(),
+            TreePresentation::Outline => TreeActions::outline(),
+        };
+        self
+    }
+
+    #[must_use]
+    pub fn outline(mut self) -> Self {
+        self.presentation = TreePresentation::Outline;
+        self.actions = TreeActions::outline();
+        self
+    }
+
+    #[must_use]
+    pub fn filter(mut self, filter: TreeFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    #[must_use]
+    pub fn selected_id(mut self, selected_id: impl Into<String>) -> Self {
+        self.selected_id = Some(selected_id.into());
+        self
+    }
+
+    #[must_use]
+    pub fn empty_message(mut self, message: impl Into<String>) -> Self {
+        self.empty_message = Some(message.into());
+        self
+    }
+
+    #[must_use]
+    pub fn primary_action(mut self, action: Button) -> Self {
+        self.primary_action = Some(action);
+        self
+    }
+
+    #[must_use]
+    pub fn actions(mut self, actions: TreeActions) -> Self {
+        self.actions = actions;
+        self
+    }
+
+    #[must_use]
+    pub fn required_capabilities(&self) -> Vec<&'static str> {
+        let mut capabilities = vec![TREE_COMPONENT_CAPABILITY];
+        if self.presentation == TreePresentation::Outline
+            || self.items.iter().any(|item| !item.children.is_empty())
+        {
+            capabilities.push(TREE_HIERARCHY_CAPABILITY);
+        }
+        if self.filter.is_some() {
+            capabilities.push(TREE_FILTER_CAPABILITY);
+        }
+        if self
+            .items
+            .iter()
+            .any(|item| item.kind == TreeItemKind::Parent)
+        {
+            capabilities.push(TREE_PARENT_CAPABILITY);
+        }
+        if self.primary_action.is_some() {
+            capabilities.push(BUTTON_COMPONENT_CAPABILITY);
+        }
+        capabilities
+    }
+
+    pub fn validate(&self) -> Result<(), TreeValidationError> {
+        validate_text(&self.label, MAX_TREE_TEXT_BYTES, "tree.label")?;
+        validate_text(&self.location, MAX_TREE_TEXT_BYTES, "tree.location")?;
+        if let Some(message) = &self.empty_message {
+            validate_text(message, MAX_TREE_TEXT_BYTES, "tree.emptyMessage")?;
+        }
+        if let Some(action) = &self.primary_action {
+            action
+                .validate("tree.primaryAction")
+                .map_err(|error| TreeValidationError::new(error.path, error.message))?;
+        }
+        validate_identifier(&self.actions.select, "tree.actions.select")?;
+        validate_identifier(&self.actions.open, "tree.actions.open")?;
+        validate_identifier(&self.actions.parent, "tree.actions.parent")?;
+        if let Some(action) = &self.actions.set_expanded {
+            validate_identifier(action, "tree.actions.setExpanded")?;
+        }
+        if self.presentation == TreePresentation::Outline && self.actions.set_expanded.is_none() {
+            return Err(TreeValidationError::new(
+                "tree.actions.setExpanded",
+                "outline Trees require an idempotent expansion action",
+            ));
+        }
+        if let Some(filter) = &self.filter {
+            validate_identifier(&filter.id, "tree.filter.id")?;
+            validate_text(&filter.label, MAX_TREE_TEXT_BYTES, "tree.filter.label")?;
+            validate_text(&filter.value, MAX_FILTER_BYTES, "tree.filter.value")?;
+            validate_text(
+                &filter.placeholder,
+                MAX_TREE_TEXT_BYTES,
+                "tree.filter.placeholder",
+            )?;
+            validate_identifier(&filter.set_value, "tree.filter.setValue")?;
+        }
+
+        let mut ids = HashSet::new();
+        let mut count = 0;
+        let mut parent_count = 0;
+        validate_items(
+            &self.items,
+            0,
+            "tree.items",
+            &mut ids,
+            &mut count,
+            &mut parent_count,
+        )?;
+        if parent_count > 1 {
+            return Err(TreeValidationError::new(
+                "tree.items",
+                "a Tree accepts at most one synthetic parent item",
+            ));
+        }
+        if let Some(selected) = &self.selected_id
+            && !ids.contains(selected)
+        {
+            return Err(TreeValidationError::new(
+                "tree.selectedId",
+                format!("selected item {selected:?} is not present"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_selection(
+        &mut self,
+        selected_id: Option<String>,
+    ) -> Result<(), TreeValidationError> {
+        self.selected_id = selected_id;
+        self.validate()
+    }
+
+    pub(crate) fn set_filter_value(
+        &mut self,
+        filter_id: &str,
+        value: String,
+    ) -> Result<(), TreeValidationError> {
+        let Some(filter) = self.filter.as_mut().filter(|filter| filter.id == filter_id) else {
+            return Err(TreeValidationError::new(
+                "delta.filterId",
+                format!("filter {filter_id:?} is not present"),
+            ));
+        };
+        filter.value = value;
+        self.validate()
+    }
+
+    pub(crate) fn splice_children(
+        &mut self,
+        parent_id: Option<&str>,
+        index: usize,
+        delete_count: usize,
+        items: Vec<TreeItem>,
+    ) -> Result<(), TreeValidationError> {
+        let target = if let Some(parent_id) = parent_id {
+            let Some(parent) = find_item_mut(&mut self.items, parent_id) else {
+                return Err(TreeValidationError::new(
+                    "delta.parentId",
+                    format!("parent {parent_id:?} is not present"),
+                ));
+            };
+            if parent.kind != TreeItemKind::Directory {
+                return Err(TreeValidationError::new(
+                    "delta.parentId",
+                    "only a directory may own Tree children",
+                ));
+            }
+            &mut parent.children
+        } else {
+            &mut self.items
+        };
+        if index > target.len() || delete_count > target.len().saturating_sub(index) {
+            return Err(TreeValidationError::new(
+                "delta.index",
+                "Tree child splice is outside the current child collection",
+            ));
+        }
+        target.splice(index..index + delete_count, items);
+        self.validate()
+    }
+
+    pub(crate) fn set_child_state(
+        &mut self,
+        item_id: &str,
+        child_state: TreeChildState,
+    ) -> Result<(), TreeValidationError> {
+        let Some(item) = find_item_mut(&mut self.items, item_id) else {
+            return Err(TreeValidationError::new(
+                "delta.itemId",
+                format!("item {item_id:?} is not present"),
+            ));
+        };
+        item.child_state = child_state;
+        if child_state != TreeChildState::Loaded {
+            item.children.clear();
+        }
+        self.validate()
+    }
+
+    pub(crate) fn set_expanded(
+        &mut self,
+        item_id: &str,
+        expanded: bool,
+    ) -> Result<(), TreeValidationError> {
+        let Some(item) = find_item_mut(&mut self.items, item_id) else {
+            return Err(TreeValidationError::new(
+                "delta.itemId",
+                format!("item {item_id:?} is not present"),
+            ));
+        };
+        item.expanded = expanded;
+        self.validate()
+    }
+
+    #[must_use]
+    pub fn widget<'a>(&'a self, state: &'a mut TreeState) -> TreeWidget<'a> {
+        TreeWidget {
+            tree: self,
+            state,
+            theme: TreeTheme::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeValidationError {
+    pub path: String,
+    pub message: String,
+}
+
+impl TreeValidationError {
+    fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for TreeValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.path, self.message)
+    }
+}
+
+impl std::error::Error for TreeValidationError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreeTheme {
+    pub style: Style,
+    pub location: Style,
+    pub filter: Style,
+    pub item: Style,
+    pub directory: Style,
+    pub parent: Style,
+    pub symlink: Style,
+    pub selected: Style,
+    pub empty: Style,
+    pub scrollbar_track: Style,
+    pub scrollbar_thumb: Style,
+    pub left_padding: u16,
+}
+
+impl TreeTheme {
+    #[must_use]
+    pub const fn for_theme(theme: KitTheme) -> Self {
+        Self {
+            style: Style::new(),
+            location: Style::new().fg(theme.text).bold(),
+            filter: Style::new().fg(theme.muted),
+            item: Style::new().fg(theme.text),
+            directory: Style::new().fg(theme.accent),
+            parent: Style::new().fg(theme.accent),
+            symlink: Style::new().fg(Color::Cyan),
+            selected: theme.selected_row,
+            empty: Style::new().fg(theme.subtle),
+            scrollbar_track: theme.scrollbar_track,
+            scrollbar_thumb: theme.scrollbar_thumb,
+            left_padding: SELECTABLE_LEFT_PADDING,
+        }
+    }
+}
+
+impl Default for TreeTheme {
+    fn default() -> Self {
+        Self::for_theme(KitTheme::dark())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeState {
+    navigation: RowNavigationState,
+    rows_area: Rect,
+    primary_action_area: Rect,
+    visible_ids: Vec<String>,
+}
+
+impl Default for TreeState {
+    fn default() -> Self {
+        let mut navigation = RowNavigationState::default();
+        navigation.set_boundary_behavior(RowBoundaryBehavior::Wrap);
+        navigation.set_navigation(1, 0, ListPageBehavior::Selection);
+        Self {
+            navigation,
+            rows_area: Rect::default(),
+            primary_action_area: Rect::default(),
+            visible_ids: Vec::new(),
+        }
+    }
+}
+
+impl TreeState {
+    #[must_use]
+    pub fn selected_id(&self) -> Option<&str> {
+        self.navigation
+            .selected()
+            .and_then(|index| self.visible_ids.get(index))
+            .map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn item_id_at(&self, position: ratatui::layout::Position) -> Option<&str> {
+        self.navigation
+            .item_at(position, self.visible_ids.len())
+            .and_then(|index| self.visible_ids.get(index))
+            .map(String::as_str)
+    }
+
+    #[must_use]
+    pub const fn primary_action_at(&self, position: ratatui::layout::Position) -> bool {
+        self.primary_action_area.contains(position)
+    }
+}
+
+pub struct TreeWidget<'a> {
+    tree: &'a Tree,
+    state: &'a mut TreeState,
+    theme: TreeTheme,
+}
+
+impl TreeWidget<'_> {
+    #[must_use]
+    pub const fn theme(mut self, theme: TreeTheme) -> Self {
+        self.theme = theme;
+        self
+    }
+}
+
+impl Widget for TreeWidget<'_> {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        buffer.set_style(area, self.theme.style);
+        if area.is_empty() {
+            self.state.rows_area = Rect::default();
+            self.state.primary_action_area = Rect::default();
+            self.state.visible_ids.clear();
+            return;
+        }
+        let filter_height = u16::from(self.tree.filter.is_some() && area.height > 0);
+        if let Some(filter) = &self.tree.filter {
+            let row = Rect::new(area.x, area.y, area.width, filter_height);
+            let value = if filter.value.is_empty() {
+                filter.placeholder.as_str()
+            } else {
+                filter.value.as_str()
+            };
+            Line::styled(
+                format!(
+                    "{}{}",
+                    " ".repeat(usize::from(self.theme.left_padding)),
+                    value
+                ),
+                self.theme.filter,
+            )
+            .render(row, buffer);
+        }
+        let location_height = u16::from(area.height > filter_height);
+        let location_area = Rect::new(
+            area.x,
+            area.y.saturating_add(filter_height),
+            area.width,
+            location_height,
+        );
+        Line::styled(
+            format!(
+                "{}{}",
+                " ".repeat(usize::from(self.theme.left_padding)),
+                self.tree.location
+            ),
+            self.theme.location,
+        )
+        .render(location_area, buffer);
+
+        let mut visible = Vec::new();
+        flatten_visible(&self.tree.items, 0, self.tree.presentation, &mut visible);
+        self.state.visible_ids = visible.iter().map(|(item, _)| item.id.clone()).collect();
+        let rows_y = area
+            .y
+            .saturating_add(filter_height)
+            .saturating_add(location_height);
+        let action_height = u16::from(self.tree.primary_action.is_some());
+        let rows_height = area
+            .height
+            .saturating_sub(filter_height + location_height + action_height);
+        let overflow = visible.len() > usize::from(rows_height);
+        self.state.rows_area = Rect::new(
+            area.x,
+            rows_y,
+            area.width.saturating_sub(u16::from(overflow)),
+            rows_height,
+        );
+        self.state
+            .navigation
+            .prepare(self.state.rows_area, visible.len());
+        let selected = self
+            .tree
+            .selected_id
+            .as_deref()
+            .and_then(|id| visible.iter().position(|(item, _)| item.id == id));
+        self.state.navigation.select(selected, visible.len());
+
+        self.state.primary_action_area = if let Some(action) = &self.tree.primary_action {
+            let action_area = Rect::new(
+                area.x,
+                area.bottom().saturating_sub(1),
+                area.width,
+                action_height,
+            );
+            let style = match action.role {
+                ButtonRole::Default => self.theme.directory,
+                ButtonRole::Primary => self.theme.directory.bold(),
+                ButtonRole::Destructive => Style::new().fg(Color::Red).bold(),
+            };
+            Line::styled(
+                format!(
+                    "{}[ {} ]",
+                    " ".repeat(usize::from(self.theme.left_padding)),
+                    action.label
+                ),
+                style,
+            )
+            .render(action_area, buffer);
+            action_area
+        } else {
+            Rect::default()
+        };
+
+        if visible.is_empty() {
+            if let Some(message) = &self.tree.empty_message {
+                Line::styled(
+                    format!(
+                        "{}{}",
+                        " ".repeat(usize::from(self.theme.left_padding)),
+                        message
+                    ),
+                    self.theme.empty,
+                )
+                .render(self.state.rows_area, buffer);
+            }
+            return;
+        }
+
+        for (slot, index) in (self.state.navigation.offset()..visible.len())
+            .take(usize::from(rows_height))
+            .enumerate()
+        {
+            let (item, depth) = visible[index];
+            let row = Rect::new(
+                self.state.rows_area.x,
+                self.state.rows_area.y.saturating_add(slot as u16),
+                self.state.rows_area.width,
+                1,
+            );
+            let selected = self.state.navigation.selected() == Some(index);
+            let mut inactive = match item.kind {
+                TreeItemKind::Parent => self.theme.parent,
+                TreeItemKind::Directory => self.theme.directory,
+                TreeItemKind::File => self.theme.item,
+            };
+            if item.symlink {
+                inactive = self.theme.symlink;
+            }
+            let active = inactive.patch(self.theme.selected);
+            let content = SelectableRow::new(selected, active)
+                .inactive_style(inactive)
+                .left_padding(self.theme.left_padding)
+                .right_padding(0)
+                .paint(row, buffer);
+            let indent = if self.tree.presentation == TreePresentation::Outline {
+                "  ".repeat(depth)
+            } else {
+                String::new()
+            };
+            let marker = match item.kind {
+                TreeItemKind::Parent => "../".to_owned(),
+                TreeItemKind::Directory => {
+                    let disclosure = if self.tree.presentation == TreePresentation::Outline {
+                        if item.expanded { "▾ " } else { "▸ " }
+                    } else {
+                        ""
+                    };
+                    format!("{disclosure}{}/", item.label.trim_end_matches('/'))
+                }
+                TreeItemKind::File => item.label.clone(),
+            };
+            Line::styled(
+                format!("{indent}{marker}"),
+                if selected { active } else { inactive },
+            )
+            .render(content, buffer);
+        }
+        if overflow {
+            VerticalScrollbar::new(
+                visible.len(),
+                usize::from(rows_height),
+                self.state.navigation.offset(),
+            )
+            .track_style(self.theme.scrollbar_track)
+            .thumb_style(self.theme.scrollbar_thumb)
+            .render(
+                Rect::new(area.right().saturating_sub(1), rows_y, 1, rows_height),
+                buffer,
+            );
+        }
+    }
+}
+
+fn validate_items(
+    items: &[TreeItem],
+    depth: usize,
+    path: &str,
+    ids: &mut HashSet<String>,
+    count: &mut usize,
+    parent_count: &mut usize,
+) -> Result<(), TreeValidationError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(TreeValidationError::new(
+            path,
+            format!("Tree depth exceeds {MAX_TREE_DEPTH}"),
+        ));
+    }
+    for (index, item) in items.iter().enumerate() {
+        *count = count.saturating_add(1);
+        if *count > MAX_TREE_NODES {
+            return Err(TreeValidationError::new(
+                path,
+                format!("Tree node count exceeds {MAX_TREE_NODES}"),
+            ));
+        }
+        let item_path = format!("{path}[{index}]");
+        validate_identifier(&item.id, &format!("{item_path}.id"))?;
+        if !ids.insert(item.id.clone()) {
+            return Err(TreeValidationError::new(
+                format!("{item_path}.id"),
+                format!("duplicate Tree item id {:?}", item.id),
+            ));
+        }
+        validate_text(
+            &item.label,
+            MAX_TREE_TEXT_BYTES,
+            &format!("{item_path}.label"),
+        )?;
+        if item.label.contains(['\n', '\r']) {
+            return Err(TreeValidationError::new(
+                format!("{item_path}.label"),
+                "Tree labels must be single-line",
+            ));
+        }
+        match item.kind {
+            TreeItemKind::Parent => {
+                *parent_count += 1;
+                if depth != 0 || !item.children.is_empty() || item.expanded {
+                    return Err(TreeValidationError::new(
+                        item_path,
+                        "the synthetic parent must be a root leaf",
+                    ));
+                }
+            }
+            TreeItemKind::File => {
+                if !item.children.is_empty() || item.expanded {
+                    return Err(TreeValidationError::new(
+                        item_path,
+                        "files cannot own or expand Tree children",
+                    ));
+                }
+            }
+            TreeItemKind::Directory => {
+                if item.child_state != TreeChildState::Loaded && !item.children.is_empty() {
+                    return Err(TreeValidationError::new(
+                        format!("{item_path}.children"),
+                        "unloaded/loading directories cannot contain snapshot children",
+                    ));
+                }
+                validate_items(
+                    &item.children,
+                    depth + 1,
+                    &format!("{item_path}.children"),
+                    ids,
+                    count,
+                    parent_count,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_identifier(value: &str, path: &str) -> Result<(), TreeValidationError> {
+    if value.is_empty()
+        || value.len() > 255
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+    {
+        return Err(TreeValidationError::new(
+            path,
+            "identifier must contain 1...255 ASCII alphanumeric, '.', '_', '-', or ':' bytes",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_text(value: &str, maximum: usize, path: &str) -> Result<(), TreeValidationError> {
+    if value.len() > maximum {
+        return Err(TreeValidationError::new(
+            path,
+            format!("text exceeds {maximum} UTF-8 bytes"),
+        ));
+    }
+    if value.chars().any(|character| {
+        matches!(character, '\u{0000}'..='\u{0008}' | '\u{000B}' | '\u{000C}' | '\u{000E}'..='\u{001F}' | '\u{007F}')
+    }) {
+        return Err(TreeValidationError::new(path, "text contains a control character"));
+    }
+    Ok(())
+}
+
+fn find_item_mut<'a>(items: &'a mut [TreeItem], id: &str) -> Option<&'a mut TreeItem> {
+    for item in items {
+        if item.id == id {
+            return Some(item);
+        }
+        if let Some(found) = find_item_mut(&mut item.children, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn flatten_visible<'a>(
+    items: &'a [TreeItem],
+    depth: usize,
+    presentation: TreePresentation,
+    output: &mut Vec<(&'a TreeItem, usize)>,
+) {
+    for item in items {
+        output.push((item, depth));
+        if presentation == TreePresentation::Outline && item.expanded {
+            flatten_visible(&item.children, depth + 1, presentation, output);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+
+    fn fixture() -> Tree {
+        Tree::new(
+            "Notes",
+            "Writing",
+            [
+                TreeItem::parent("parent"),
+                TreeItem::directory("projects", "Projects")
+                    .children([TreeItem::file("readme", "README.md")])
+                    .expanded(true),
+                TreeItem::file("today", "Today.md"),
+            ],
+        )
+        .outline()
+        .filter(TreeFilter::new("filter", "Filter notes", "", "tree-filter"))
+        .selected_id("today")
+    }
+
+    #[test]
+    fn validates_closed_hierarchy_and_unique_opaque_ids() {
+        fixture().validate().unwrap();
+        let invalid = Tree::new(
+            "Files",
+            ".",
+            [TreeItem::file("same", "a").children([TreeItem::file("same", "b")])],
+        );
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn terminal_interpretation_uses_shared_selection_and_outline_rows() {
+        let tree = fixture();
+        let mut state = TreeState::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(tree.widget(&mut state), frame.area()))
+            .unwrap();
+        assert_eq!(state.selected_id(), Some("today"));
+        let rendered = terminal.backend().buffer();
+        assert!(rendered.content.iter().any(|cell| cell.symbol() == "▾"));
+    }
+}

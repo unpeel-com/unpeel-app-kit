@@ -17,7 +17,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 23);
+    assert_eq!(messages.len(), 29);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -256,4 +256,100 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     };
     assert!(!page.list().items[2].primary_checkmark().unwrap().value);
     assert_eq!(page.list().selected_id.as_deref(), Some("row-destructive"));
+
+    let UiMessage::Snapshot(tree_snapshot) = &messages[23] else {
+        panic!("twenty-fourth fixture must contain the semantic Tree");
+    };
+    let UiComponent::Tree(tree) = &tree_snapshot.root.element else {
+        panic!("Tree fixture must preserve the closed hierarchy");
+    };
+    assert_eq!(tree.location, "Writing");
+    assert_eq!(tree.selected_id.as_deref(), Some("today"));
+    assert_eq!(
+        tree.required_capabilities(),
+        vec![
+            "tree",
+            "treeHierarchy",
+            "treeFilter",
+            "treeParent",
+            "button"
+        ]
+    );
+    assert_eq!(
+        tree.primary_action
+            .as_ref()
+            .map(|action| action.action.as_str()),
+        Some("create-note")
+    );
+    assert!(!serde_json::to_string(tree).unwrap().contains("/Users/"));
+
+    let UiMessage::Delta(tree_delta) = &messages[24] else {
+        panic!("twenty-fifth fixture must contain keyed Tree deltas");
+    };
+    let updated = tree_snapshot.applying(tree_delta).unwrap();
+    let UiComponent::Tree(tree) = updated.root.element else {
+        panic!("Tree deltas must preserve the component kind");
+    };
+    assert_eq!(tree.location, "Writing/Projects");
+    assert_eq!(
+        tree.filter.as_ref().map(|filter| filter.value.as_str()),
+        Some("draft")
+    );
+    assert_eq!(tree.selected_id.as_deref(), Some("draft"));
+    assert_eq!(tree.items[1].children[0].label, "Draft.md");
+
+    let UiMessage::Snapshot(menu_snapshot) = &messages[25] else {
+        panic!("twenty-sixth fixture must contain Menu");
+    };
+    let UiComponent::Menu(menu) = &menu_snapshot.root.element else {
+        panic!("Menu fixture must preserve its closed action vocabulary");
+    };
+    assert_eq!(menu.required_capabilities(), ["menu", "menuAnchor"]);
+    assert!(menu.items[1].disabled);
+    assert_eq!(
+        menu.items[2].role,
+        unpeel_app_kit::SemanticMenuItemRole::Danger
+    );
+
+    let UiMessage::Delta(menu_delta) = &messages[26] else {
+        panic!("twenty-seventh fixture must select a Menu item");
+    };
+    let updated = menu_snapshot.applying(menu_delta).unwrap();
+    let UiComponent::Menu(menu) = updated.root.element else {
+        panic!("Menu delta must preserve the component kind");
+    };
+    assert_eq!(menu.selected_id.as_deref(), Some("delete"));
+
+    let UiMessage::Snapshot(markdown_snapshot) = &messages[27] else {
+        panic!("twenty-eighth fixture must embed semantic Markdown menus");
+    };
+    let UiComponent::MarkdownEditor(editor) = &markdown_snapshot.root.element else {
+        panic!("nested Menu fixture must remain a MarkdownEditor");
+    };
+    assert_eq!(
+        editor.insert_menu.as_ref().unwrap().anchor,
+        unpeel_app_kit::SemanticMenuAnchor::Caret
+    );
+    assert_eq!(
+        editor
+            .actions
+            .open_menu
+            .as_ref()
+            .map(|action| action.as_str()),
+        Some("open-menu"),
+        "semantic Markdown menus must have an explicit App-owned entry action"
+    );
+    assert_eq!(
+        markdown_snapshot.root.required_capabilities(),
+        vec!["markdownEditor", "menu", "menuAnchor"]
+    );
+    let UiMessage::Delta(markdown_menu_delta) = &messages[28] else {
+        panic!("twenty-ninth fixture must update nested Markdown menus");
+    };
+    let updated = markdown_snapshot.applying(markdown_menu_delta).unwrap();
+    let UiComponent::MarkdownEditor(editor) = updated.root.element else {
+        panic!("nested Menu delta must preserve MarkdownEditor");
+    };
+    assert!(editor.insert_menu.is_none());
+    assert!(editor.context_menu.is_some());
 }

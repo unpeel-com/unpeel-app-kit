@@ -4,6 +4,8 @@ export const UI_PROTOCOL_MAX_VERSION = 1 as const;
 export const UI_PROTOCOL_VERSION = UI_PROTOCOL_MAX_VERSION;
 export const UI_DELTA_CAPABILITY = "serverDelta" as const;
 export const UI_MARKDOWN_EDITOR_CAPABILITY = "markdownEditor" as const;
+export const UI_MENU_CAPABILITY = "menu" as const;
+export const UI_MENU_ANCHOR_CAPABILITY = "menuAnchor" as const;
 export const UI_MEDIA_CAPABILITY = "media" as const;
 export const UI_PAGE_CAPABILITY = "page" as const;
 export const UI_LIST_CAPABILITY = "list" as const;
@@ -21,9 +23,15 @@ export const UI_BUTTON_CAPABILITY = "button" as const;
 export const UI_PAGE_BACK_CAPABILITY = "pageBack" as const;
 export const UI_SURFACE_CAPABILITY = "surface" as const;
 export const UI_CANVAS_PAGE_CAPABILITY = "canvasPage" as const;
+export const UI_TREE_CAPABILITY = "tree" as const;
+export const UI_TREE_HIERARCHY_CAPABILITY = "treeHierarchy" as const;
+export const UI_TREE_FILTER_CAPABILITY = "treeFilter" as const;
+export const UI_TREE_PARENT_CAPABILITY = "treeParent" as const;
 /** Built-in renderers that need no Host-injected presenter adapter. */
 export const UI_COMPONENT_CAPABILITIES = [
   UI_MARKDOWN_EDITOR_CAPABILITY,
+  UI_MENU_CAPABILITY,
+  UI_MENU_ANCHOR_CAPABILITY,
   UI_MEDIA_CAPABILITY,
   UI_PAGE_CAPABILITY,
   UI_LIST_CAPABILITY,
@@ -39,6 +47,10 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_INPUT_CAPABILITY,
   UI_BUTTON_CAPABILITY,
   UI_PAGE_BACK_CAPABILITY,
+  UI_TREE_CAPABILITY,
+  UI_TREE_HIERARCHY_CAPABILITY,
+  UI_TREE_FILTER_CAPABILITY,
+  UI_TREE_PARENT_CAPABILITY,
 ] as const;
 export const MAX_INLINE_MEDIA_BYTES = 256 * 1024;
 
@@ -122,6 +134,33 @@ export interface TextEdit {
 
 export type MarkdownPresentation = "source" | "preview" | "split";
 
+export type MenuItemRole = "default" | "danger";
+export type MenuAnchor = "control" | "caret" | "pointer";
+export type MenuPresentation = "popup" | "context";
+
+export interface MenuItemSpec {
+  id: string;
+  label: string;
+  action: string;
+  hint?: string;
+  disabled?: boolean;
+  role?: MenuItemRole;
+}
+
+export interface MenuSpec {
+  label: string;
+  presentation?: MenuPresentation;
+  anchor?: MenuAnchor;
+  items: MenuItemSpec[];
+  selectedId?: string;
+  dismiss?: string;
+}
+
+export interface MenuNode extends MenuSpec {
+  id: string;
+  type: "menu";
+}
+
 export interface MarkdownEditorActions {
   replaceRange?: string;
   setSelection?: string;
@@ -129,6 +168,7 @@ export interface MarkdownEditorActions {
   undo?: string;
   redo?: string;
   setPresentation?: string;
+  openMenu?: string;
 }
 
 export interface MarkdownEditorNode {
@@ -142,6 +182,8 @@ export interface MarkdownEditorNode {
   placeholder?: string;
   title?: string;
   actions?: MarkdownEditorActions;
+  insertMenu?: MenuSpec;
+  contextMenu?: MenuSpec;
 }
 
 export type MediaFit = "contain" | "cover" | "fill";
@@ -363,6 +405,57 @@ export interface PageNode {
   body: ListSpec | UnsupportedComponentSlot;
 }
 
+export type TreePresentation = "drillDown" | "outline";
+export type TreeItemKind = "parent" | "directory" | "file";
+export type TreeChildState = "loaded" | "unloaded" | "loading";
+
+export interface TreeItem {
+  id: string;
+  label: string;
+  kind: TreeItemKind;
+  hidden?: boolean;
+  symlink?: boolean;
+  childState?: TreeChildState;
+  expanded?: boolean;
+  children?: TreeItem[];
+}
+
+export interface TreeFilter {
+  id: string;
+  label: string;
+  value?: string;
+  placeholder?: string;
+  setValue: string;
+}
+
+export interface TreeActions {
+  select: string;
+  open: string;
+  parent: string;
+  setExpanded?: string;
+}
+
+export interface TreePrimaryAction {
+  id: string;
+  label: string;
+  action: string;
+  role?: ButtonRole;
+}
+
+export interface TreeNode {
+  id: string;
+  type: "tree";
+  label: string;
+  location: string;
+  presentation?: TreePresentation;
+  filter?: TreeFilter;
+  items: TreeItem[];
+  selectedId?: string;
+  emptyMessage?: string;
+  primaryAction?: TreePrimaryAction;
+  actions: TreeActions;
+}
+
 /** Opaque root retained only so the session can request terminal fallback. */
 export interface UnsupportedUiNode {
   id: string;
@@ -370,7 +463,8 @@ export interface UnsupportedUiNode {
   [field: string]: unknown;
 }
 
-export type UiNode = CanvasPageNode | MarkdownEditorNode | MediaNode | PageNode | SurfaceNode
+export type UiNode = CanvasPageNode | MarkdownEditorNode | MediaNode | MenuNode | PageNode | SurfaceNode
+  | TreeNode
   | UnsupportedUiNode;
 
 export function isCanvasPageNode(node: UiNode): node is CanvasPageNode {
@@ -385,12 +479,20 @@ export function isMediaNode(node: UiNode): node is MediaNode {
   return node.type === "media";
 }
 
+export function isMenuNode(node: UiNode): node is MenuNode {
+  return node.type === "menu";
+}
+
 export function isPageNode(node: UiNode): node is PageNode {
   return node.type === "page";
 }
 
 export function isSurfaceNode(node: UiNode): node is SurfaceNode {
   return node.type === "surface";
+}
+
+export function isTreeNode(node: UiNode): node is TreeNode {
+  return node.type === "tree";
 }
 
 export function isButtonControl(control: CanvasControl): control is ButtonSpec {
@@ -473,9 +575,35 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
     if (node.controls.length > 0) capabilities.push(UI_BUTTON_CAPABILITY);
     return capabilities;
   }
-  if (isMarkdownEditorNode(node)) return [UI_MARKDOWN_EDITOR_CAPABILITY];
+  if (isMarkdownEditorNode(node)) {
+    if ((node.insertMenu !== undefined && !isValidMenu(node.insertMenu))
+      || (node.contextMenu !== undefined && !isValidMenu(node.contextMenu))) return undefined;
+    const capabilities: string[] = [UI_MARKDOWN_EDITOR_CAPABILITY];
+    if (node.insertMenu !== undefined || node.contextMenu !== undefined) {
+      capabilities.push(UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY);
+    }
+    return capabilities;
+  }
   if (isMediaNode(node)) return [UI_MEDIA_CAPABILITY];
+  if (isMenuNode(node)) {
+    return isValidMenu(node) ? [UI_MENU_CAPABILITY, UI_MENU_ANCHOR_CAPABILITY] : undefined;
+  }
   if (isSurfaceNode(node)) return [UI_SURFACE_CAPABILITY];
+  if (isTreeNode(node)) {
+    if (!isValidTree(node)) return undefined;
+    const capabilities: string[] = [UI_TREE_CAPABILITY];
+    const flat = flattenTreeItems(node.items);
+    if ((node.presentation ?? "drillDown") === "outline"
+      || flat.some((item) => (item.children?.length ?? 0) > 0)) {
+      capabilities.push(UI_TREE_HIERARCHY_CAPABILITY);
+    }
+    if (node.filter !== undefined) capabilities.push(UI_TREE_FILTER_CAPABILITY);
+    if (flat.some((item) => item.kind === "parent")) {
+      capabilities.push(UI_TREE_PARENT_CAPABILITY);
+    }
+    if (node.primaryAction !== undefined) capabilities.push(UI_BUTTON_CAPABILITY);
+    return capabilities;
+  }
   if (!isRenderablePageNode(node)) return undefined;
   const capabilities: string[] = [
     UI_PAGE_CAPABILITY,
@@ -523,6 +651,51 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
   return capabilities;
 }
 
+export function flattenTreeItems(items: readonly TreeItem[]): TreeItem[] {
+  return items.flatMap((item) => [item, ...flattenTreeItems(item.children ?? [])]);
+}
+
+function isValidMenu(menu: MenuSpec): boolean {
+  if (menu.items.length > 256) return false;
+  const ids = new Set(menu.items.map((item) => item.id));
+  if (ids.size !== menu.items.length) return false;
+  if (menu.selectedId !== undefined) {
+    const selected = menu.items.find((item) => item.id === menu.selectedId);
+    if (selected === undefined || selected.disabled === true) return false;
+  }
+  return true;
+}
+
+function isValidTree(node: TreeNode): boolean {
+  const ids = new Set<string>();
+  let count = 0;
+  let parents = 0;
+  const visit = (items: readonly TreeItem[], depth: number): boolean => {
+    if (depth > 32) return false;
+    for (const item of items) {
+      count += 1;
+      if (count > 100_000 || ids.has(item.id) || item.label.includes("\n")
+        || item.label.includes("\r")) return false;
+      ids.add(item.id);
+      const children = item.children ?? [];
+      if (item.kind === "parent") {
+        parents += 1;
+        if (depth !== 0 || children.length > 0 || item.expanded === true) return false;
+      } else if (item.kind === "file") {
+        if (children.length > 0 || item.expanded === true) return false;
+      } else if ((item.childState ?? "loaded") !== "loaded" && children.length > 0) {
+        return false;
+      }
+      if (!visit(children, depth + 1)) return false;
+    }
+    return true;
+  };
+  return visit(node.items, 0) && parents <= 1
+    && (node.selectedId === undefined || ids.has(node.selectedId))
+    && ((node.presentation ?? "drillDown") !== "outline"
+      || node.actions.setExpanded !== undefined);
+}
+
 /** Filesystem paths must be translated by the Host before entering a browser. */
 export function isBrowserSafeUiNode(node: UiNode): boolean {
   return !isMediaNode(node) || node.source.kind !== "path";
@@ -550,6 +723,13 @@ export type UiDeltaOperation =
   | { op: "markdownSetPlaceholder"; nodeId: string; placeholder: string }
   | { op: "markdownSetActions"; nodeId: string; actions: MarkdownEditorActions }
   | {
+    op: "markdownSetMenus";
+    nodeId: string;
+    insertMenu?: MenuSpec;
+    contextMenu?: MenuSpec;
+  }
+  | { op: "menuSetSelection"; nodeId: string; selectedId: string | null }
+  | {
     op: "mediaSetSource";
     nodeId: string;
     source: MediaSource;
@@ -561,7 +741,25 @@ export type UiDeltaOperation =
   | { op: "inputSetValue"; nodeId: string; value: string }
   | { op: "listInsertItem"; listId: string; index: number; item: ListItemSpec }
   | { op: "listSetSelection"; listId: string; selectedId: string | null }
-  | { op: "listRemoveItem"; listId: string; itemId: string };
+  | { op: "listRemoveItem"; listId: string; itemId: string }
+  | { op: "treeSetSelection"; nodeId: string; selectedId: string | null }
+  | { op: "treeSetFilter"; filterId: string; value: string }
+  | { op: "treeSetLocation"; nodeId: string; location: string }
+  | {
+    op: "treeSpliceChildren";
+    nodeId: string;
+    parentId?: string;
+    index: number;
+    deleteCount: number;
+    items: TreeItem[];
+  }
+  | {
+    op: "treeSetChildState";
+    nodeId: string;
+    itemId: string;
+    childState: TreeChildState;
+  }
+  | { op: "treeSetExpanded"; nodeId: string; itemId: string; expanded: boolean };
 
 export interface UiDelta {
   type: "delta";
@@ -982,6 +1180,90 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       body: { ...page.body, selectedId: operation.selectedId ?? undefined },
     };
   }
+  if (operation.op === "menuSetSelection") {
+    if (!isMenuNode(root) || root.id !== operation.nodeId) {
+      throw new Error("Delta targets an unavailable Menu node");
+    }
+    const selected = operation.selectedId === null
+      ? undefined
+      : root.items.find((item) => item.id === operation.selectedId);
+    if (operation.selectedId !== null && (selected === undefined || selected.disabled === true)) {
+      throw new Error("Delta selects an unavailable Menu item");
+    }
+    return { ...root, selectedId: operation.selectedId ?? undefined };
+  }
+  if (operation.op === "treeSetFilter") {
+    if (!isTreeNode(root) || root.filter?.id !== operation.filterId) {
+      throw new Error("Delta targets an unavailable Tree filter");
+    }
+    return { ...root, filter: { ...root.filter, value: operation.value } };
+  }
+  if (operation.op === "treeSetSelection"
+    || operation.op === "treeSetLocation"
+    || operation.op === "treeSpliceChildren"
+    || operation.op === "treeSetChildState"
+    || operation.op === "treeSetExpanded") {
+    if (!isTreeNode(root) || ("nodeId" in operation && root.id !== operation.nodeId)) {
+      throw new Error("Delta targets an unavailable Tree node");
+    }
+    switch (operation.op) {
+      case "treeSetSelection":
+        if (operation.selectedId !== null
+          && !flattenTreeItems(root.items).some((item) => item.id === operation.selectedId)) {
+          throw new Error("Delta selects an unavailable Tree item");
+        }
+        return { ...root, selectedId: operation.selectedId ?? undefined };
+      case "treeSetLocation":
+        return { ...root, location: operation.location };
+      case "treeSpliceChildren": {
+        let items: TreeItem[];
+        if (operation.parentId === undefined) {
+          if (operation.index < 0 || operation.deleteCount < 0
+            || operation.index > root.items.length
+            || operation.deleteCount > root.items.length - operation.index) {
+            throw new Error("Tree root splice is outside its collection");
+          }
+          items = root.items.slice();
+          items.splice(operation.index, operation.deleteCount, ...operation.items);
+        } else {
+          const result = updateTreeItem(root.items, operation.parentId, (parent) => {
+            if (parent.kind !== "directory") return undefined;
+            const children = (parent.children ?? []).slice();
+            if (operation.index < 0 || operation.deleteCount < 0
+              || operation.index > children.length
+              || operation.deleteCount > children.length - operation.index) return undefined;
+            children.splice(operation.index, operation.deleteCount, ...operation.items);
+            return { ...parent, children };
+          });
+          if (!result.found || result.invalid) {
+            throw new Error("Delta targets unavailable Tree children");
+          }
+          items = result.items;
+        }
+        const next = { ...root, items };
+        if (!isValidTree(next)) throw new Error("Tree splice produced an invalid hierarchy");
+        return next;
+      }
+      case "treeSetChildState": {
+        const result = updateTreeItem(root.items, operation.itemId, (item) => (
+          operation.childState === "loaded"
+            ? { ...item, childState: operation.childState }
+            : { ...item, childState: operation.childState, children: [] }
+        ));
+        if (!result.found) throw new Error("Delta targets an unavailable Tree item");
+        return { ...root, items: result.items };
+      }
+      case "treeSetExpanded": {
+        const result = updateTreeItem(root.items, operation.itemId, (item) => (
+          item.kind === "directory" ? { ...item, expanded: operation.expanded } : undefined
+        ));
+        if (!result.found || result.invalid) {
+          throw new Error("Delta targets an unavailable expandable Tree item");
+        }
+        return { ...root, items: result.items };
+      }
+    }
+  }
   if (root.id !== operation.nodeId || !isMarkdownEditorNode(root)) {
     throw new Error("Delta targets an unavailable Markdown node");
   }
@@ -1013,11 +1295,47 @@ function applyDeltaOperation(root: UiNode, operation: UiDeltaOperation): UiNode 
       return { ...root, placeholder: operation.placeholder };
     case "markdownSetActions":
       return { ...root, actions: operation.actions };
+    case "markdownSetMenus":
+      return {
+        ...root,
+        insertMenu: operation.insertMenu,
+        contextMenu: operation.contextMenu,
+      };
     default: {
       const unreachable: never = operation;
       throw new Error(`Unsupported delta operation ${String(unreachable)}`);
     }
   }
+}
+
+function updateTreeItem(
+  items: readonly TreeItem[],
+  id: string,
+  update: (item: TreeItem) => TreeItem | undefined,
+): { items: TreeItem[]; found: boolean; invalid: boolean } {
+  let found = false;
+  let invalid = false;
+  const next = items.map((item) => {
+    if (item.id === id) {
+      found = true;
+      const updated = update(item);
+      if (updated === undefined) {
+        invalid = true;
+        return item;
+      }
+      return updated;
+    }
+    const children = item.children ?? [];
+    if (children.length === 0) return item;
+    const nested = updateTreeItem(children, id, update);
+    if (nested.found) {
+      found = true;
+      invalid ||= nested.invalid;
+      return { ...item, children: nested.items };
+    }
+    return item;
+  });
+  return { items: next, found, invalid };
 }
 
 function requireRenderablePage(root: UiNode): PageNode & { header?: InputSpec; body: ListSpec } {
@@ -1135,12 +1453,20 @@ function validateNode(value: unknown, path: string): void {
     validateMediaNode(root, path);
     return;
   }
+  if (root.type === "menu") {
+    validateMenuSpec(root, path);
+    return;
+  }
   if (root.type === "page") {
     validatePageNode(root, path);
     return;
   }
   if (root.type === "surface") {
     validateSurfaceNode(root, path);
+    return;
+  }
+  if (root.type === "tree") {
+    validateTreeNode(root, path);
     return;
   }
   if (root.type !== "markdownEditor") {
@@ -1162,6 +1488,152 @@ function validateNode(value: unknown, path: string): void {
     if (root[field] !== undefined) requireString(root[field], `${path}.${field}`, true);
   }
   if (root.actions !== undefined) validateMarkdownActions(root.actions, `${path}.actions`);
+  if (root.insertMenu !== undefined) validateMenuSpec(root.insertMenu, `${path}.insertMenu`);
+  if (root.contextMenu !== undefined) validateMenuSpec(root.contextMenu, `${path}.contextMenu`);
+}
+
+function validateMenuSpec(value: unknown, path: string): void {
+  const menu = record(value, path);
+  requireString(menu.label, `${path}.label`, true);
+  requireSingleLine(menu.label, `${path}.label`);
+  if (menu.presentation !== undefined
+    && !["popup", "context"].includes(String(menu.presentation))) {
+    throw new Error(`${path}.presentation is unsupported`);
+  }
+  if (menu.anchor !== undefined && !["control", "caret", "pointer"].includes(String(menu.anchor))) {
+    throw new Error(`${path}.anchor is unsupported`);
+  }
+  if (!Array.isArray(menu.items) || menu.items.length > 256) {
+    throw new Error(`${path}.items must contain at most 256 entries`);
+  }
+  const ids = new Set<string>();
+  for (const [index, value] of menu.items.entries()) {
+    const itemPath = `${path}.items[${index}]`;
+    const item = record(value, itemPath);
+    requireIdentifier(item.id, `${itemPath}.id`);
+    if (ids.has(item.id as string)) throw new Error(`${itemPath}.id is duplicated`);
+    ids.add(item.id as string);
+    requireString(item.label, `${itemPath}.label`, true);
+    requireSingleLine(item.label, `${itemPath}.label`);
+    requireIdentifier(item.action, `${itemPath}.action`);
+    if (item.hint !== undefined) {
+      requireString(item.hint, `${itemPath}.hint`, true);
+      requireSingleLine(item.hint, `${itemPath}.hint`);
+    }
+    if (item.disabled !== undefined && typeof item.disabled !== "boolean") {
+      throw new Error(`${itemPath}.disabled must be boolean`);
+    }
+    if (item.role !== undefined && !["default", "danger"].includes(String(item.role))) {
+      throw new Error(`${itemPath}.role is unsupported`);
+    }
+  }
+  if (menu.selectedId !== undefined) {
+    requireIdentifier(menu.selectedId, `${path}.selectedId`);
+    const selected = menu.items
+      .map((item) => record(item, `${path}.items`))
+      .find((item) => item.id === menu.selectedId);
+    if (selected === undefined || selected.disabled === true) {
+      throw new Error(`${path}.selectedId must identify an enabled item`);
+    }
+  }
+  if (menu.dismiss !== undefined) requireIdentifier(menu.dismiss, `${path}.dismiss`);
+}
+
+function validateTreeNode(root: Record<string, unknown>, path: string): void {
+  requireString(root.label, `${path}.label`, true);
+  requireString(root.location, `${path}.location`, true);
+  if (root.presentation !== undefined
+    && !["drillDown", "outline"].includes(String(root.presentation))) {
+    throw new Error(`${path}.presentation is unsupported`);
+  }
+  const actions = record(root.actions, `${path}.actions`);
+  for (const field of ["select", "open", "parent"] as const) {
+    requireIdentifier(actions[field], `${path}.actions.${field}`);
+  }
+  if (actions.setExpanded !== undefined) {
+    requireIdentifier(actions.setExpanded, `${path}.actions.setExpanded`);
+  }
+  if (root.presentation === "outline" && actions.setExpanded === undefined) {
+    throw new Error(`${path}.actions.setExpanded is required for outline Trees`);
+  }
+  if (root.filter !== undefined) {
+    const filter = record(root.filter, `${path}.filter`);
+    requireIdentifier(filter.id, `${path}.filter.id`);
+    requireString(filter.label, `${path}.filter.label`, true);
+    if (filter.value !== undefined) requireString(filter.value, `${path}.filter.value`, true);
+    if (filter.placeholder !== undefined) {
+      requireString(filter.placeholder, `${path}.filter.placeholder`, true);
+    }
+    requireIdentifier(filter.setValue, `${path}.filter.setValue`);
+  }
+  if (!Array.isArray(root.items) || root.items.length > 100_000) {
+    throw new Error(`${path}.items must contain at most 100000 entries`);
+  }
+  const ids = new Set<string>();
+  let count = 0;
+  let parentCount = 0;
+  const visit = (items: unknown[], depth: number, itemPath: string): void => {
+    if (depth > 32) throw new Error(`${itemPath} exceeds Tree depth 32`);
+    for (const [index, value] of items.entries()) {
+      count += 1;
+      if (count > 100_000) throw new Error(`${path}.items exceeds 100000 entries`);
+      const currentPath = `${itemPath}[${index}]`;
+      const item = record(value, currentPath);
+      requireIdentifier(item.id, `${currentPath}.id`);
+      if (ids.has(item.id as string)) throw new Error(`${currentPath}.id is duplicated`);
+      ids.add(item.id as string);
+      requireString(item.label, `${currentPath}.label`, true);
+      requireSingleLine(item.label, `${currentPath}.label`);
+      if (!["parent", "directory", "file"].includes(String(item.kind))) {
+        throw new Error(`${currentPath}.kind is unsupported`);
+      }
+      for (const field of ["hidden", "symlink", "expanded"] as const) {
+        if (item[field] !== undefined && typeof item[field] !== "boolean") {
+          throw new Error(`${currentPath}.${field} must be a boolean`);
+        }
+      }
+      if (item.childState !== undefined
+        && !["loaded", "unloaded", "loading"].includes(String(item.childState))) {
+        throw new Error(`${currentPath}.childState is unsupported`);
+      }
+      const children = item.children ?? [];
+      if (!Array.isArray(children)) throw new Error(`${currentPath}.children must be an array`);
+      if (item.kind === "parent") {
+        parentCount += 1;
+        if (depth !== 0 || children.length > 0 || item.expanded === true) {
+          throw new Error(`${currentPath} parent must be a root leaf`);
+        }
+      } else if (item.kind === "file") {
+        if (children.length > 0 || item.expanded === true) {
+          throw new Error(`${currentPath} file cannot own or expand children`);
+        }
+      } else if ((item.childState ?? "loaded") !== "loaded" && children.length > 0) {
+        throw new Error(`${currentPath} unloaded/loading directory cannot contain children`);
+      }
+      visit(children, depth + 1, `${currentPath}.children`);
+    }
+  };
+  visit(root.items, 0, `${path}.items`);
+  if (parentCount > 1) throw new Error(`${path}.items accepts at most one parent entry`);
+  if (root.selectedId !== undefined) {
+    requireIdentifier(root.selectedId, `${path}.selectedId`);
+    if (!ids.has(root.selectedId as string)) {
+      throw new Error(`${path}.selectedId must identify one Tree entry`);
+    }
+  }
+  if (root.emptyMessage !== undefined) {
+    requireString(root.emptyMessage, `${path}.emptyMessage`, true);
+  }
+  if (root.primaryAction !== undefined) {
+    const action = record(root.primaryAction, `${path}.primaryAction`);
+    requireIdentifier(action.id, `${path}.primaryAction.id`);
+    requireString(action.label, `${path}.primaryAction.label`, true);
+    requireIdentifier(action.action, `${path}.primaryAction.action`);
+    if (action.role !== undefined
+      && !["default", "primary", "destructive"].includes(String(action.role))) {
+      throw new Error(`${path}.primaryAction.role is unsupported`);
+    }
+  }
 }
 
 function validateCanvasPageNode(root: Record<string, unknown>, path: string): void {
@@ -1522,6 +1994,7 @@ function validateMarkdownActions(value: unknown, path: string): void {
     "undo",
     "redo",
     "setPresentation",
+    "openMenu",
   ]) {
     if (actions[field] !== undefined) requireIdentifier(actions[field], `${path}.${field}`);
   }
@@ -1581,6 +2054,21 @@ function validateDeltaOperation(value: unknown, path: string): void {
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       validateMarkdownActions(operation.actions, `${path}.actions`);
       return;
+    case "markdownSetMenus":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (operation.insertMenu !== undefined) {
+        validateMenuSpec(operation.insertMenu, `${path}.insertMenu`);
+      }
+      if (operation.contextMenu !== undefined) {
+        validateMenuSpec(operation.contextMenu, `${path}.contextMenu`);
+      }
+      return;
+    case "menuSetSelection":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (operation.selectedId !== null) {
+        requireIdentifier(operation.selectedId, `${path}.selectedId`);
+      }
+      return;
     case "mediaSetSource":
       requireIdentifier(operation.nodeId, `${path}.nodeId`);
       validateMediaSource(operation.source, `${path}.source`);
@@ -1612,6 +2100,54 @@ function validateDeltaOperation(value: unknown, path: string): void {
       requireIdentifier(operation.listId, `${path}.listId`);
       if (operation.selectedId !== null) {
         requireIdentifier(operation.selectedId, `${path}.selectedId`);
+      }
+      return;
+    case "treeSetSelection":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (operation.selectedId !== null) {
+        requireIdentifier(operation.selectedId, `${path}.selectedId`);
+      }
+      return;
+    case "treeSetFilter":
+      requireIdentifier(operation.filterId, `${path}.filterId`);
+      requireString(operation.value, `${path}.value`, true);
+      return;
+    case "treeSetLocation":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      requireString(operation.location, `${path}.location`, true);
+      return;
+    case "treeSpliceChildren":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      if (operation.parentId !== undefined) {
+        requireIdentifier(operation.parentId, `${path}.parentId`);
+      }
+      requireSafeInteger(operation.index, `${path}.index`);
+      requireSafeInteger(operation.deleteCount, `${path}.deleteCount`);
+      if (!Array.isArray(operation.items)) throw new Error(`${path}.items must be an array`);
+      for (const [index, item] of operation.items.entries()) {
+        const fixture = {
+          id: "validation-tree",
+          type: "tree",
+          label: "Tree",
+          location: ".",
+          items: [item],
+          actions: { select: "select", open: "open", parent: "parent" },
+        };
+        validateTreeNode(fixture, `${path}.items[${index}]`);
+      }
+      return;
+    case "treeSetChildState":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      requireIdentifier(operation.itemId, `${path}.itemId`);
+      if (!["loaded", "unloaded", "loading"].includes(String(operation.childState))) {
+        throw new Error(`${path}.childState is unsupported`);
+      }
+      return;
+    case "treeSetExpanded":
+      requireIdentifier(operation.nodeId, `${path}.nodeId`);
+      requireIdentifier(operation.itemId, `${path}.itemId`);
+      if (typeof operation.expanded !== "boolean") {
+        throw new Error(`${path}.expanded must be a boolean`);
       }
       return;
     default:

@@ -14,7 +14,7 @@ ui-bridge = ["dep:hmac", "dep:libc", "dep:sha2"]
 
 [dependencies]
 base64 = "0.22"
-crossterm = { version = "0.29", default-features = false }
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
 hmac = { version = "0.12", optional = true }
 image = { version = "0.25.6", default-features = false, features = ["gif", "jpeg", "png", "webp"], optional = true }
 libc = { version = "0.2", optional = true }

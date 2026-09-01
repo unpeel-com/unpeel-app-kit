@@ -213,7 +213,7 @@ private struct TerminalCard: View {
             return surface.background
         case let .canvasPage(page):
             return page.surface.surface.background
-        case .markdownEditor, .media, .page, .unsupported:
+        case .markdownEditor, .media, .menu, .page, .tree, .unsupported:
             return .transparent
         }
     }
@@ -338,6 +338,10 @@ private struct NativeComponent: View {
                     .padding(30)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .menu:
+            SemanticMenuView(snapshot: snapshot, onAction: onAction)
+        case .tree:
+            TreeView(snapshot: snapshot, onAction: onAction)
         case let .surface(surface):
             if let surfaceBroker {
                 SurfaceComponentView(snapshot: snapshot) { _ in

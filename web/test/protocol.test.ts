@@ -8,9 +8,11 @@ import {
   isMarkdownEditorNode,
   isCanvasPageNode,
   isMediaNode,
+  isMenuNode,
   isPageNode,
   isRenderablePageNode,
   isSurfaceNode,
+  isTreeNode,
   listItemPrimaryRole,
   listNavigationDecision,
   negotiateUiProtocolVersion,
@@ -35,7 +37,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(23);
+    expect(messages).toHaveLength(29);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -186,6 +188,52 @@ describe("shared protocol", () => {
       value: false,
     });
     expect(updatedRoles.root.body.selectedId).toBe("row-destructive");
+
+    const treeSnapshot = messages[23] as UiSnapshot;
+    if (!isTreeNode(treeSnapshot.root)) throw new Error("expected Tree fixture");
+    expect(treeSnapshot.root.location).toBe("Writing");
+    expect(treeSnapshot.root.selectedId).toBe("today");
+    expect(uiNodeCapabilities(treeSnapshot.root)).toEqual([
+      "tree",
+      "treeHierarchy",
+      "treeFilter",
+      "treeParent",
+      "button",
+    ]);
+    expect(treeSnapshot.root.primaryAction?.action).toBe("create-note");
+    const updatedTree = applyUiDelta(treeSnapshot, messages[24] as UiDelta);
+    if (!isTreeNode(updatedTree.root)) throw new Error("expected updated Tree");
+    expect(updatedTree.root.location).toBe("Writing/Projects");
+    expect(updatedTree.root.filter?.value).toBe("draft");
+    expect(updatedTree.root.selectedId).toBe("draft");
+    expect(updatedTree.root.items[1]?.children?.[0]?.label).toBe("Draft.md");
+
+    const menuSnapshot = messages[25] as UiSnapshot;
+    if (!isMenuNode(menuSnapshot.root)) throw new Error("expected Menu fixture");
+    expect(uiNodeCapabilities(menuSnapshot.root)).toEqual(["menu", "menuAnchor"]);
+    expect(menuSnapshot.root.items[1]?.disabled).toBe(true);
+    expect(menuSnapshot.root.items[2]?.role).toBe("danger");
+    const updatedMenu = applyUiDelta(menuSnapshot, messages[26] as UiDelta);
+    if (!isMenuNode(updatedMenu.root)) throw new Error("expected updated Menu");
+    expect(updatedMenu.root.selectedId).toBe("delete");
+
+    const markdownMenuSnapshot = messages[27] as UiSnapshot;
+    if (!isMarkdownEditorNode(markdownMenuSnapshot.root)) {
+      throw new Error("expected Markdown with semantic menus");
+    }
+    expect(markdownMenuSnapshot.root.insertMenu?.anchor).toBe("caret");
+    expect(uiNodeCapabilities(markdownMenuSnapshot.root)).toEqual([
+      "markdownEditor",
+      "menu",
+      "menuAnchor",
+    ]);
+    const markdownWithoutInsert = applyUiDelta(
+      markdownMenuSnapshot,
+      messages[28] as UiDelta,
+    );
+    if (!isMarkdownEditorNode(markdownWithoutInsert.root)) throw new Error("expected Markdown");
+    expect(markdownWithoutInsert.root.insertMenu).toBeUndefined();
+    expect(markdownWithoutInsert.root.contextMenu).toBeDefined();
 
     const surfaceSnapshot = messages[16] as UiSnapshot;
     if (!isSurfaceNode(surfaceSnapshot.root)) throw new Error("expected planet Surface fixture");

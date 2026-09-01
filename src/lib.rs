@@ -36,9 +36,11 @@ mod path;
 mod process_security;
 mod scrollbar;
 mod selectable;
+mod semantic_menu;
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 mod surface;
 mod theme;
+mod tree;
 #[cfg(feature = "ui-bridge")]
 mod ui;
 #[cfg(feature = "ui-bridge")]
@@ -106,6 +108,10 @@ pub use navigator::Navigator;
 pub use path::display_path_from_root;
 pub use scrollbar::VerticalScrollbar;
 pub use selectable::SelectableRow;
+pub use semantic_menu::{
+    MENU_ANCHOR_CAPABILITY, MENU_COMPONENT_CAPABILITY, SemanticMenu, SemanticMenuAnchor,
+    SemanticMenuItem, SemanticMenuItemRole, SemanticMenuPresentation, SemanticMenuValidationError,
+};
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 pub use surface::{
     CANVAS_PAGE_COMPONENT_CAPABILITY, CanvasControl, CanvasPage, CanvasPageLayout, CanvasPageTheme,
@@ -119,19 +125,24 @@ pub use theme::{
     APP_ACCENT_ENV, ColorScheme, KitTheme, SELECTABLE_LEFT_PADDING, ThemeMonitor, hosted_accent,
     hosted_accent_for_scheme,
 };
+pub use tree::{
+    TREE_COMPONENT_CAPABILITY, TREE_FILTER_CAPABILITY, TREE_HIERARCHY_CAPABILITY,
+    TREE_PARENT_CAPABILITY, Tree, TreeActions, TreeChildState, TreeFilter, TreeItem, TreeItemKind,
+    TreePresentation, TreeState, TreeTheme, TreeValidationError, TreeWidget,
+};
 #[cfg(feature = "ui-bridge")]
 pub use ui::{
     ActionId, AppInstanceId, AppMetadata, ClientId, EventId, MAX_SAFE_UI_INTEGER,
-    MAX_UI_FRAME_BYTES, MarkdownEditorActions, MarkdownEditorSpec, MarkdownPresentation, NodeId,
-    ParticipantId, RendererId, TextEdit, TextPosition, TextRange, TextSelection,
-    UI_DELTA_CAPABILITY, UI_MARKDOWN_EDITOR_CAPABILITY, UI_PROTOCOL_MAX_VERSION,
+    MAX_UI_FRAME_BYTES, MarkdownEditorActions, MarkdownEditorSpec, MarkdownMenuTrigger,
+    MarkdownPresentation, NodeId, ParticipantId, RendererId, TextEdit, TextPosition, TextRange,
+    TextSelection, UI_DELTA_CAPABILITY, UI_MARKDOWN_EDITOR_CAPABILITY, UI_PROTOCOL_MAX_VERSION,
     UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UI_PROTOCOL_VERSION, UI_SOCKET_ENV, UI_TOKEN_ENV,
     UiAck, UiAckStatus, UiAction, UiAttach, UiAttached, UiComponent, UiDelta, UiDeltaOperation,
     UiErrorMessage, UiEvent, UiEventKind, UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode,
     UiParticipant, UiParticipantKind, UiPresence, UiPresenceMember, UiProtocolError,
     UiRendererMetadata, UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId,
     decode_ui_frame, encode_ui_frame, markdown_delta_operations, negotiate_ui_protocol_version,
-    read_ui_message, write_ui_message,
+    read_ui_message, tree_delta_operations, write_ui_message,
 };
 #[cfg(feature = "ui-bridge")]
 pub use ui_auth::{

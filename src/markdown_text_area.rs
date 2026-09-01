@@ -14,9 +14,9 @@ use unicode_width::UnicodeWidthChar;
 use crate::VerticalScrollbar;
 #[cfg(feature = "ui-bridge")]
 use crate::{
-    ActionId, MarkdownEditorActions, MarkdownEditorSpec, MarkdownPresentation, NodeId, TextEdit,
-    TextPosition, TextSelection, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION,
-    UI_PROTOCOL_NAME, UiEvent, UiEventKind, UiEventValue, UiNode,
+    ActionId, MarkdownEditorActions, MarkdownEditorSpec, MarkdownMenuTrigger, MarkdownPresentation,
+    NodeId, TextEdit, TextPosition, TextSelection, UI_PROTOCOL_MAX_VERSION,
+    UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent, UiEventKind, UiEventValue, UiNode,
 };
 
 const DEFAULT_LEFT_PADDING: u16 = 1;
@@ -123,6 +123,14 @@ impl MarkdownEditorConfig {
         self.actions = actions;
         self
     }
+
+    /// Enables an App-owned slash/palette Menu entry point. It is opt-in so a
+    /// plain Markdown editor does not advertise behavior its reducer lacks.
+    #[must_use]
+    pub fn open_menu_action(mut self, action: impl Into<ActionId>) -> Self {
+        self.actions.open_menu = Some(action.into());
+        self
+    }
 }
 
 /// Result of applying one native/web Markdown action to the Ratatui component.
@@ -135,6 +143,7 @@ pub enum MarkdownEditorEvent {
     Redo { changed: bool },
     SaveRequested,
     PresentationRequested(MarkdownPresentation),
+    MenuRequested(MarkdownMenuTrigger),
 }
 
 /// A matching Markdown action that cannot safely be applied.
@@ -378,6 +387,23 @@ impl<'a> MarkdownTextArea<'a> {
             return Ok(Some(MarkdownEditorEvent::PresentationRequested(
                 presentation,
             )));
+        }
+        if action_matches(config.actions.open_menu.as_ref(), action) {
+            if config.read_only {
+                return Err(MarkdownEditorEventError::ReadOnly);
+            }
+            require_kind(event, UiEventKind::Command)?;
+            let UiEventValue::Text(trigger) = &event.action.value else {
+                return Err(MarkdownEditorEventError::InvalidEvent(
+                    "open-menu requires a text value".to_owned(),
+                ));
+            };
+            let trigger = trigger.parse().map_err(|_| {
+                MarkdownEditorEventError::InvalidEvent(format!(
+                    "unknown Markdown menu trigger {trigger:?}"
+                ))
+            })?;
+            return Ok(Some(MarkdownEditorEvent::MenuRequested(trigger)));
         }
 
         Err(MarkdownEditorEventError::UnsupportedAction(
@@ -1342,7 +1368,8 @@ mod tests {
     #[cfg(feature = "ui-bridge")]
     fn semantic_commands_return_app_owned_intent() {
         let mut editor = MarkdownTextArea::new(["# Hello"], MarkdownTextAreaStyle::default());
-        let config = MarkdownEditorConfig::new("markdown-editor");
+        let config = MarkdownEditorConfig::new("markdown-editor")
+            .open_menu_action(MarkdownEditorActions::OPEN_MENU);
         let save = ui_event(
             1,
             crate::UiAction::command("markdown-editor", MarkdownEditorActions::SAVE),
@@ -1365,6 +1392,22 @@ mod tests {
             editor.handle_ui_event(1, &config, &presentation).unwrap(),
             Some(MarkdownEditorEvent::PresentationRequested(
                 MarkdownPresentation::Preview
+            ))
+        );
+
+        let palette = ui_event(
+            1,
+            crate::UiAction::new(
+                "markdown-editor",
+                MarkdownEditorActions::OPEN_MENU,
+                UiEventKind::Command,
+                UiEventValue::Text(MarkdownMenuTrigger::Palette.as_str().to_owned()),
+            ),
+        );
+        assert_eq!(
+            editor.handle_ui_event(1, &config, &palette).unwrap(),
+            Some(MarkdownEditorEvent::MenuRequested(
+                MarkdownMenuTrigger::Palette
             ))
         );
     }

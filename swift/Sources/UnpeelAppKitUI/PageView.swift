@@ -25,7 +25,7 @@ public struct PageView: View {
                     removal: .move(edge: .leading).combined(with: .opacity)
                 ))
                 .animation(.snappy, value: snapshot.root.id)
-        case .canvasPage, .markdownEditor, .media, .surface, .unsupported:
+        case .canvasPage, .markdownEditor, .media, .menu, .surface, .tree, .unsupported:
             EmptyView()
         }
     }

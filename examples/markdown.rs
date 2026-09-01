@@ -297,6 +297,9 @@ fn drain_bridge(app: &mut MarkdownApp, bridge: &mut UiBridge) -> Result<(), Box<
                         app.save_without_revision()?;
                         UiEventOutcome::Applied
                     }
+                    Ok(Some(MarkdownEditorEvent::MenuRequested(_))) => UiEventOutcome::Rejected(
+                        "The basic Markdown example does not declare an App-owned Menu".to_owned(),
+                    ),
                     Ok(Some(MarkdownEditorEvent::SelectionChanged)) => {
                         publish_projection_change(app, bridge, previous, false)?;
                         UiEventOutcome::Applied
