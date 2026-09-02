@@ -95,8 +95,8 @@ parameters or prerequisites for terminal input and rendering.
 ## Optional hosted presentation layer
 
 When Unpeel hosts the App, it may opt into a component-first semantic model—
-`MarkdownEditor`, static `Media`, Page, List, ListItem, Toggle, Input,
-Sparkline, Button, CanvasPage, and other
+`MarkdownEditor`, `TextBox`, static `Media`, Page, List, ListItem, Toggle,
+Input, Sparkline, Button, CanvasPage, and other
 deliberate primitives—not a serialization of terminal cells or a
 portable clone of every Ratatui widget. The Rust terminal process remains the
 App and owns the model, reducer, validation, persistence, and commands.
@@ -1167,6 +1167,42 @@ for directory navigation clears a disappearing selection before splicing the
 new child collection, keeping every intermediate revision valid in Rust,
 Swift, and web. The reproducible command and captured report live in
 [`cross-platform-app-audit.md`](cross-platform-app-audit.md).
+
+## TextBox v1
+
+`TextBox` is the closed multi-line text input root. Its default is a plain
+rounded bordered field; the same node becomes a chat-style prompt bar when the
+App sets a prompt glyph, border titles, a busy status row, and key hints. The
+Ratatui implementation is `unpeel_app_kit::TextBox`; `TextBox::spec()` and
+`TextBox::from_spec()` convert between the terminal component and the wire
+form, and `TextBox::ui_node(&TextBoxConfig)` publishes it.
+
+The snapshot contains:
+
+- `text` (default empty) and `placeholder`;
+- optional `prompt` shown before the first row, e.g. `❯ `;
+- `titles`: at most one dim title per corner (`topLeft`, `topRight`,
+  `bottomLeft`, `bottomRight`) embedded in the border line;
+- `hints`: ordered `key`/`label` pairs rendered as a footer;
+- optional `busy` with `label`, `elapsedMs`, and right-aligned `rightMeta`,
+  shown as a status row above the box with a renderer-local spinner;
+- `submitMode`: `enter` (Enter submits; Shift/Alt+Enter insert a newline) or
+  `never` (Enter always inserts a newline and the App decides when to submit);
+- `minRows`/`maxRows` growth bounds (defaults 3 and 10; `1`/`1` is a bordered
+  single-line field);
+- `actions.setText` and `actions.submit`.
+
+Renderers send two events. `setText` is a `change` event carrying the full
+replacement text as a `text` value; SwiftUI and web send it as the user edits
+and on blur respectively, and the terminal box adopts it through
+`TextBox::handle_ui_event`. `submit` is a `submit` event carrying the text; the
+Rust side clears its box and returns `TextBoxUiEvent::Submitted(text)` so the
+App owns what the submission means. Cursor, selection, scrolling, and the
+spinner frame stay renderer-local. State changes travel as `replaceRoot`
+deltas; the fixture stream carries a prompt snapshot, a `set-text` event, the
+busy `replaceRoot`, and a `submit` event decoded by all three languages.
+
+Capability: `textBox`. Renderers without it fall back to the terminal pane.
 
 ## Media v1
 

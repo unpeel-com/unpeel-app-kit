@@ -18,7 +18,7 @@ public struct TreeView: View {
         switch snapshot.root.component {
         case let .tree(tree):
             TreeContent(nodeID: snapshot.root.id, tree: tree, onAction: onAction)
-        case .canvasPage, .markdownEditor, .media, .menu, .page, .surface, .unsupported:
+        case .canvasPage, .markdownEditor, .media, .menu, .page, .surface, .textBox, .unsupported:
             EmptyView()
         }
     }

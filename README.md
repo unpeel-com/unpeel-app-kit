@@ -322,8 +322,8 @@ Kit. Its standalone invariant is strict: every App must remain fully
 functional through its TUI, and semantic rendering is only an optional
 presentation path over that fallback.
 
-`MarkdownEditor`, static `Media`, the Todo-driven Page family, Tree, Menu,
-Sparkline, BarChart, LineChart, and Gauge are complete vertical slices. Media travels as a local path, a bounded 256 KiB
+`MarkdownEditor`, `TextBox`, static `Media`, the Todo-driven Page family, Tree,
+Menu, Sparkline, BarChart, LineChart, and Gauge are complete vertical slices. Media travels as a local path, a bounded 256 KiB
 inline image, or a content-addressed blob reference—never as an unbounded JSON
 payload. `Tabs` and later richer components such as `DataGrid` can join the
 same closed, versioned vocabulary. Containment is slot-based:
@@ -717,6 +717,23 @@ Enter always inserts a newline and the App calls `submit()` itself. The drawn
 block cursor comes from `TextBoxTheme::cursor`; Apps preferring the native
 cursor can clear that style and apply `cursor_position()` to the frame.
 `cargo run --example text_box` shows both configurations side by side.
+
+With the `ui-bridge` feature the same box is also a closed `textBox` root
+component with SwiftUI and web interpretations. `TextBox::ui_node` publishes
+it and `TextBox::handle_ui_event` applies the renderer's `set-text` and
+`submit` events:
+
+```rust
+use unpeel_app_kit::{TextBox, TextBoxConfig, TextBoxUiEvent};
+
+let config = TextBoxConfig::new("chat-prompt");
+let node = prompt.ui_node(&config);
+if let Ok(Some(TextBoxUiEvent::Submitted(text))) =
+    prompt.handle_ui_event(revision, &config, &event)
+{
+    send(text);
+}
+```
 
 ## Popup menu
 

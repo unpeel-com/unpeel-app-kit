@@ -17,7 +17,7 @@ public struct SemanticMenuView: View {
         case let .menu(menu):
             SemanticMenuContent(ownerID: snapshot.root.id, menu: menu, onAction: onAction)
                 .padding(8)
-        case .canvasPage, .markdownEditor, .media, .page, .surface, .tree, .unsupported:
+        case .canvasPage, .markdownEditor, .media, .page, .surface, .textBox, .tree, .unsupported:
             EmptyView()
         }
     }

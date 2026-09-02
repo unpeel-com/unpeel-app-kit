@@ -855,6 +855,7 @@ pub enum UiComponent {
     Menu(SemanticMenu),
     Page(Page),
     Surface(SurfaceSpec),
+    TextBox(crate::TextBoxSpec),
     Tree(Tree),
 }
 
@@ -869,6 +870,7 @@ impl UiComponent {
             Self::Menu(_) => "menu",
             Self::Page(_) => "page",
             Self::Surface(_) => "surface",
+            Self::TextBox(_) => "textBox",
             Self::Tree(_) => "tree",
         }
     }
@@ -883,6 +885,7 @@ impl UiComponent {
             Self::Menu(_) => crate::MENU_COMPONENT_CAPABILITY,
             Self::Page(_) => crate::PAGE_COMPONENT_CAPABILITY,
             Self::Surface(_) => crate::SURFACE_COMPONENT_CAPABILITY,
+            Self::TextBox(_) => crate::TEXT_BOX_COMPONENT_CAPABILITY,
             Self::Tree(_) => crate::TREE_COMPONENT_CAPABILITY,
         }
     }
@@ -912,6 +915,7 @@ impl UiComponent {
             Self::Menu(menu) => menu.required_capabilities().to_vec(),
             Self::Page(page) => page.required_capabilities(),
             Self::Surface(_) => vec![crate::SURFACE_COMPONENT_CAPABILITY],
+            Self::TextBox(_) => vec![crate::TEXT_BOX_COMPONENT_CAPABILITY],
             Self::Tree(tree) => tree.required_capabilities(),
         }
     }
@@ -939,6 +943,14 @@ impl UiNode {
         Self {
             id: id.into(),
             element: UiComponent::MarkdownEditor(editor),
+        }
+    }
+
+    #[must_use]
+    pub fn text_box(id: impl Into<NodeId>, text_box: crate::TextBoxSpec) -> Self {
+        Self {
+            id: id.into(),
+            element: UiComponent::TextBox(text_box),
         }
     }
 
@@ -1001,6 +1013,9 @@ impl UiNode {
             UiComponent::Surface(surface) => surface.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("surface", "root", 1), error.message)
             }),
+            UiComponent::TextBox(text_box) => text_box
+                .validate("root")
+                .map_err(|error| UiValidationError::new(error.path, error.message)),
             UiComponent::Tree(tree) => tree.validate().map_err(|error| {
                 UiValidationError::new(error.path.replacen("tree", "root", 1), error.message)
             }),
@@ -1029,7 +1044,8 @@ impl UiNode {
             UiComponent::CanvasPage(_)
             | UiComponent::Media(_)
             | UiComponent::Menu(_)
-            | UiComponent::Surface(_) => None,
+            | UiComponent::Surface(_)
+            | UiComponent::TextBox(_) => None,
         }
     }
 
@@ -2467,6 +2483,7 @@ impl UiNode {
             | UiComponent::Menu(_)
             | UiComponent::Page(_)
             | UiComponent::Surface(_)
+            | UiComponent::TextBox(_)
             | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires a Markdown editor",
@@ -2494,7 +2511,8 @@ impl UiNode {
             UiComponent::CanvasPage(_)
             | UiComponent::Media(_)
             | UiComponent::Menu(_)
-            | UiComponent::Surface(_) => {
+            | UiComponent::Surface(_)
+            | UiComponent::TextBox(_) => {
                 return Err(UiValidationError::new(
                     format!("delta.operations[{operation_index}].nodeId"),
                     "operation requires a root with a FooterActions slot",
@@ -2522,6 +2540,7 @@ impl UiNode {
             | UiComponent::Menu(_)
             | UiComponent::Page(_)
             | UiComponent::Surface(_)
+            | UiComponent::TextBox(_)
             | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires Media",
@@ -2545,6 +2564,7 @@ impl UiNode {
             | UiComponent::Menu(_)
             | UiComponent::Page(_)
             | UiComponent::Surface(_)
+            | UiComponent::TextBox(_)
             | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 format!("Surface node {expected_id:?} is not present"),
@@ -2560,6 +2580,7 @@ impl UiNode {
             | UiComponent::Media(_)
             | UiComponent::Menu(_)
             | UiComponent::Surface(_)
+            | UiComponent::TextBox(_)
             | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}]"),
                 "operation requires Page",
@@ -2599,6 +2620,7 @@ impl UiNode {
             | UiComponent::Media(_)
             | UiComponent::Page(_)
             | UiComponent::Surface(_)
+            | UiComponent::TextBox(_)
             | UiComponent::Tree(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}].nodeId"),
                 "operation requires Menu",
@@ -2617,7 +2639,8 @@ impl UiNode {
             | UiComponent::Media(_)
             | UiComponent::Menu(_)
             | UiComponent::Page(_)
-            | UiComponent::Surface(_) => Err(UiValidationError::new(
+            | UiComponent::Surface(_)
+            | UiComponent::TextBox(_) => Err(UiValidationError::new(
                 format!("delta.operations[{operation_index}]"),
                 "operation requires Tree",
             )),

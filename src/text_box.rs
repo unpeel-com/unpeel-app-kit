@@ -5,6 +5,8 @@
 //! chat-style prompt bar: a prompt glyph, border titles, a busy status row
 //! above the box, and a key-hint footer below it.
 
+#[cfg(feature = "ui-bridge")]
+use std::fmt;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,6 +15,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Widget};
+use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthChar;
 
 use crate::input::{
@@ -20,6 +23,15 @@ use crate::input::{
     take_width, word_bounds,
 };
 use crate::{ColorScheme, DoubleClickTracker, InputFieldTheme, KitTheme};
+#[cfg(feature = "ui-bridge")]
+use crate::{
+    NodeId, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent,
+    UiEventKind, UiEventValue, UiNode,
+};
+
+/// Renderer capability advertised for the closed `textBox` root component.
+pub const TEXT_BOX_COMPONENT_CAPABILITY: &str = "textBox";
+const DEFAULT_MAX_TEXT_BYTES: usize = 1024 * 1024;
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DEFAULT_MIN_ROWS: u16 = 3;
@@ -92,7 +104,7 @@ impl Default for TextBoxTheme {
 }
 
 /// One `Key:label` entry in the footer hint row.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyHint {
     pub key: String,
     pub label: String,
@@ -115,7 +127,8 @@ impl<K: Into<String>, L: Into<String>> From<(K, L)> for KeyHint {
 }
 
 /// Where a border title is embedded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum TitlePosition {
     TopLeft,
     TopRight,
@@ -124,7 +137,8 @@ pub enum TitlePosition {
 }
 
 /// What Enter does. Shift+Enter and Alt+Enter always insert a newline.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SubmitMode {
     /// Enter submits the text; Shift+Enter or Alt+Enter inserts a newline.
     #[default]
@@ -266,6 +280,317 @@ impl TextBoxOutcome {
         !matches!(self, Self::Unchanged)
     }
 }
+
+/// One embedded border title on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextBoxTitle {
+    pub text: String,
+    pub position: TitlePosition,
+}
+
+/// Busy status on the wire; elapsed time is whole milliseconds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextBoxBusy {
+    pub label: String,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub right_meta: String,
+}
+
+impl From<&BusyStatus> for TextBoxBusy {
+    fn from(status: &BusyStatus) -> Self {
+        Self {
+            label: status.label.clone(),
+            elapsed_ms: u64::try_from(status.elapsed.as_millis()).unwrap_or(u64::MAX),
+            right_meta: status.right_meta.clone(),
+        }
+    }
+}
+
+impl From<&TextBoxBusy> for BusyStatus {
+    fn from(busy: &TextBoxBusy) -> Self {
+        Self {
+            label: busy.label.clone(),
+            elapsed: Duration::from_millis(busy.elapsed_ms),
+            right_meta: busy.right_meta.clone(),
+        }
+    }
+}
+
+/// Action identifiers a semantic renderer may send back for a text box.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextBoxActions {
+    /// `change` event carrying the full replacement text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_text: Option<String>,
+    /// `submit` event carrying the submitted text; the App owns what happens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit: Option<String>,
+}
+
+impl TextBoxActions {
+    pub const SET_TEXT: &'static str = "set-text";
+    pub const SUBMIT: &'static str = "submit";
+
+    /// Both actions with their conventional identifiers.
+    #[must_use]
+    pub fn editable() -> Self {
+        Self {
+            set_text: Some(Self::SET_TEXT.into()),
+            submit: Some(Self::SUBMIT.into()),
+        }
+    }
+}
+
+/// Owned text box state interpreted by Ratatui, Swift, or web.
+///
+/// This is the wire form of [`TextBox`]: text, chrome, and actions without
+/// renderer-local cursor, selection, or scroll state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextBoxSpec {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub placeholder: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub titles: Vec<TextBoxTitle>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<KeyHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy: Option<TextBoxBusy>,
+    #[serde(default)]
+    pub submit_mode: SubmitMode,
+    #[serde(default = "default_min_rows")]
+    pub min_rows: u16,
+    #[serde(default = "default_max_rows")]
+    pub max_rows: u16,
+    #[serde(default)]
+    pub actions: TextBoxActions,
+}
+
+const fn default_min_rows() -> u16 {
+    DEFAULT_MIN_ROWS
+}
+
+const fn default_max_rows() -> u16 {
+    DEFAULT_MAX_ROWS
+}
+
+impl Default for TextBoxSpec {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            placeholder: String::new(),
+            prompt: String::new(),
+            titles: Vec::new(),
+            hints: Vec::new(),
+            busy: None,
+            submit_mode: SubmitMode::default(),
+            min_rows: DEFAULT_MIN_ROWS,
+            max_rows: DEFAULT_MAX_ROWS,
+            actions: TextBoxActions::default(),
+        }
+    }
+}
+
+impl TextBoxSpec {
+    #[must_use]
+    pub fn new(placeholder: impl Into<String>) -> Self {
+        Self {
+            placeholder: placeholder.into(),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = text.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.prompt = prompt.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_title(mut self, text: impl Into<String>, position: TitlePosition) -> Self {
+        self.titles.retain(|title| title.position != position);
+        self.titles.push(TextBoxTitle {
+            text: text.into(),
+            position,
+        });
+        self
+    }
+
+    #[must_use]
+    pub fn with_footer_hints<H: Into<KeyHint>>(
+        mut self,
+        hints: impl IntoIterator<Item = H>,
+    ) -> Self {
+        self.hints = hints.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_busy(mut self, busy: Option<&BusyStatus>) -> Self {
+        self.busy = busy.map(TextBoxBusy::from);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_submit_mode(mut self, mode: SubmitMode) -> Self {
+        self.submit_mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_rows(mut self, min_rows: u16, max_rows: u16) -> Self {
+        self.min_rows = if min_rows == 0 { 1 } else { min_rows };
+        self.max_rows = if max_rows < self.min_rows {
+            self.min_rows
+        } else {
+            max_rows
+        };
+        self
+    }
+
+    #[must_use]
+    pub fn with_actions(mut self, actions: TextBoxActions) -> Self {
+        self.actions = actions;
+        self
+    }
+
+    /// Validates the closed wire shape at `path` (for example `root`).
+    pub fn validate(&self, path: &str) -> Result<(), crate::ComponentValidationError> {
+        use crate::components::{validate_identifier, validate_text};
+        validate_text(&self.text, DEFAULT_MAX_TEXT_BYTES, &format!("{path}.text"))?;
+        validate_short(&self.placeholder, &format!("{path}.placeholder"))?;
+        validate_short(&self.prompt, &format!("{path}.prompt"))?;
+        for (index, title) in self.titles.iter().enumerate() {
+            validate_short(&title.text, &format!("{path}.titles[{index}].text"))?;
+            if self
+                .titles
+                .iter()
+                .filter(|other| other.position == title.position)
+                .count()
+                > 1
+            {
+                return Err(crate::ComponentValidationError::new(
+                    format!("{path}.titles[{index}].position"),
+                    "each title position may appear at most once",
+                ));
+            }
+        }
+        for (index, hint) in self.hints.iter().enumerate() {
+            validate_short(&hint.key, &format!("{path}.hints[{index}].key"))?;
+            validate_short(&hint.label, &format!("{path}.hints[{index}].label"))?;
+        }
+        if let Some(busy) = &self.busy {
+            validate_short(&busy.label, &format!("{path}.busy.label"))?;
+            validate_short(&busy.right_meta, &format!("{path}.busy.rightMeta"))?;
+        }
+        if self.min_rows == 0 || self.max_rows < self.min_rows {
+            return Err(crate::ComponentValidationError::new(
+                format!("{path}.minRows"),
+                "minRows must be at least 1 and at most maxRows",
+            ));
+        }
+        if let Some(action) = &self.actions.set_text {
+            validate_identifier(action, &format!("{path}.actions.setText"))?;
+        }
+        if let Some(action) = &self.actions.submit {
+            validate_identifier(action, &format!("{path}.actions.submit"))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_short(value: &str, path: &str) -> Result<(), crate::ComponentValidationError> {
+    crate::components::validate_text(value, crate::components::MAX_SHORT_TEXT_BYTES, path)?;
+    if value.contains('\n') {
+        return Err(crate::ComponentValidationError::new(
+            path,
+            "must be a single line",
+        ));
+    }
+    Ok(())
+}
+
+/// Cross-renderer identity and actions for a hosted [`TextBox`].
+#[cfg(feature = "ui-bridge")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextBoxConfig {
+    pub node_id: NodeId,
+    pub actions: TextBoxActions,
+}
+
+#[cfg(feature = "ui-bridge")]
+impl TextBoxConfig {
+    #[must_use]
+    pub fn new(node_id: impl Into<NodeId>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            actions: TextBoxActions::editable(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_actions(mut self, actions: TextBoxActions) -> Self {
+        self.actions = actions;
+        self
+    }
+}
+
+/// A text box action applied from a semantic renderer.
+#[cfg(feature = "ui-bridge")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextBoxUiEvent {
+    /// The renderer replaced the text; the terminal box now matches.
+    TextChanged { changed: bool },
+    /// The renderer submitted this text; the terminal box has been cleared.
+    Submitted(String),
+}
+
+/// A matching text box action that cannot safely be applied.
+#[cfg(feature = "ui-bridge")]
+#[derive(Debug, PartialEq, Eq)]
+pub enum TextBoxEventError {
+    UnexpectedProtocol { protocol: String, version: u32 },
+    StaleRevision { expected: u64, received: u64 },
+    UnsupportedAction(String),
+    InvalidEvent(String),
+}
+
+#[cfg(feature = "ui-bridge")]
+impl fmt::Display for TextBoxEventError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedProtocol { protocol, version } => write!(
+                formatter,
+                "unexpected UI protocol {protocol}/{version}; expected {UI_PROTOCOL_NAME}/{UI_PROTOCOL_MIN_VERSION}..={UI_PROTOCOL_MAX_VERSION}"
+            ),
+            Self::StaleRevision { expected, received } => write!(
+                formatter,
+                "stale text box event revision {received}; current revision is {expected}"
+            ),
+            Self::UnsupportedAction(action) => {
+                write!(formatter, "unsupported text box action {action:?}")
+            }
+            Self::InvalidEvent(message) => write!(formatter, "invalid text box event: {message}"),
+        }
+    }
+}
+
+#[cfg(feature = "ui-bridge")]
+impl std::error::Error for TextBoxEventError {}
 
 /// One wrapped visual row: a half-open character range. `hard` rows end at a
 /// newline or at the end of the text; soft rows end at a wrap point.
@@ -863,6 +1188,99 @@ impl TextBox {
         TextBoxWidget { prompt: self }
     }
 
+    /// Wire projection of the current text and chrome.
+    #[must_use]
+    pub fn spec(&self) -> TextBoxSpec {
+        TextBoxSpec {
+            text: self.text.clone(),
+            placeholder: self.placeholder.clone(),
+            prompt: self.prompt.clone(),
+            titles: self
+                .titles
+                .iter()
+                .map(|(text, position)| TextBoxTitle {
+                    text: text.clone(),
+                    position: *position,
+                })
+                .collect(),
+            hints: self.hints.clone(),
+            busy: self.busy.as_ref().map(TextBoxBusy::from),
+            submit_mode: self.submit_mode,
+            min_rows: self.min_rows,
+            max_rows: self.max_rows,
+            actions: TextBoxActions::default(),
+        }
+    }
+
+    /// Builds a terminal box from a wire spec (cursor at the end of the text).
+    #[must_use]
+    pub fn from_spec(spec: &TextBoxSpec) -> Self {
+        let mut text_box = Self::new(spec.placeholder.clone())
+            .with_prompt(spec.prompt.clone())
+            .with_footer_hints(spec.hints.clone())
+            .with_submit_mode(spec.submit_mode)
+            .with_rows(spec.min_rows, spec.max_rows);
+        for title in &spec.titles {
+            text_box.add_title(title.text.clone(), title.position);
+        }
+        text_box.set_busy(spec.busy.as_ref().map(BusyStatus::from));
+        text_box.set_text(spec.text.clone());
+        text_box
+    }
+
+    /// Publishes this box as the closed `textBox` root component.
+    #[cfg(feature = "ui-bridge")]
+    #[must_use]
+    pub fn ui_node(&self, config: &TextBoxConfig) -> UiNode {
+        let spec = self.spec().with_actions(config.actions.clone());
+        UiNode::text_box(config.node_id.clone(), spec)
+    }
+
+    /// Applies one renderer event addressed to `config.node_id`.
+    ///
+    /// Returns `Ok(None)` for events aimed at other nodes. `set-text` replaces
+    /// the text; `submit` clears the box and hands the text back to the App.
+    #[cfg(feature = "ui-bridge")]
+    pub fn handle_ui_event(
+        &mut self,
+        revision: u64,
+        config: &TextBoxConfig,
+        event: &UiEvent,
+    ) -> Result<Option<TextBoxUiEvent>, TextBoxEventError> {
+        if event.action.node_id != config.node_id {
+            return Ok(None);
+        }
+        if event.protocol != UI_PROTOCOL_NAME
+            || !(UI_PROTOCOL_MIN_VERSION..=UI_PROTOCOL_MAX_VERSION)
+                .contains(&event.protocol_version)
+        {
+            return Err(TextBoxEventError::UnexpectedProtocol {
+                protocol: event.protocol.clone(),
+                version: event.protocol_version,
+            });
+        }
+        if event.base_revision != revision {
+            return Err(TextBoxEventError::StaleRevision {
+                expected: revision,
+                received: event.base_revision,
+            });
+        }
+        let action = event.action.action.as_str();
+        let matches = |configured: Option<&String>| configured.is_some_and(|id| id == action);
+        if matches(config.actions.set_text.as_ref()) {
+            let text = require_text(event, UiEventKind::Change)?;
+            return Ok(Some(TextBoxUiEvent::TextChanged {
+                changed: self.set_text(text),
+            }));
+        }
+        if matches(config.actions.submit.as_ref()) {
+            let text = require_text(event, UiEventKind::Submit)?;
+            self.clear();
+            return Ok(Some(TextBoxUiEvent::Submitted(text.to_owned())));
+        }
+        Err(TextBoxEventError::UnsupportedAction(action.to_owned()))
+    }
+
     fn delete_selection(&mut self) -> bool {
         let Some((start, end)) = self.selection_range() else {
             return false;
@@ -1157,6 +1575,28 @@ impl Widget for TextBoxWidget<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
         self.prompt.render(area, buffer);
     }
+}
+
+#[cfg(feature = "ui-bridge")]
+fn require_text(event: &UiEvent, expected: UiEventKind) -> Result<&str, TextBoxEventError> {
+    if event.action.kind != expected {
+        return Err(TextBoxEventError::InvalidEvent(format!(
+            "action {} requires {expected:?}, received {:?}",
+            event.action.action, event.action.kind
+        )));
+    }
+    let UiEventValue::Text(text) = &event.action.value else {
+        return Err(TextBoxEventError::InvalidEvent(format!(
+            "action {} requires a text value",
+            event.action.action
+        )));
+    };
+    if text.len() > DEFAULT_MAX_TEXT_BYTES {
+        return Err(TextBoxEventError::InvalidEvent(format!(
+            "text exceeds {DEFAULT_MAX_TEXT_BYTES} bytes"
+        )));
+    }
+    Ok(text)
 }
 
 /// Keeps newlines, normalises CRLF, tabs become spaces, drops other controls.
@@ -1480,6 +1920,133 @@ mod tests {
             TextBoxAction::from_key(&alt_enter, SubmitMode::Enter),
             Some(TextBoxAction::Newline)
         );
+    }
+
+    #[test]
+    fn spec_round_trips_through_json_and_validates() {
+        let mut prompt = TextBox::new("Ask")
+            .with_prompt("❯ ")
+            .with_status_title("model")
+            .with_footer_hints([("Esc", "cancel")])
+            .with_rows(2, 5);
+        prompt.set_text("hello");
+        prompt.set_busy(Some(
+            BusyStatus::new("Waiting").with_elapsed(Duration::from_millis(1_250)),
+        ));
+        let spec = prompt.spec().with_actions(TextBoxActions::editable());
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["titles"][0]["position"], "bottomRight");
+        assert_eq!(json["busy"]["elapsedMs"], 1250);
+        assert_eq!(json["submitMode"], "enter");
+        let decoded: TextBoxSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, spec);
+        assert!(decoded.validate("root").is_ok());
+        let rebuilt = TextBox::from_spec(&decoded);
+        assert_eq!(rebuilt.text(), "hello");
+        assert_eq!(
+            rebuilt.busy().map(|busy| busy.elapsed),
+            Some(Duration::from_millis(1_250))
+        );
+
+        let mut invalid = spec.clone();
+        invalid.min_rows = 0;
+        assert_eq!(invalid.validate("root").unwrap_err().path, "root.minRows");
+        let mut duplicate = spec.clone();
+        duplicate.titles.push(TextBoxTitle {
+            text: "again".into(),
+            position: TitlePosition::BottomRight,
+        });
+        assert_eq!(
+            duplicate.validate("root").unwrap_err().path,
+            "root.titles[0].position"
+        );
+        let defaults: TextBoxSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.min_rows, DEFAULT_MIN_ROWS);
+        assert_eq!(defaults.max_rows, DEFAULT_MAX_ROWS);
+    }
+
+    #[cfg(feature = "ui-bridge")]
+    #[test]
+    fn ui_events_replace_text_and_submit() {
+        use crate::{UiAction, UiComponent};
+
+        let mut prompt = TextBox::new("Ask");
+        let config = TextBoxConfig::new("prompt");
+        let node = prompt.ui_node(&config);
+        assert_eq!(node.id.as_str(), "prompt");
+        let UiComponent::TextBox(spec) = &node.element else {
+            panic!("expected textBox root");
+        };
+        assert_eq!(spec.actions, TextBoxActions::editable());
+        assert!(node.validate().is_ok());
+
+        let event = |action: &str, kind: UiEventKind, value: UiEventValue, revision: u64| {
+            UiEvent::new(
+                "app",
+                "person",
+                "client",
+                "renderer",
+                "main",
+                "event-1",
+                revision,
+                UiAction::new("prompt", action, kind, value),
+            )
+        };
+        let set = event(
+            "set-text",
+            UiEventKind::Change,
+            UiEventValue::Text("draft".into()),
+            3,
+        );
+        assert_eq!(
+            prompt.handle_ui_event(3, &config, &set).unwrap(),
+            Some(TextBoxUiEvent::TextChanged { changed: true })
+        );
+        assert_eq!(prompt.text(), "draft");
+        assert_eq!(
+            prompt.handle_ui_event(4, &config, &set).unwrap_err(),
+            TextBoxEventError::StaleRevision {
+                expected: 4,
+                received: 3
+            }
+        );
+        let wrong_kind = event(
+            "set-text",
+            UiEventKind::Submit,
+            UiEventValue::Text("x".into()),
+            3,
+        );
+        assert!(matches!(
+            prompt.handle_ui_event(3, &config, &wrong_kind),
+            Err(TextBoxEventError::InvalidEvent(_))
+        ));
+        let submit = event(
+            "submit",
+            UiEventKind::Submit,
+            UiEventValue::Text("draft".into()),
+            3,
+        );
+        assert_eq!(
+            prompt.handle_ui_event(3, &config, &submit).unwrap(),
+            Some(TextBoxUiEvent::Submitted("draft".into()))
+        );
+        assert_eq!(prompt.text(), "");
+        let other = UiEvent::new(
+            "app",
+            "person",
+            "client",
+            "renderer",
+            "main",
+            "event-2",
+            3,
+            UiAction::new(
+                "elsewhere",
+                "submit",
+                UiEventKind::Submit,
+                UiEventValue::None,
+            ),
+        );
+        assert_eq!(prompt.handle_ui_event(3, &config, &other).unwrap(), None);
     }
 
     #[test]

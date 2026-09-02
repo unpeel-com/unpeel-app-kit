@@ -155,11 +155,14 @@ pub use surface::{
 };
 #[cfg(feature = "surface-embed")]
 pub use surface::{Surface, SurfaceFrame, SurfaceView};
-pub use theme::{
 pub use text_box::{
-    BusyStatus, KeyHint, SubmitMode, TextBox, TextBoxAction, TextBoxOutcome, TextBoxTheme,
+    BusyStatus, KeyHint, SubmitMode, TEXT_BOX_COMPONENT_CAPABILITY, TextBox, TextBoxAction,
+    TextBoxActions, TextBoxBusy, TextBoxOutcome, TextBoxSpec, TextBoxTheme, TextBoxTitle,
     TextBoxWidget, TitlePosition,
 };
+#[cfg(feature = "ui-bridge")]
+pub use text_box::{TextBoxConfig, TextBoxEventError, TextBoxUiEvent};
+pub use theme::{
     APP_ACCENT_ENV, ColorScheme, KitTheme, SELECTABLE_LEFT_PADDING, ThemeMonitor, hosted_accent,
     hosted_accent_for_scheme,
 };

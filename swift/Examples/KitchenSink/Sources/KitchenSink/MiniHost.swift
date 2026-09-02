@@ -463,6 +463,8 @@ final class HostedAppSession: ObservableObject, Identifiable {
         case let .surface(surface): "Surface: \(surface.reference.streamID)"
         case let .canvasPage(page): page.title
         case let .tree(tree): tree.label
+        case let .textBox(textBox):
+            textBox.titles.first?.text ?? (textBox.placeholder.isEmpty ? "Text box" : textBox.placeholder)
         case let .unsupported(kind): "Unsupported: \(kind)"
         }
     }
@@ -668,6 +670,17 @@ final class HostedAppSession: ObservableObject, Identifiable {
             } else {
                 action = nil
             }
+        case let .textBox(textBox):
+            guard let submit = textBox.actions.submit else {
+                action = nil
+                break
+            }
+            action = UIAction(
+                nodeID: snapshot.root.id,
+                action: submit,
+                kind: .submit,
+                value: .text("Exercised from the mini-host")
+            )
         case .surface:
             action = nil
         case .unsupported:

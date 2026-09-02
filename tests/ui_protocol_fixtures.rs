@@ -18,7 +18,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         messages.push(message);
     }
 
-    assert_eq!(messages.len(), 49);
+    assert_eq!(messages.len(), 53);
     let UiMessage::Attach(attach) = &messages[0] else {
         panic!("first fixture must attach an authenticated participant");
     };
@@ -591,10 +591,61 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(page.footer.actions[1].label, "refreshing…");
     assert!(page.footer.actions[1].disabled);
 
-    let UiMessage::Snapshot(slash_snapshot) = &messages[44] else {
+    let UiMessage::Snapshot(text_box_snapshot) = &messages[44] else {
+        panic!("text box fixture must start with a snapshot");
+    };
+    let UiComponent::TextBox(text_box) = &text_box_snapshot.root.element else {
+        panic!("text box fixture must contain a textBox root");
+    };
+    assert_eq!(text_box.prompt, "❯ ");
+    assert_eq!(
+        text_box.titles[0].position,
+        unpeel_app_kit::TitlePosition::BottomRight
+    );
+    assert_eq!(
+        text_box_snapshot.root.required_capabilities(),
+        vec![unpeel_app_kit::TEXT_BOX_COMPONENT_CAPABILITY]
+    );
+    let UiMessage::Event(set_text) = &messages[45] else {
+        panic!("text box renderer must send set-text");
+    };
+    assert_eq!(set_text.action.kind, UiEventKind::Change);
+    let mut terminal_box = unpeel_app_kit::TextBox::from_spec(text_box);
+    let config = unpeel_app_kit::TextBoxConfig::new("chat-prompt");
+    assert_eq!(
+        terminal_box
+            .handle_ui_event(100, &config, set_text)
+            .unwrap(),
+        Some(unpeel_app_kit::TextBoxUiEvent::TextChanged { changed: true })
+    );
+    assert_eq!(terminal_box.text(), "Ship it\n🙂 second line");
+    let UiMessage::Delta(text_box_delta) = &messages[46] else {
+        panic!("text box App must publish the replaced root");
+    };
+    let busy_snapshot = text_box_snapshot.applying(text_box_delta).unwrap();
+    let UiComponent::TextBox(busy_box) = &busy_snapshot.root.element else {
+        panic!("text box delta must preserve textBox");
+    };
+    assert_eq!(
+        busy_box.busy.as_ref().map(|busy| busy.elapsed_ms),
+        Some(8_500)
+    );
+    let UiMessage::Event(submit) = &messages[47] else {
+        panic!("text box renderer must send submit");
+    };
+    assert_eq!(submit.action.kind, UiEventKind::Submit);
+    assert_eq!(
+        terminal_box.handle_ui_event(101, &config, submit).unwrap(),
+        Some(unpeel_app_kit::TextBoxUiEvent::Submitted(
+            "Ship it\n🙂 second line".to_owned()
+        ))
+    );
+    assert_eq!(terminal_box.text(), "");
+
+    let UiMessage::Snapshot(slash_snapshot) = &messages[48] else {
         panic!("slash round-trip must start from a Markdown snapshot");
     };
-    let UiMessage::Event(slash_event) = &messages[45] else {
+    let UiMessage::Event(slash_event) = &messages[49] else {
         panic!("slash round-trip must carry the renderer command");
     };
     assert_eq!(slash_event.action.action.as_str(), "open-menu");
@@ -603,7 +654,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         slash_event.action.value,
         UiEventValue::Text(MarkdownMenuTrigger::Slash.as_str().to_owned())
     );
-    let UiMessage::Delta(open_menu_delta) = &messages[46] else {
+    let UiMessage::Delta(open_menu_delta) = &messages[50] else {
         panic!("Rust reducer must publish the slash Menu as a delta");
     };
     let menu_snapshot = slash_snapshot.applying(open_menu_delta).unwrap();
@@ -615,7 +666,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
     assert_eq!(menu.anchor, unpeel_app_kit::SemanticMenuAnchor::Caret);
     assert_eq!(menu.selected_id.as_deref(), Some("block-heading-1"));
 
-    let UiMessage::Event(selection_event) = &messages[47] else {
+    let UiMessage::Event(selection_event) = &messages[51] else {
         panic!("renderer must return the selected Menu item");
     };
     assert_eq!(selection_event.action.node_id.as_str(), "block-heading-1");
@@ -624,7 +675,7 @@ fn shared_v1_stream_decodes_and_validates_every_frame() {
         "markdown-menu-select"
     );
     assert_eq!(selection_event.action.kind, UiEventKind::Activate);
-    let UiMessage::Delta(selection_delta) = &messages[48] else {
+    let UiMessage::Delta(selection_delta) = &messages[52] else {
         panic!("selected item must publish its resulting Markdown state");
     };
     let selected_snapshot = menu_snapshot.applying(selection_delta).unwrap();

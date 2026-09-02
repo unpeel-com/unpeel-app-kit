@@ -5,6 +5,7 @@ export * from "./media";
 export * from "./menu";
 export * from "./footer";
 export * from "./page";
+export * from "./text-box";
 export * from "./tree";
 export * from "./surface";
 export * from "./canvas-page";

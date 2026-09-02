@@ -43,6 +43,52 @@ func nativeMarkdownSelectionReconciliationPreservesOnlyUnsyncedLocalRanges() {
 }
 
 @Test
+func textBoxFixtureDecodesAndRoundTrips() throws {
+    let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    let fixture = testDirectory
+        .appendingPathComponent("../../../protocol/unpeel-ui-v1.ndjson")
+        .standardizedFileURL
+    let stream = try String(contentsOf: fixture, encoding: .utf8)
+    let messages = try stream
+        .split(separator: "\n")
+        .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
+    guard case let .snapshot(snapshot) = messages[44],
+          case let .textBox(textBox) = snapshot.root.component
+    else {
+        Issue.record("text box fixture must start with a textBox snapshot")
+        return
+    }
+    #expect(snapshot.root.id == "chat-prompt")
+    #expect(textBox.prompt == "❯ ")
+    #expect(textBox.titles == [TextBoxTitle(text: "Grok 4.6 (xhigh) · always-approve", position: .bottomRight)])
+    #expect(textBox.hints.count == 2)
+    #expect(textBox.submitMode == .enter)
+    #expect(textBox.minRows == 3 && textBox.maxRows == 8)
+    #expect(textBox.actions.submit == "submit")
+    #expect(snapshot.root.component.requiredCapabilities == [UnpeelUIProtocol.textBoxCapability])
+    guard case let .event(setText) = messages[45] else {
+        Issue.record("text box fixture must carry a set-text event")
+        return
+    }
+    #expect(setText.action.kind == .change)
+    #expect(setText.action.value == .text("Ship it\n🙂 second line"))
+    guard case let .delta(delta) = messages[46] else {
+        Issue.record("text box fixture must carry a replaceRoot delta")
+        return
+    }
+    let busySnapshot = try snapshot.applying(delta)
+    guard case let .textBox(busyBox) = busySnapshot.root.component else {
+        Issue.record("text box delta must preserve the textBox root")
+        return
+    }
+    #expect(busyBox.busy?.elapsedMs == 8500)
+    #expect(busyBox.text == "Ship it\n🙂 second line")
+    let encoded = try JSONEncoder().encode(busySnapshot.root)
+    let decoded = try JSONDecoder().decode(UINode.self, from: encoded)
+    #expect(decoded == busySnapshot.root)
+}
+
+@Test
 func sharedProtocolFixturesDecode() throws {
     let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let fixture = testDirectory
@@ -53,7 +99,7 @@ func sharedProtocolFixturesDecode() throws {
         .split(separator: "\n")
         .map { try JSONDecoder().decode(UIMessage.self, from: Data($0.utf8)) }
 
-    #expect(messages.count == 49)
+    #expect(messages.count == 53)
     guard case let .attach(attach) = messages[0] else {
         Issue.record("first fixture must attach an authenticated participant")
         return

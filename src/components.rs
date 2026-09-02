@@ -58,7 +58,7 @@ pub const PAGE_BACK_CAPABILITY: &str = "pageBack";
 pub const FOOTER_ACTIONS_CAPABILITY: &str = "footerActions";
 
 const MAX_ITEMS: usize = 100_000;
-const MAX_SHORT_TEXT_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_SHORT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_LABEL_BYTES: usize = 16 * 1024;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 

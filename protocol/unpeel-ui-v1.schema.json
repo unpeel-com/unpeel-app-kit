@@ -302,6 +302,59 @@
         "footer": { "$ref": "#/$defs/footerActions" }
       }
     },
+    "textBox": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "const": "textBox" },
+        "text": { "type": "string", "default": "" },
+        "placeholder": { "type": "string", "default": "" },
+        "prompt": { "type": "string", "default": "" },
+        "titles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["text", "position"],
+            "properties": {
+              "text": { "type": "string" },
+              "position": { "enum": ["topLeft", "topRight", "bottomLeft", "bottomRight"] }
+            }
+          }
+        },
+        "hints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "label"],
+            "properties": {
+              "key": { "type": "string" },
+              "label": { "type": "string" }
+            }
+          }
+        },
+        "busy": {
+          "type": "object",
+          "required": ["label"],
+          "properties": {
+            "label": { "type": "string" },
+            "elapsedMs": { "type": "integer", "minimum": 0, "default": 0 },
+            "rightMeta": { "type": "string", "default": "" }
+          }
+        },
+        "submitMode": { "enum": ["enter", "never"], "default": "enter" },
+        "minRows": { "type": "integer", "minimum": 1, "default": 3 },
+        "maxRows": { "type": "integer", "minimum": 1, "default": 10 },
+        "actions": {
+          "type": "object",
+          "properties": {
+            "setText": { "$ref": "#/$defs/identifier" },
+            "submit": { "$ref": "#/$defs/identifier" }
+          }
+        }
+      }
+    },
     "markdownCommandHint": {
       "type": "object",
       "additionalProperties": true,
@@ -1026,7 +1079,7 @@
       "not": {
         "required": ["type"],
         "properties": {
-          "type": { "enum": ["canvasPage", "markdownEditor", "media", "menu", "page", "surface", "tree"] }
+          "type": { "enum": ["canvasPage", "markdownEditor", "media", "menu", "page", "surface", "textBox", "tree"] }
         }
       }
     },
@@ -1059,6 +1112,7 @@
             { "$ref": "#/$defs/menu" },
             { "$ref": "#/$defs/page" },
             { "$ref": "#/$defs/surface" },
+            { "$ref": "#/$defs/textBox" },
             { "$ref": "#/$defs/tree" },
             { "$ref": "#/$defs/unsupportedComponent" }
           ]
@@ -1081,6 +1135,7 @@
                 { "$ref": "#/$defs/menu" },
                 { "$ref": "#/$defs/page" },
                 { "$ref": "#/$defs/surface" },
+                { "$ref": "#/$defs/textBox" },
                 { "$ref": "#/$defs/tree" },
                 { "$ref": "#/$defs/unsupportedComponent" }
               ]

@@ -35,6 +35,7 @@ export const UI_TREE_CAPABILITY = "tree" as const;
 export const UI_TREE_HIERARCHY_CAPABILITY = "treeHierarchy" as const;
 export const UI_TREE_FILTER_CAPABILITY = "treeFilter" as const;
 export const UI_TREE_PARENT_CAPABILITY = "treeParent" as const;
+export const UI_TEXT_BOX_CAPABILITY = "textBox" as const;
 /** Built-in renderers that need no Host-injected presenter adapter. */
 export const UI_COMPONENT_CAPABILITIES = [
   UI_MARKDOWN_EDITOR_CAPABILITY,
@@ -67,6 +68,7 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_TREE_HIERARCHY_CAPABILITY,
   UI_TREE_FILTER_CAPABILITY,
   UI_TREE_PARENT_CAPABILITY,
+  UI_TEXT_BOX_CAPABILITY,
 ] as const;
 export const MAX_INLINE_MEDIA_BYTES = 256 * 1024;
 
@@ -263,6 +265,46 @@ export interface MediaCellSize {
 export interface MediaPointSize {
   w?: number;
   h?: number;
+}
+
+export type TextBoxTitlePosition = "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
+export type TextBoxSubmitMode = "enter" | "never";
+
+export interface TextBoxTitle {
+  text: string;
+  position: TextBoxTitlePosition;
+}
+
+export interface TextBoxKeyHint {
+  key: string;
+  label: string;
+}
+
+export interface TextBoxBusy {
+  label: string;
+  elapsedMs?: number;
+  rightMeta?: string;
+}
+
+export interface TextBoxActions {
+  setText?: string;
+  submit?: string;
+}
+
+/** Closed multi-line text box root: plain field or chat-style prompt bar. */
+export interface TextBoxNode {
+  id: string;
+  type: "textBox";
+  text?: string;
+  placeholder?: string;
+  prompt?: string;
+  titles?: TextBoxTitle[];
+  hints?: TextBoxKeyHint[];
+  busy?: TextBoxBusy;
+  submitMode?: TextBoxSubmitMode;
+  minRows?: number;
+  maxRows?: number;
+  actions?: TextBoxActions;
 }
 
 export interface MediaNode {
@@ -618,8 +660,14 @@ export interface UnsupportedUiNode {
 }
 
 export type UiNode = CanvasPageNode | MarkdownEditorNode | MediaNode | MenuNode | PageNode | SurfaceNode
+  | TextBoxNode
   | TreeNode
   | UnsupportedUiNode;
+
+export function isTextBoxNode(node: UiNode): node is TextBoxNode {
+  return node.type === "textBox";
+}
+
 
 export function isCanvasPageNode(node: UiNode): node is CanvasPageNode {
   return node.type === "canvasPage";
@@ -2076,6 +2124,10 @@ function validateNode(value: unknown, path: string): void {
     validateTreeNode(root, path);
     return;
   }
+  if (root.type === "textBox") {
+    validateTextBoxNode(root, path);
+    return;
+  }
   if (root.type !== "markdownEditor") {
     return;
   }
@@ -2797,6 +2849,60 @@ function validateOptionalListItemTone(value: unknown, path: string): void {
 function requireSingleLine(value: unknown, path: string): void {
   if (typeof value !== "string" || value.includes("\n") || value.includes("\r")) {
     throw new Error(`${path} must be a single line`);
+  }
+}
+
+function validateTextBoxNode(root: Record<string, unknown>, path: string): void {
+  if (root.text !== undefined) requireString(root.text, `${path}.text`, true);
+  for (const field of ["placeholder", "prompt"] as const) {
+    if (root[field] !== undefined) requireString(root[field], `${path}.${field}`, true);
+  }
+  if (root.titles !== undefined) {
+    if (!Array.isArray(root.titles)) throw new Error(`${path}.titles must be an array`);
+    const positions = new Set<string>();
+    root.titles.forEach((entry, index) => {
+      const title = record(entry, `${path}.titles[${index}]`);
+      requireString(title.text, `${path}.titles[${index}].text`, true);
+      const position = String(title.position);
+      if (!["topLeft", "topRight", "bottomLeft", "bottomRight"].includes(position)) {
+        throw new Error(`${path}.titles[${index}].position is unsupported`);
+      }
+      if (positions.has(position)) {
+        throw new Error(`${path}.titles[${index}].position may appear at most once`);
+      }
+      positions.add(position);
+    });
+  }
+  if (root.hints !== undefined) {
+    if (!Array.isArray(root.hints)) throw new Error(`${path}.hints must be an array`);
+    root.hints.forEach((entry, index) => {
+      const hint = record(entry, `${path}.hints[${index}]`);
+      requireString(hint.key, `${path}.hints[${index}].key`, true);
+      requireString(hint.label, `${path}.hints[${index}].label`, true);
+    });
+  }
+  if (root.busy !== undefined) {
+    const busy = record(root.busy, `${path}.busy`);
+    requireString(busy.label, `${path}.busy.label`, true);
+    if (busy.elapsedMs !== undefined
+      && (typeof busy.elapsedMs !== "number" || !Number.isInteger(busy.elapsedMs) || busy.elapsedMs < 0)) {
+      throw new Error(`${path}.busy.elapsedMs must be a non-negative integer`);
+    }
+    if (busy.rightMeta !== undefined) requireString(busy.rightMeta, `${path}.busy.rightMeta`, true);
+  }
+  if (root.submitMode !== undefined && !["enter", "never"].includes(String(root.submitMode))) {
+    throw new Error(`${path}.submitMode is unsupported`);
+  }
+  const minRows = root.minRows ?? 3;
+  const maxRows = root.maxRows ?? 10;
+  if (typeof minRows !== "number" || typeof maxRows !== "number"
+    || !Number.isInteger(minRows) || !Number.isInteger(maxRows) || minRows < 1 || maxRows < minRows) {
+    throw new Error(`${path}.minRows must be at least 1 and at most maxRows`);
+  }
+  if (root.actions !== undefined) {
+    const actions = record(root.actions, `${path}.actions`);
+    if (actions.setText !== undefined) requireIdentifier(actions.setText, `${path}.actions.setText`);
+    if (actions.submit !== undefined) requireIdentifier(actions.submit, `${path}.actions.submit`);
   }
 }
 

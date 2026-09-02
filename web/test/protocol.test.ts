@@ -7,6 +7,7 @@ import {
   markdownMenuTriggerForTextInput,
   markdownTaskToggleAtOffset,
   isMarkdownEditorNode,
+  isTextBoxNode,
   isBarChartSpec,
   isCanvasPageNode,
   isGaugeSpec,
@@ -51,7 +52,7 @@ describe("shared protocol", () => {
     const fixture = Bun.file(new URL("../../protocol/unpeel-ui-v1.ndjson", import.meta.url));
     const lines = (await fixture.text()).trim().split("\n");
     const messages = lines.map(decodeUiMessage);
-    expect(messages).toHaveLength(49);
+    expect(messages).toHaveLength(53);
     expect(messages[0]?.type).toBe("attach");
     if (messages[0]?.type === "attach") {
       expect(messages[0].minProtocolVersion).toBe(1);
@@ -404,26 +405,49 @@ describe("shared protocol", () => {
     expect(updatedQuota.root.footer?.actions[1]?.label).toBe("refreshing…");
     expect(updatedQuota.root.footer?.actions[1]?.disabled).toBe(true);
 
-    const slashSnapshot = messages[44] as UiSnapshot;
+    const textBoxSnapshot = messages[44] as UiSnapshot;
+    if (!isTextBoxNode(textBoxSnapshot.root)) throw new Error("expected textBox root");
+    expect(textBoxSnapshot.root.prompt).toBe("❯ ");
+    expect(textBoxSnapshot.root.titles?.[0]?.position).toBe("bottomRight");
+    expect(textBoxSnapshot.root.actions?.submit).toBe("submit");
     expect(messages[45]).toMatchObject({
+      type: "event",
+      nodeId: "chat-prompt",
+      action: "set-text",
+      kind: "change",
+      value: { type: "text", value: "Ship it\n🙂 second line" },
+    });
+    const busyTextBox = applyUiDelta(textBoxSnapshot, messages[46] as UiDelta);
+    if (!isTextBoxNode(busyTextBox.root)) throw new Error("expected textBox after delta");
+    expect(busyTextBox.root.text).toBe("Ship it\n🙂 second line");
+    expect(busyTextBox.root.busy?.elapsedMs).toBe(8500);
+    expect(messages[47]).toMatchObject({
+      type: "event",
+      nodeId: "chat-prompt",
+      action: "submit",
+      kind: "submit",
+    });
+
+    const slashSnapshot = messages[48] as UiSnapshot;
+    expect(messages[49]).toMatchObject({
       type: "event",
       nodeId: "slash-roundtrip-editor",
       action: "open-menu",
       kind: "command",
       value: { type: "text", value: "slash" },
     });
-    const slashMenuSnapshot = applyUiDelta(slashSnapshot, messages[46] as UiDelta);
+    const slashMenuSnapshot = applyUiDelta(slashSnapshot, messages[50] as UiDelta);
     if (!isMarkdownEditorNode(slashMenuSnapshot.root)) throw new Error("expected slash Menu");
     expect(slashMenuSnapshot.root.text).toBe("/");
     expect(slashMenuSnapshot.root.insertMenu?.anchor).toBe("caret");
     expect(slashMenuSnapshot.root.insertMenu?.selectedId).toBe("block-heading-1");
-    expect(messages[47]).toMatchObject({
+    expect(messages[51]).toMatchObject({
       type: "event",
       nodeId: "block-heading-1",
       action: "markdown-menu-select",
       kind: "activate",
     });
-    const selectedSnapshot = applyUiDelta(slashMenuSnapshot, messages[48] as UiDelta);
+    const selectedSnapshot = applyUiDelta(slashMenuSnapshot, messages[52] as UiDelta);
     if (!isMarkdownEditorNode(selectedSnapshot.root)) throw new Error("expected Markdown");
     expect(selectedSnapshot.root.text).toBe("# ");
     expect(selectedSnapshot.root.insertMenu).toBeUndefined();

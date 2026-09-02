@@ -38,11 +38,13 @@ public enum UnpeelUIProtocol {
     public static let treeHierarchyCapability = "treeHierarchy"
     public static let treeFilterCapability = "treeFilter"
     public static let treeParentCapability = "treeParent"
+    public static let textBoxCapability = "textBox"
     /// Components renderable without an injected Host-owned presenter.
     /// A Host adds `surfaceCapability` only after wiring its authorized USRF
     /// route to unpeel-surface's local-GPU presenter.
     public static let supportedComponentCapabilities = [
         markdownEditorCapability,
+        textBoxCapability,
         markdownCommandHintCapability,
         menuCapability,
         menuAnchorCapability,
@@ -3028,6 +3030,172 @@ private func validateTreeItems(
     return true
 }
 
+public enum TextBoxTitlePosition: String, Codable, Equatable, Hashable, Sendable {
+    case topLeft
+    case topRight
+    case bottomLeft
+    case bottomRight
+}
+
+public enum TextBoxSubmitMode: String, Codable, Equatable, Hashable, Sendable {
+    case enter
+    case never
+}
+
+public struct TextBoxTitle: Codable, Equatable, Hashable, Sendable {
+    public let text: String
+    public let position: TextBoxTitlePosition
+
+    public init(text: String, position: TextBoxTitlePosition) {
+        self.text = text
+        self.position = position
+    }
+}
+
+public struct TextBoxKeyHint: Codable, Equatable, Hashable, Sendable {
+    public let key: String
+    public let label: String
+
+    public init(key: String, label: String) {
+        self.key = key
+        self.label = label
+    }
+}
+
+public struct TextBoxBusy: Codable, Equatable, Hashable, Sendable {
+    public let label: String
+    public let elapsedMs: UInt64
+    public let rightMeta: String
+
+    public init(label: String, elapsedMs: UInt64 = 0, rightMeta: String = "") {
+        self.label = label
+        self.elapsedMs = elapsedMs
+        self.rightMeta = rightMeta
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case elapsedMs
+        case rightMeta
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decode(String.self, forKey: .label)
+        elapsedMs = try container.decodeIfPresent(UInt64.self, forKey: .elapsedMs) ?? 0
+        rightMeta = try container.decodeIfPresent(String.self, forKey: .rightMeta) ?? ""
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(label, forKey: .label)
+        try container.encode(elapsedMs, forKey: .elapsedMs)
+        if !rightMeta.isEmpty { try container.encode(rightMeta, forKey: .rightMeta) }
+    }
+}
+
+public struct TextBoxActions: Codable, Equatable, Hashable, Sendable {
+    public let setText: String?
+    public let submit: String?
+
+    public init(setText: String? = nil, submit: String? = nil) {
+        self.setText = setText
+        self.submit = submit
+    }
+}
+
+/// Closed multi-line text box root: text plus optional prompt chrome.
+public struct TextBoxSpec: Codable, Equatable, Hashable, Sendable {
+    public let text: String
+    public let placeholder: String
+    public let prompt: String
+    public let titles: [TextBoxTitle]
+    public let hints: [TextBoxKeyHint]
+    public let busy: TextBoxBusy?
+    public let submitMode: TextBoxSubmitMode
+    public let minRows: Int
+    public let maxRows: Int
+    public let actions: TextBoxActions
+
+    public init(
+        text: String = "",
+        placeholder: String = "",
+        prompt: String = "",
+        titles: [TextBoxTitle] = [],
+        hints: [TextBoxKeyHint] = [],
+        busy: TextBoxBusy? = nil,
+        submitMode: TextBoxSubmitMode = .enter,
+        minRows: Int = 3,
+        maxRows: Int = 10,
+        actions: TextBoxActions = TextBoxActions()
+    ) {
+        self.text = text
+        self.placeholder = placeholder
+        self.prompt = prompt
+        self.titles = titles
+        self.hints = hints
+        self.busy = busy
+        self.submitMode = submitMode
+        self.minRows = minRows
+        self.maxRows = maxRows
+        self.actions = actions
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case placeholder
+        case prompt
+        case titles
+        case hints
+        case busy
+        case submitMode
+        case minRows
+        case maxRows
+        case actions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        placeholder = try container.decodeIfPresent(String.self, forKey: .placeholder) ?? ""
+        prompt = try container.decodeIfPresent(String.self, forKey: .prompt) ?? ""
+        titles = try container.decodeIfPresent([TextBoxTitle].self, forKey: .titles) ?? []
+        hints = try container.decodeIfPresent([TextBoxKeyHint].self, forKey: .hints) ?? []
+        busy = try container.decodeIfPresent(TextBoxBusy.self, forKey: .busy)
+        submitMode = try container.decodeIfPresent(TextBoxSubmitMode.self, forKey: .submitMode)
+            ?? .enter
+        minRows = try container.decodeIfPresent(Int.self, forKey: .minRows) ?? 3
+        maxRows = try container.decodeIfPresent(Int.self, forKey: .maxRows) ?? 10
+        actions = try container.decodeIfPresent(TextBoxActions.self, forKey: .actions)
+            ?? TextBoxActions()
+        guard minRows >= 1, maxRows >= minRows else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .minRows,
+                in: container,
+                debugDescription: "TextBox minRows must be at least 1 and at most maxRows"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        if !placeholder.isEmpty { try container.encode(placeholder, forKey: .placeholder) }
+        if !prompt.isEmpty { try container.encode(prompt, forKey: .prompt) }
+        if !titles.isEmpty { try container.encode(titles, forKey: .titles) }
+        if !hints.isEmpty { try container.encode(hints, forKey: .hints) }
+        try container.encodeIfPresent(busy, forKey: .busy)
+        try container.encode(submitMode, forKey: .submitMode)
+        try container.encode(minRows, forKey: .minRows)
+        try container.encode(maxRows, forKey: .maxRows)
+        try container.encode(actions, forKey: .actions)
+    }
+
+    public var isValid: Bool {
+        titles.count == Set(titles.map(\.position)).count
+    }
+}
+
 public enum UIComponent: Equatable, Sendable {
     case canvasPage(CanvasPageSpec)
     case markdownEditor(MarkdownEditorSpec)
@@ -3035,6 +3203,7 @@ public enum UIComponent: Equatable, Sendable {
     case menu(UIMenuSpec)
     case page(PageSpec)
     case surface(SurfaceSpec)
+    case textBox(TextBoxSpec)
     case tree(UITreeSpec)
     case unsupported(kind: String)
 
@@ -3052,6 +3221,8 @@ public enum UIComponent: Equatable, Sendable {
             "page"
         case .surface:
             "surface"
+        case .textBox:
+            "textBox"
         case .tree:
             "tree"
         case let .unsupported(kind):
@@ -3096,6 +3267,9 @@ public enum UIComponent: Equatable, Sendable {
             return page.requiredCapabilities
         case .surface:
             return [UnpeelUIProtocol.surfaceCapability]
+        case let .textBox(textBox):
+            guard textBox.isValid else { return nil }
+            return [UnpeelUIProtocol.textBoxCapability]
         case let .tree(tree):
             return tree.requiredCapabilities
         case .unsupported:
@@ -3137,6 +3311,8 @@ extension UINode: Codable {
             component = .page(try PageSpec(from: decoder))
         case "surface":
             component = .surface(try SurfaceSpec(from: decoder))
+        case "textBox":
+            component = .textBox(try TextBoxSpec(from: decoder))
         case "tree":
             component = .tree(try UITreeSpec(from: decoder))
         default:
@@ -3166,6 +3342,9 @@ extension UINode: Codable {
         case let .surface(surface):
             try container.encode("surface", forKey: .type)
             try surface.encode(to: encoder)
+        case let .textBox(textBox):
+            try container.encode("textBox", forKey: .type)
+            try textBox.encode(to: encoder)
         case let .tree(tree):
             try container.encode("tree", forKey: .type)
             try tree.encode(to: encoder)

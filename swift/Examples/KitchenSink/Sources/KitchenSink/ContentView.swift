@@ -219,7 +219,7 @@ private struct TerminalCard: View {
             return surface.background
         case let .canvasPage(page):
             return page.surface.surface.background
-        case .markdownEditor, .media, .menu, .page, .tree, .unsupported:
+        case .markdownEditor, .media, .menu, .page, .textBox, .tree, .unsupported:
             return .transparent
         }
     }
@@ -338,6 +338,10 @@ private struct NativeComponent: View {
             PageView(snapshot: snapshot, onAction: onAction)
         case .markdownEditor:
             MarkdownEditorView(snapshot: snapshot, onAction: onAction)
+        case .textBox:
+            TextBoxView(snapshot: snapshot, onAction: onAction)
+                .padding(20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         case .media:
             ScrollView([.horizontal, .vertical]) {
                 MediaView(snapshot: snapshot, onAction: onAction)

@@ -418,6 +418,111 @@ textarea {
   background: var(--surface-solid);
 }
 
+.unpeel-text-box-host {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 760px;
+  margin: 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.unpeel-text-box__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  color: var(--muted);
+}
+
+.unpeel-text-box__status-label {
+  color: var(--text);
+}
+
+.unpeel-text-box__status-meta {
+  margin-left: auto;
+}
+
+.unpeel-text-box__spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: unpeel-text-box-spin 0.8s linear infinite;
+}
+
+@keyframes unpeel-text-box-spin {
+  to { transform: rotate(360deg); }
+}
+
+.unpeel-text-box {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-solid);
+}
+
+.unpeel-text-box:focus-within {
+  border-color: var(--muted);
+}
+
+.unpeel-text-box__prompt {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.unpeel-text-box__field {
+  flex: 1;
+  min-width: 0;
+  max-height: calc(var(--unpeel-text-box-max-rows, 10) * 1.5em);
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  font: inherit;
+  line-height: 1.5;
+  color: var(--text);
+  background: transparent;
+  field-sizing: content;
+}
+
+.unpeel-text-box__title {
+  position: absolute;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface-solid);
+  pointer-events: none;
+}
+
+.unpeel-text-box__title--top-left { top: -9px; left: 12px; }
+.unpeel-text-box__title--top-right { top: -9px; right: 12px; }
+.unpeel-text-box__title--bottom-left { bottom: -9px; left: 12px; }
+.unpeel-text-box__title--bottom-right { bottom: -9px; right: 12px; }
+
+.unpeel-text-box__hints {
+  display: flex;
+  gap: 6px;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.unpeel-text-box__hints kbd {
+  font: inherit;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.unpeel-text-box__hint-separator {
+  opacity: 0.6;
+}
+
 .unpeel-list {
   max-width: 760px;
   margin: 0 auto;

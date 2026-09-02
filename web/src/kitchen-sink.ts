@@ -5,6 +5,7 @@ import {
   MenuRenderer,
   PageRenderer,
   SurfaceRenderer,
+  TextBoxRenderer,
   TreeRenderer,
   type SurfaceNode,
   type SurfacePresenterAdapter,
@@ -223,6 +224,8 @@ function makeRenderer(type: string): ComponentRenderer | undefined {
           surface,
         ),
       );
+    case "textBox":
+      return new TextBoxRenderer(container, postAction);
     case "tree":
       return new TreeRenderer(container, postAction);
     default:
