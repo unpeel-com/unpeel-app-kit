@@ -46,6 +46,7 @@ mod semantic_menu;
 mod sparkline;
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 mod surface;
+mod text_box;
 mod theme;
 mod tree;
 #[cfg(feature = "ui-bridge")]
@@ -155,6 +156,10 @@ pub use surface::{
 #[cfg(feature = "surface-embed")]
 pub use surface::{Surface, SurfaceFrame, SurfaceView};
 pub use theme::{
+pub use text_box::{
+    BusyStatus, KeyHint, SubmitMode, TextBox, TextBoxAction, TextBoxOutcome, TextBoxTheme,
+    TextBoxWidget, TitlePosition,
+};
     APP_ACCENT_ENV, ColorScheme, KitTheme, SELECTABLE_LEFT_PADDING, ThemeMonitor, hosted_accent,
     hosted_accent_for_scheme,
 };

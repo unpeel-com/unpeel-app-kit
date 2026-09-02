@@ -563,31 +563,31 @@ impl Widget for InputFieldWidget<'_> {
     }
 }
 
-fn sanitize(text: String) -> String {
+pub(crate) fn sanitize(text: String) -> String {
     text.chars()
         .filter(|character| !character.is_control())
         .collect()
 }
 
-fn char_len(text: &str) -> usize {
+pub(crate) fn char_len(text: &str) -> usize {
     text.chars().count()
 }
 
-fn char_to_byte(text: &str, column: usize) -> usize {
+pub(crate) fn char_to_byte(text: &str, column: usize) -> usize {
     text.char_indices()
         .nth(column)
         .map(|(byte, _)| byte)
         .unwrap_or(text.len())
 }
 
-fn ordered(left: usize, right: usize) -> (usize, usize) {
+pub(crate) fn ordered(left: usize, right: usize) -> (usize, usize) {
     match left.cmp(&right) {
         Ordering::Greater => (right, left),
         Ordering::Less | Ordering::Equal => (left, right),
     }
 }
 
-fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     text.chars()
         .map(|character| character.width().unwrap_or(0).max(1))
         .sum()
@@ -601,7 +601,7 @@ fn display_width_between(text: &str, start: usize, end: usize) -> usize {
         .sum()
 }
 
-fn take_width(text: &str, available: usize) -> String {
+pub(crate) fn take_width(text: &str, available: usize) -> String {
     let mut used = 0usize;
     text.chars()
         .take_while(|character| {
@@ -632,7 +632,7 @@ fn word_class(character: char) -> WordClass {
     }
 }
 
-fn word_bounds(text: &str, index: usize) -> (usize, usize) {
+pub(crate) fn word_bounds(text: &str, index: usize) -> (usize, usize) {
     let characters = text.chars().collect::<Vec<_>>();
     if index >= characters.len() {
         return (characters.len(), characters.len());
@@ -649,7 +649,7 @@ fn word_bounds(text: &str, index: usize) -> (usize, usize) {
     (start, end)
 }
 
-fn previous_word_boundary(text: &str, cursor: usize) -> usize {
+pub(crate) fn previous_word_boundary(text: &str, cursor: usize) -> usize {
     let characters = text.chars().collect::<Vec<_>>();
     let mut index = cursor.min(characters.len());
     while index > 0 && word_class(characters[index - 1]) == WordClass::Space {
@@ -665,7 +665,7 @@ fn previous_word_boundary(text: &str, cursor: usize) -> usize {
     index
 }
 
-fn next_word_boundary(text: &str, cursor: usize) -> usize {
+pub(crate) fn next_word_boundary(text: &str, cursor: usize) -> usize {
     let characters = text.chars().collect::<Vec<_>>();
     let mut index = cursor.min(characters.len());
     if index < characters.len() {

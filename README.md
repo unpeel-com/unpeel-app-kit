@@ -42,6 +42,14 @@ cargo run --example charts
 cargo run --example charts --no-default-features
 ```
 
+The `TextBox` demo pairs a chat-style prompt bar (busy spinner row, embedded
+border title, key-hint footer) with a plain commit-message field:
+
+```sh
+cargo run --example text_box
+cargo run --example text_box --no-default-features
+```
+
 The same focus engine also powers App Kit Lists and Explorer. Rows add a
 closed, UITableViewCell-style role instead of arbitrary child widgets:
 checkbox Toggle, navigation Disclosure, selection Checkmark, ordinary or
@@ -205,6 +213,7 @@ The standalone component layer currently provides:
 | `Explorer` | Flat current-directory navigation, filename filtering, selection, scrolling, hit-testing, and path drag sources |
 | `Tree` / `TreeWidget` | Closed drill-down/outline hierarchy with opaque ids, parent/filter semantics, bounded children, an optional screen footer, and the same `SelectableRow`/scrollbar foundation |
 | `InputField` | Borderless single-line editing with a native cursor, keyboard/mouse selection, word movement, and horizontal scrolling |
+| `TextBox` | Rounded bordered full-width multi-line editing that grows between configurable row bounds, with word wrap, optional prompt glyph, border titles, busy status row, and key-hint footer |
 | `Page` | Top-level standalone Ratatui presentation with a constrained Input header, a closed List, Content, Sparkline, BarChart, LineChart, or Gauge body, one optional back action, and an ordered FooterActions slot |
 | `FooterActions` / `FooterActionsWidget` | Ordered App-owned screen commands with optional one-key accelerators, danger/disabled intent, and the classic compact Ratatui bottom hint bar |
 | `Content` / `ContentWidget` | Read-only scrollable styled lines for issue, diff, and document detail screens; keyed range selection and bounded context actions without editor semantics |
@@ -649,6 +658,65 @@ input.mouse_up();
 `text()` is the resulting value and `selected_text()` exposes the active
 selection. The component does not choose a terminal backend, key bindings,
 mouse-capture mode, clipboard policy, or form submission behavior.
+
+## Text box
+
+`TextBox` is the bordered multi-line counterpart to `InputField`. The default
+configuration is a plain rounded field with a placeholder for forms, search
+boxes, or commit messages; `with_rows(1, 1)` makes a bordered single-line
+input. Text wraps at word boundaries, the box grows from `min_rows` to
+`max_rows` and then scrolls, and `height_for_width` reports the rows an App
+should reserve. Editing reuses the `InputField` conventions: Unicode-safe
+cursor and selection, character and word movement with Shift extension,
+Home/End on the visual row, Ctrl+Home/End for the document, Up/Down with a
+sticky column, click, drag, Shift-click, double-click word selection, and
+wheel scrolling through `scroll_rows`.
+
+Optional pieces turn the same component into a chat-style prompt bar:
+
+```rust
+use std::time::Duration;
+use unpeel_app_kit::{BusyStatus, SubmitMode, TextBox, TextBoxOutcome, TextBoxTheme, TitlePosition};
+
+let mut prompt = TextBox::new("Ask anything")
+    .with_prompt("❯ ")
+    .with_status_title("Grok 4.6 (xhigh) · always-approve") // bottom-right border
+    .with_footer_hints([("Shift+Tab", "mode"), ("Esc", "cancel")])
+    .with_rows(3, 8)
+    .with_theme(TextBoxTheme::detected());
+prompt.set_focused(true);
+
+// Plain form field: Enter inserts a newline, the App submits on its own key.
+let mut message = TextBox::new("Summarize the change")
+    .with_title("Commit message", TitlePosition::TopLeft)
+    .with_submit_mode(SubmitMode::Never)
+    .with_rows(2, 6);
+
+// Key handling: map crossterm keys with the box's SubmitMode.
+if let Some(action) = prompt.action_for_key(&key) {
+    if let TextBoxOutcome::Submitted(text) = prompt.handle(action) {
+        send(text);
+        prompt.set_busy(Some(
+            BusyStatus::new("Waiting for response…").with_right_meta("[stop]"),
+        ));
+    }
+}
+if let Some(busy) = prompt.busy_mut() {
+    busy.elapsed = Duration::from_secs(8);
+}
+prompt.tick(); // advances the braille spinner on your timer
+
+let height = prompt.height_for_width(area.width);
+frame.render_widget(prompt.widget(), prompt_area);
+```
+
+Titles are embedded in the border line at any `TitlePosition` corner. With
+`SubmitMode::Enter` (the default) Enter submits non-blank text and clears the
+box while Shift+Enter or Alt+Enter insert a newline; with `SubmitMode::Never`
+Enter always inserts a newline and the App calls `submit()` itself. The drawn
+block cursor comes from `TextBoxTheme::cursor`; Apps preferring the native
+cursor can clear that style and apply `cursor_position()` to the frame.
+`cargo run --example text_box` shows both configurations side by side.
 
 ## Popup menu
 
