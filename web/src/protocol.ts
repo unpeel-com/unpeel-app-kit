@@ -14,6 +14,7 @@ export const UI_LIST_ITEM_CAPABILITY = "listItem" as const;
 export const UI_LIST_ITEM_METADATA_CAPABILITY = "listItemMetadata" as const;
 export const UI_LIST_ITEM_ACTIVATE_CAPABILITY = "listItemActivate" as const;
 export const UI_LIST_ITEM_PRESENTATION_CAPABILITY = "listItemPresentation" as const;
+export const UI_LIST_ITEM_STYLED_TEXT_CAPABILITY = "listItemStyledText" as const;
 export const UI_LIST_ITEM_ROLE_CAPABILITY = "listItemRole" as const;
 export const UI_LIST_SELECTION_CAPABILITY = "listSelection" as const;
 export const UI_STATUS_SYMBOL_CAPABILITY = "statusSymbol" as const;
@@ -49,6 +50,7 @@ export const UI_COMPONENT_CAPABILITIES = [
   UI_LIST_ITEM_METADATA_CAPABILITY,
   UI_LIST_ITEM_ACTIVATE_CAPABILITY,
   UI_LIST_ITEM_PRESENTATION_CAPABILITY,
+  UI_LIST_ITEM_STYLED_TEXT_CAPABILITY,
   UI_LIST_ITEM_ROLE_CAPABILITY,
   UI_LIST_SELECTION_CAPABILITY,
   UI_STATUS_SYMBOL_CAPABILITY,
@@ -209,6 +211,8 @@ export interface MarkdownEditorNode {
   placeholder?: string;
   commandHint?: MarkdownCommandHint;
   title?: string;
+  /** Action (kind `cancel`) behind the title's back chevron. */
+  back?: string;
   actions?: MarkdownEditorActions;
   insertMenu?: MenuSpec;
   contextMenu?: MenuSpec;
@@ -224,6 +228,8 @@ export interface FooterActionSpec {
   accelerator?: string;
   role?: FooterActionRole;
   disabled?: boolean;
+  /** In progress; the terminal shows a braille spinner beside the label. */
+  busy?: boolean;
 }
 
 export interface FooterActionsSpec {
@@ -393,6 +399,8 @@ export interface ToggleSpec {
   label: string;
   value: boolean;
   setValue: string;
+  /** `completion` strikes the row when done; `setting` is a plain switch. */
+  role?: "completion" | "setting";
 }
 
 export interface CheckmarkSpec {
@@ -414,6 +422,12 @@ export type ListItemActionRole = "default" | "destructive";
 export type ListItemPrimaryRole = "static" | "toggle" | "checkmark" | "disclosure"
   | "command" | "destructive";
 export type ListPageBehavior = "selection" | "scroll";
+
+export interface ListItemTextRun {
+  text: string;
+  tone?: ListItemTone;
+  emphasis?: ListItemEmphasis;
+}
 
 export interface StatusSymbolSpec {
   type: "status";
@@ -507,13 +521,36 @@ export interface UnsupportedComponentSlot {
 export type ListItemSlot = ToggleSpec | StatusSymbolSpec | BadgeSpec | SparklineSpec | GaugeSpec
   | DisclosureSpec | CheckmarkSpec | UnsupportedComponentSlot;
 
+export type ListRowLayout = { type: "inline" } | { type: "stacked" }
+  | { type: "auto"; stackBelowWidth: number };
+
+/** Full-width band above or below a ListItem's text rows. */
+export type ListItemBand = GaugeSpec | SparklineSpec
+  | { type: "text"; text: string; tone?: ListItemTone }
+  | { type: "divider" };
+
+/** Media column spanning every row of a ListItem. `spec` is the real image. */
+export interface ListItemMedia {
+  side?: "leading" | "trailing";
+  width: number;
+  glyph?: string;
+  tone?: ListItemTone;
+  spec?: Omit<MediaNode, "id" | "type">;
+}
+
+// TODO: the web PageRenderer still draws ListItems on one line; `top`,
+// `bottom`, `media`, and `rowLayout` are typed for wire compatibility and
+// currently ignored when rendering.
 export interface ListItemSpec {
   id: string;
   label: string;
+  labelRuns?: ListItemTextRun[];
   labelTone?: ListItemTone;
   emphasis?: ListItemEmphasis;
   detail?: string;
+  detailRuns?: ListItemTextRun[];
   value?: string;
+  valueRuns?: ListItemTextRun[];
   valueTone?: ListItemTone;
   valueMinWidth?: number;
   done?: boolean;
@@ -521,6 +558,11 @@ export interface ListItemSpec {
   leading?: ListItemSlot;
   trailing?: ListItemSlot;
   accessory?: ListItemSlot;
+  top?: ListItemBand;
+  bottom?: ListItemBand;
+  media?: ListItemMedia;
+  /** Passive separator row; the label is an optional caption. */
+  divider?: boolean;
   delete?: string;
   activate?: string;
   actionRole?: ListItemActionRole;
@@ -537,6 +579,7 @@ export interface ListSpec {
   pageOverlap?: number;
   pageBehavior?: ListPageBehavior;
   spacePagesDown?: boolean;
+  rowLayout?: ListRowLayout;
   contextMenu?: MenuSpec;
 }
 
@@ -607,6 +650,8 @@ export interface TreeItem {
   id: string;
   label: string;
   kind: TreeItemKind;
+  /** Muted secondary text after the label. */
+  detail?: string;
   hidden?: boolean;
   symlink?: boolean;
   childState?: TreeChildState;
@@ -667,7 +712,6 @@ export type UiNode = CanvasPageNode | MarkdownEditorNode | MediaNode | MenuNode 
 export function isTextBoxNode(node: UiNode): node is TextBoxNode {
   return node.type === "textBox";
 }
-
 
 export function isCanvasPageNode(node: UiNode): node is CanvasPageNode {
   return node.type === "canvasPage";
@@ -1022,6 +1066,11 @@ export function uiNodeCapabilities(node: UiNode): readonly string[] | undefined 
   if (node.back !== undefined) capabilities.push(UI_PAGE_BACK_CAPABILITY);
   if (node.body.items.some((item) => item.detail !== undefined || item.value !== undefined)) {
     capabilities.push(UI_LIST_ITEM_METADATA_CAPABILITY);
+  }
+  if (node.body.items.some((item) => (item.labelRuns?.length ?? 0) > 0
+    || (item.detailRuns?.length ?? 0) > 0
+    || (item.valueRuns?.length ?? 0) > 0)) {
+    capabilities.push(UI_LIST_ITEM_STYLED_TEXT_CAPABILITY);
   }
   if (node.body.items.some((item) => item.activate !== undefined)) {
     capabilities.push(UI_LIST_ITEM_ACTIVATE_CAPABILITY);
@@ -2535,6 +2584,7 @@ function validateListItem(
   register(item.id, `${path}.id`);
   requireString(item.label, `${path}.label`, true);
   requireSingleLine(item.label, `${path}.label`);
+  validateListItemTextRuns(item.labelRuns, item.label, `${path}.labelRuns`);
   validateOptionalListItemTone(item.labelTone, `${path}.labelTone`);
   validateOptionalListItemTone(item.valueTone, `${path}.valueTone`);
   if (item.emphasis !== undefined && !["regular", "strong"].includes(String(item.emphasis))) {
@@ -2544,10 +2594,12 @@ function validateListItem(
     requireString(item.detail, `${path}.detail`, true);
     requireSingleLine(item.detail, `${path}.detail`);
   }
+  validateListItemTextRuns(item.detailRuns, item.detail, `${path}.detailRuns`);
   if (item.value !== undefined) {
     requireString(item.value, `${path}.value`, true);
     requireSingleLine(item.value, `${path}.value`);
   }
+  validateListItemTextRuns(item.valueRuns, item.value, `${path}.valueRuns`);
   if (item.valueMinWidth !== undefined) {
     requireSafeInteger(item.valueMinWidth, `${path}.valueMinWidth`);
     if ((item.valueMinWidth as number) > 65_535) {
@@ -2651,9 +2703,6 @@ function validateListItem(
   }
   if (sparklineCount > 1) throw new Error(`${path} accepts at most one Sparkline`);
   if (gaugeCount > 1) throw new Error(`${path} accepts at most one Gauge`);
-  if (gaugeCount > 0 && item.value !== undefined) {
-    throw new Error(`${path}.value is owned by its Gauge caption`);
-  }
   if (disclosureCount > 0 && item.activate === undefined) {
     throw new Error(`${path}.activate is required by Disclosure`);
   }
@@ -2843,6 +2892,36 @@ function validateOptionalListItemTone(value: unknown, path: string): void {
   if (!["default", "muted", "accent", "info", "success", "warning", "danger"]
     .includes(String(value))) {
     throw new Error(`${path} is unsupported`);
+  }
+}
+
+function validateListItemTextRuns(value: unknown, fallback: unknown, path: string): void {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.length > 256) {
+    throw new Error(`${path} must contain at most 256 styled runs`);
+  }
+  if (value.length === 0) return;
+  if (typeof fallback !== "string") {
+    throw new Error(`${path} requires its plain text fallback`);
+  }
+  let text = "";
+  for (const [index, runValue] of value.entries()) {
+    const runPath = `${path}[${index}]`;
+    const run = record(runValue, runPath);
+    requireString(run.text, `${runPath}.text`);
+    requireSingleLine(run.text, `${runPath}.text`);
+    if (new TextEncoder().encode(run.text as string).length > 4_096) {
+      throw new Error(`${runPath}.text must contain at most 4096 bytes`);
+    }
+    validateOptionalListItemTone(run.tone, `${runPath}.tone`);
+    if (run.emphasis !== undefined
+      && !["regular", "strong"].includes(String(run.emphasis))) {
+      throw new Error(`${runPath}.emphasis is unsupported`);
+    }
+    text += run.text as string;
+  }
+  if (text !== fallback) {
+    throw new Error(`${path} must concatenate exactly to its plain text fallback`);
   }
 }
 

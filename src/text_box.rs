@@ -22,7 +22,7 @@ use crate::input::{
     char_len, char_to_byte, display_width, next_word_boundary, ordered, previous_word_boundary,
     take_width, word_bounds,
 };
-use crate::{ColorScheme, DoubleClickTracker, InputFieldTheme, KitTheme};
+use crate::{ColorScheme, DoubleClickTracker, InputFieldTheme, KitTheme, SPINNER_FRAMES};
 #[cfg(feature = "ui-bridge")]
 use crate::{
     NodeId, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent,
@@ -33,7 +33,6 @@ use crate::{
 pub const TEXT_BOX_COMPONENT_CAPABILITY: &str = "textBox";
 const DEFAULT_MAX_TEXT_BYTES: usize = 1024 * 1024;
 
-const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DEFAULT_MIN_ROWS: u16 = 3;
 const DEFAULT_MAX_ROWS: u16 = 10;
 const HINT_SEPARATOR: &str = " │ ";

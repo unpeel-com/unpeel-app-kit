@@ -705,6 +705,30 @@ action. A later shared fixture carries Usage's bounded quota as a trailing
 Gauge, including its numeric ratio and App-authored remaining/reset caption;
 there is no parallel Ratatui-only meter or renderer-owned percentage transform.
 
+### Multi-row ListItems
+
+`List.rowLayout` (`inline` default, `stacked`, or `auto` with
+`stackBelowWidth`) tells the terminal whether to put detail and value on a
+second row. `ListItem.top` and `ListItem.bottom` are optional full-width
+`listItemBand`s (a Gauge, a Sparkline, toned text, or a divider) on their
+own rows; `ListItem.media` is an optional column of `width` cells spanning
+the item with a tone, glyph, and optional embedded MediaSpec. All four are
+omitted when unset, so existing snapshots are unchanged.
+
+`ListItem.divider: true` marks a passive separator row whose `label` is an
+optional caption; renderers must not focus or activate it.
+
+SwiftUI interprets all of these: `.stacked` moves the value beneath the
+label, bands render as a full-width linear meter, sparkline, caption, or
+rule, the media column shows the real image for path and inline sources
+(blob sources fall back to the glyph block until a row-level loader exists),
+divider rows are unselectable headers that keyboard navigation skips, and a
+busy footer action shows a small activity indicator.
+
+TODO (web, deferred per AGENTS.md): the web PageRenderer still draws
+ListItems on one line and ignores these fields; its types keep the wire
+compatible. Terminal thumbnails for `media.spec` are a follow-up.
+
 ## Explorer/Tree v1
 
 Filetree and Markdown's note picker are not flat Lists. Their standalone TUIs

@@ -573,12 +573,13 @@ textarea {
 
 .unpeel-list-item__content {
   display: grid;
-  flex: 1;
+  flex: 1 1 auto;
   gap: 1px;
   min-width: 0;
 }
 
 .unpeel-list-item__label[data-emphasis="strong"],
+.unpeel-list-item__text-run[data-emphasis="strong"],
 .unpeel-status-symbol[data-emphasis="strong"] {
   font-weight: 650;
 }
@@ -623,11 +624,26 @@ textarea {
   font-size: 11px;
 }
 
+.unpeel-list-item__label,
+.unpeel-list-item__detail,
+.unpeel-list-item__value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unpeel-list-item__value {
+  flex: 0 1 auto;
+  max-width: 48%;
+  text-align: end;
+}
+
 .unpeel-list-item__gauge {
   display: grid;
   flex: 0 1 190px;
   gap: 4px;
-  min-width: 120px;
+  min-width: 84px;
   color: var(--muted);
 }
 

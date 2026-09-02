@@ -12,9 +12,10 @@ use crossterm::event::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     BUTTON_COMPONENT_CAPABILITY, Button, ButtonRole, FOOTER_ACTIONS_CAPABILITY, FooterAction,
@@ -75,6 +76,9 @@ pub struct TreeItem {
     pub id: String,
     pub label: String,
     pub kind: TreeItemKind,
+    /// Muted secondary text after the label (a file's first heading, a size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
@@ -94,12 +98,20 @@ impl TreeItem {
             id: id.into(),
             label: label.into(),
             kind,
+            detail: None,
             hidden: false,
             symlink: false,
             child_state: TreeChildState::Loaded,
             expanded: false,
             children: Vec::new(),
         }
+    }
+
+    /// Muted secondary text shown after the label.
+    #[must_use]
+    pub fn detail(mut self, detail: Option<String>) -> Self {
+        self.detail = detail.filter(|detail| !detail.is_empty());
+        self
     }
 
     #[must_use]
@@ -665,6 +677,8 @@ pub struct TreeTheme {
     pub parent: Style,
     pub symlink: Style,
     pub selected: Style,
+    /// Pointer hover on an unselected row; distinct from `selected`.
+    pub hovered: Style,
     pub empty: Style,
     pub scrollbar_track: Style,
     pub scrollbar_thumb: Style,
@@ -683,6 +697,7 @@ impl TreeTheme {
             parent: Style::new().fg(theme.accent),
             symlink: Style::new().fg(Color::Cyan),
             selected: theme.selected_row,
+            hovered: theme.hovered_row,
             empty: Style::new().fg(theme.subtle),
             scrollbar_track: theme.scrollbar_track,
             scrollbar_thumb: theme.scrollbar_thumb,
@@ -914,10 +929,14 @@ impl Widget for TreeWidget<'_> {
                 }
                 input.set_placeholder(filter.placeholder.clone());
                 input.set_prompt(format!("{}: ", filter.label));
-                input.set_theme(
-                    self.filter_theme
-                        .unwrap_or_else(|| self.theme.input_theme()),
-                );
+                let mut theme = self
+                    .filter_theme
+                    .unwrap_or_else(|| self.theme.input_theme());
+                if input.focused() {
+                    // Focused filter rows take the shared selection background.
+                    theme.style = self.theme.style.patch(self.theme.selected);
+                }
+                input.set_theme(theme);
                 input.widget().render(row, buffer);
             } else {
                 let value = if filter.value.is_empty() {
@@ -937,12 +956,18 @@ impl Widget for TreeWidget<'_> {
                 .render(row, buffer);
             }
         }
-        let location_height = u16::from(area.height > filter_height);
+        // The location row is the screen title; keep one padding row under
+        // it whenever there is room.
+        let location_height = match area.height.saturating_sub(filter_height) {
+            0 => 0,
+            1 => 1,
+            _ => 2,
+        };
         let location_area = Rect::new(
             area.x,
             area.y.saturating_add(filter_height),
             area.width,
-            location_height,
+            location_height.min(1),
         );
         Line::styled(
             format!(
@@ -1041,9 +1066,7 @@ impl Widget for TreeWidget<'_> {
                 )
                 .pointer(self.state.pointer())
                 .interaction_styles(
-                    self.theme
-                        .selected
-                        .add_modifier(ratatui::style::Modifier::DIM),
+                    self.theme.hovered,
                     self.theme
                         .selected
                         .add_modifier(ratatui::style::Modifier::BOLD),
@@ -1096,10 +1119,7 @@ impl Widget for TreeWidget<'_> {
                     self.theme.selected
                 }
                 TerminalPointerPhase::Idle => self.theme.selected,
-                TerminalPointerPhase::Hovered => self
-                    .theme
-                    .selected
-                    .add_modifier(ratatui::style::Modifier::DIM),
+                TerminalPointerPhase::Hovered => self.theme.hovered,
                 TerminalPointerPhase::Pressed => self
                     .theme
                     .selected
@@ -1141,11 +1161,31 @@ impl Widget for TreeWidget<'_> {
                 }
                 TreeItemKind::File => item.label.clone(),
             };
-            Line::styled(
-                format!("{indent}{marker}"),
-                if highlighted { active } else { inactive },
-            )
-            .render(content, buffer);
+            let label_style = if highlighted { active } else { inactive };
+            let label = format!("{indent}{marker}");
+            let mut spans = vec![Span::styled(label.clone(), label_style)];
+            if let Some(detail) = &item.detail {
+                let remaining = usize::from(content.width)
+                    .saturating_sub(UnicodeWidthStr::width(label.as_str()))
+                    .saturating_sub(2);
+                if remaining > 0 {
+                    let detail_style = if highlighted {
+                        active.add_modifier(ratatui::style::Modifier::DIM)
+                    } else {
+                        self.theme.style.patch(self.theme.filter)
+                    };
+                    let clipped = detail
+                        .chars()
+                        .scan(0usize, |used, character| {
+                            *used +=
+                                UnicodeWidthStr::width(character.encode_utf8(&mut [0; 4]) as &str);
+                            (*used <= remaining).then_some(character)
+                        })
+                        .collect::<String>();
+                    spans.push(Span::styled(format!("  {clipped}"), detail_style));
+                }
+            }
+            Line::from(spans).render(content, buffer);
         }
         if overflow {
             VerticalScrollbar::new(
@@ -1203,6 +1243,15 @@ fn validate_items(
                 format!("{item_path}.label"),
                 "Tree labels must be single-line",
             ));
+        }
+        if let Some(detail) = &item.detail {
+            validate_text(detail, MAX_TREE_TEXT_BYTES, &format!("{item_path}.detail"))?;
+            if detail.contains(['\n', '\r']) {
+                return Err(TreeValidationError::new(
+                    format!("{item_path}.detail"),
+                    "Tree details must be single-line",
+                ));
+            }
         }
         match item.kind {
             TreeItemKind::Parent => {

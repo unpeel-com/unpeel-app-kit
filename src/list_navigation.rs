@@ -74,6 +74,9 @@ pub enum ListNavigationOutcome {
     Scrolled(usize),
     Activate(usize),
     Back,
+    /// Focus moved to the Page's back row above the first item
+    /// (see `Page::navigate`).
+    FocusedBack,
 }
 
 /// Role-aware result of interpreting one key for a focused row collection.
@@ -213,6 +216,20 @@ impl ListKeymap {
     }
 }
 
+/// Per-item geometry and focusability fed to [`RowNavigationState::prepare_with_rows`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowMetrics {
+    pub height: u16,
+    pub selectable: bool,
+}
+
+impl RowMetrics {
+    #[must_use]
+    pub const fn new(height: u16, selectable: bool) -> Self {
+        Self { height, selectable }
+    }
+}
+
 /// Selection, scroll offset, and last-rendered geometry for a row collection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowNavigationState {
@@ -226,22 +243,17 @@ pub struct RowNavigationState {
     reveal_selected: bool,
     rows_area: Rect,
     pointer: TerminalPointerState,
+    /// Per-item terminal heights. Empty means every item is one row.
+    heights: Vec<u16>,
+    /// Per-item focusability. Empty means every item is selectable.
+    selectable: Vec<bool>,
+    /// Cumulative start row per item plus the total (`heights.len() + 1`).
+    starts: Vec<usize>,
 }
 
 impl Default for RowNavigationState {
     fn default() -> Self {
-        Self {
-            selected: None,
-            offset: 0,
-            viewport_rows: 0,
-            scroll_padding: 0,
-            page_overlap: 1,
-            page_behavior: ListPageBehavior::Selection,
-            boundary_behavior: RowBoundaryBehavior::Clamp,
-            reveal_selected: true,
-            rows_area: Rect::default(),
-            pointer: TerminalPointerState::new(),
-        }
+        Self::new(None)
     }
 }
 
@@ -259,6 +271,9 @@ impl RowNavigationState {
             reveal_selected: true,
             rows_area: Rect::new(0, 0, 0, 0),
             pointer: TerminalPointerState::new(),
+            heights: Vec::new(),
+            selectable: Vec::new(),
+            starts: Vec::new(),
         }
     }
 
@@ -282,6 +297,109 @@ impl RowNavigationState {
         self.rows_area
     }
 
+    /// Whether every item occupies exactly one terminal row.
+    #[must_use]
+    pub const fn has_uniform_rows(&self) -> bool {
+        self.heights.is_empty()
+    }
+
+    /// Whether keyboard focus and clicks may land on `index`. Dividers and
+    /// other passive rows report `false` and are skipped by navigation.
+    #[must_use]
+    pub fn is_selectable(&self, index: usize) -> bool {
+        self.selectable.get(index).copied().unwrap_or(true)
+    }
+
+    /// Nearest selectable index at or after `from`, then at or before it.
+    fn snap_selectable(&self, from: usize, item_count: usize) -> Option<usize> {
+        if item_count == 0 {
+            return None;
+        }
+        let from = from.min(item_count - 1);
+        (from..item_count)
+            .find(|index| self.is_selectable(*index))
+            .or_else(|| (0..from).rev().find(|index| self.is_selectable(*index)))
+    }
+
+    fn next_selectable(&self, from: usize, item_count: usize) -> Option<usize> {
+        (from.saturating_add(1)..item_count).find(|index| self.is_selectable(*index))
+    }
+
+    fn previous_selectable(&self, from: usize) -> Option<usize> {
+        (0..from).rev().find(|index| self.is_selectable(*index))
+    }
+
+    /// Terminal rows used by one item after the last render (1 when unknown).
+    #[must_use]
+    pub fn item_height(&self, index: usize) -> usize {
+        self.heights
+            .get(index)
+            .map_or(1, |height| usize::from(*height))
+    }
+
+    /// First terminal row of `index` measured from the top of the content.
+    #[must_use]
+    pub fn item_start_row(&self, index: usize) -> usize {
+        if self.heights.is_empty() {
+            return index;
+        }
+        self.starts[index.min(self.heights.len())]
+    }
+
+    /// Complete virtual row count for a scrollbar.
+    #[must_use]
+    pub fn content_rows(&self, item_count: usize) -> usize {
+        if self.heights.is_empty() {
+            item_count
+        } else {
+            self.starts.last().copied().unwrap_or(0)
+        }
+    }
+
+    /// Content row at the top of the viewport (the first row of `offset`).
+    #[must_use]
+    pub fn offset_row(&self) -> usize {
+        self.item_start_row(self.offset)
+    }
+
+    /// Items that fit completely in the viewport from the current offset.
+    #[must_use]
+    pub fn visible_item_count(&self, item_count: usize) -> usize {
+        if self.heights.is_empty() {
+            return self
+                .viewport_rows
+                .min(item_count.saturating_sub(self.offset));
+        }
+        let mut used = 0usize;
+        let mut count = 0usize;
+        for index in self.offset..item_count.min(self.heights.len()) {
+            used += self.item_height(index);
+            if used > self.viewport_rows {
+                break;
+            }
+            count += 1;
+        }
+        count
+    }
+
+    /// Index of the item that owns content row `row` (clamped to the end).
+    fn item_at_row(&self, row: usize) -> usize {
+        if self.heights.is_empty() {
+            return row;
+        }
+        self.starts[..self.heights.len()]
+            .partition_point(|start| *start <= row)
+            .saturating_sub(1)
+    }
+
+    /// First item whose start row is at or after `row`.
+    fn item_starting_at_or_after(&self, row: usize) -> usize {
+        if self.heights.is_empty() {
+            return row;
+        }
+        self.starts[..self.heights.len()].partition_point(|start| *start < row)
+    }
+
     #[must_use]
     pub const fn pointer(&self) -> TerminalPointerState {
         self.pointer
@@ -298,6 +416,9 @@ impl RowNavigationState {
 
     #[must_use]
     pub fn pointer_phase_at(&self, index: usize) -> TerminalPointerPhase {
+        if !self.is_selectable(index) {
+            return TerminalPointerPhase::Idle;
+        }
         self.row_area(index)
             .map_or(TerminalPointerPhase::Idle, |area| self.pointer.phase(area))
     }
@@ -307,6 +428,7 @@ impl RowNavigationState {
         self.pointer
             .position()
             .and_then(|position| self.item_at(position, item_count))
+            .filter(|index| self.is_selectable(*index))
     }
 
     pub const fn set_navigation(
@@ -333,7 +455,7 @@ impl RowNavigationState {
         let next = if item_count == 0 {
             None
         } else {
-            selected.map(|index| index.min(item_count - 1))
+            selected.and_then(|index| self.snap_selectable(index, item_count))
         };
         let changed = next != self.selected;
         self.selected = next;
@@ -365,7 +487,13 @@ impl RowNavigationState {
 
     #[must_use]
     pub fn max_offset(&self, item_count: usize) -> usize {
-        item_count.saturating_sub(self.viewport_rows)
+        if self.heights.is_empty() {
+            return item_count.saturating_sub(self.viewport_rows);
+        }
+        let item_count = item_count.min(self.heights.len());
+        let total = self.starts[item_count];
+        let first_row = total.saturating_sub(self.viewport_rows);
+        self.starts[..item_count].partition_point(|start| *start < first_row)
     }
 
     /// Applies one shared key action using the last rendered viewport size.
@@ -382,12 +510,21 @@ impl RowNavigationState {
             self.offset = 0;
             return ListNavigationOutcome::None;
         }
-        let current = self.selected.unwrap_or(0).min(item_count - 1);
+        let Some(current) = self.snap_selectable(self.selected.unwrap_or(0), item_count) else {
+            self.selected = None;
+            return ListNavigationOutcome::None;
+        };
         if action == ListNavigationAction::Activate {
             self.selected = Some(current);
             return ListNavigationOutcome::Activate(current);
         }
-        let page = self.viewport_rows.saturating_sub(self.page_overlap).max(1);
+        let page = if self.heights.is_empty() {
+            self.viewport_rows
+        } else {
+            self.visible_item_count(item_count)
+        }
+        .saturating_sub(self.page_overlap)
+        .max(1);
         if self.page_behavior == ListPageBehavior::Scroll
             && matches!(
                 action,
@@ -405,24 +542,34 @@ impl RowNavigationState {
                 ListNavigationOutcome::None
             };
         }
+        let wrap = self.boundary_behavior == RowBoundaryBehavior::Wrap;
+        let first = self.snap_selectable(0, item_count).unwrap_or(current);
+        let last = self.previous_selectable(item_count).unwrap_or(current);
         let next = match action {
-            ListNavigationAction::Down
-                if self.boundary_behavior == RowBoundaryBehavior::Wrap
-                    && current == item_count - 1 =>
-            {
-                0
+            ListNavigationAction::Down => self
+                .next_selectable(current, item_count)
+                .unwrap_or(if wrap { first } else { current }),
+            ListNavigationAction::Up => {
+                self.previous_selectable(current)
+                    .unwrap_or(if wrap { last } else { current })
             }
-            ListNavigationAction::Up
-                if self.boundary_behavior == RowBoundaryBehavior::Wrap && current == 0 =>
-            {
-                item_count - 1
+            ListNavigationAction::First => first,
+            ListNavigationAction::Last => last,
+            ListNavigationAction::PageDown => {
+                let target = current.saturating_add(page).min(item_count - 1);
+                (target..item_count)
+                    .find(|index| self.is_selectable(*index))
+                    .or_else(|| self.previous_selectable(target + 1))
+                    .unwrap_or(current)
             }
-            ListNavigationAction::Down => current.saturating_add(1),
-            ListNavigationAction::Up => current.saturating_sub(1),
-            ListNavigationAction::First => 0,
-            ListNavigationAction::Last => item_count - 1,
-            ListNavigationAction::PageDown => current.saturating_add(page),
-            ListNavigationAction::PageUp => current.saturating_sub(page),
+            ListNavigationAction::PageUp => {
+                let target = current.saturating_sub(page);
+                (0..=target)
+                    .rev()
+                    .find(|index| self.is_selectable(*index))
+                    .or_else(|| self.next_selectable(target.saturating_sub(1), item_count))
+                    .unwrap_or(current)
+            }
             ListNavigationAction::Activate | ListNavigationAction::Back => current,
         }
         .min(item_count - 1);
@@ -436,7 +583,49 @@ impl RowNavigationState {
     }
 
     /// Updates geometry and resolves selection/scroll bounds before rendering.
-    pub(crate) fn prepare(&mut self, rows_area: Rect, item_count: usize) {
+    /// Every item is treated as one terminal row.
+    pub fn prepare(&mut self, rows_area: Rect, item_count: usize) {
+        self.heights.clear();
+        self.starts.clear();
+        self.selectable.clear();
+        self.prepare_common(rows_area, item_count);
+    }
+
+    /// Like [`Self::prepare`] with an explicit terminal height per item.
+    /// Offsets stay item indexes; viewport, reveal, paging, scrollbar
+    /// geometry, and hit-testing all count rows through these heights.
+    pub fn prepare_with_heights(&mut self, rows_area: Rect, heights: &[u16]) {
+        self.selectable.clear();
+        self.prepare_with_heights_and_selectable(rows_area, heights);
+    }
+
+    /// Like [`Self::prepare_with_heights`] with per-item focusability. Rows
+    /// flagged `false` (dividers, headers) are skipped by keyboard navigation
+    /// and never selected by [`Self::select`].
+    pub fn prepare_with_rows(&mut self, rows_area: Rect, rows: &[RowMetrics]) {
+        self.selectable.clear();
+        self.selectable
+            .extend(rows.iter().map(|row| row.selectable));
+        let heights = rows.iter().map(|row| row.height).collect::<Vec<_>>();
+        self.prepare_with_heights_and_selectable(rows_area, &heights);
+    }
+
+    fn prepare_with_heights_and_selectable(&mut self, rows_area: Rect, heights: &[u16]) {
+        self.heights.clear();
+        self.heights
+            .extend(heights.iter().map(|height| (*height).max(1)));
+        self.starts.clear();
+        self.starts.reserve(self.heights.len() + 1);
+        let mut total = 0usize;
+        self.starts.push(0);
+        for height in &self.heights {
+            total += usize::from(*height);
+            self.starts.push(total);
+        }
+        self.prepare_common(rows_area, self.heights.len());
+    }
+
+    fn prepare_common(&mut self, rows_area: Rect, item_count: usize) {
         self.rows_area = rows_area;
         self.viewport_rows = usize::from(rows_area.height);
         if item_count == 0 {
@@ -446,7 +635,7 @@ impl RowNavigationState {
             return;
         }
         if let Some(selected) = self.selected {
-            self.selected = Some(selected.min(item_count - 1));
+            self.selected = self.snap_selectable(selected, item_count);
         }
         self.offset = self.offset.min(self.max_offset(item_count));
         if self.reveal_selected {
@@ -467,17 +656,19 @@ impl RowNavigationState {
         let padding = self
             .scroll_padding
             .min(self.viewport_rows.saturating_sub(1) / 2);
-        let first = self.offset.saturating_add(padding);
-        let last_exclusive = self
-            .offset
-            .saturating_add(self.viewport_rows.saturating_sub(padding));
-        if selected < first {
-            self.offset = selected.saturating_sub(padding);
-        } else if selected >= last_exclusive {
-            self.offset = selected
-                .saturating_add(1)
+        let selected_start = self.item_start_row(selected);
+        let selected_end = selected_start.saturating_add(self.item_height(selected));
+        let offset_row = self.offset_row();
+        let first_row = offset_row.saturating_add(padding);
+        let last_row_exclusive =
+            offset_row.saturating_add(self.viewport_rows.saturating_sub(padding));
+        if selected_start < first_row {
+            self.offset = self.item_at_row(selected_start.saturating_sub(padding));
+        } else if selected_end > last_row_exclusive {
+            let needed_row = selected_end
                 .saturating_add(padding)
                 .saturating_sub(self.viewport_rows);
+            self.offset = self.item_starting_at_or_after(needed_row).min(selected);
         }
         self.offset = self.offset.min(self.max_offset(item_count));
         self.reveal_selected = false;
@@ -489,24 +680,44 @@ impl RowNavigationState {
         if !self.rows_area.contains(position) {
             return None;
         }
-        let index = self
-            .offset
-            .saturating_add(usize::from(position.y.saturating_sub(self.rows_area.y)));
+        let row = usize::from(position.y.saturating_sub(self.rows_area.y));
+        if self.heights.is_empty() {
+            let index = self.offset.saturating_add(row);
+            return (index < item_count).then_some(index);
+        }
+        let content_row = self.offset_row().saturating_add(row);
+        if content_row >= self.content_rows(item_count) {
+            return None;
+        }
+        let index = self.item_at_row(content_row);
         (index < item_count).then_some(index)
     }
 
+    /// Terminal rectangle of one item after the last render, clipped to the
+    /// viewport. `None` when the item is scrolled out of view.
     #[must_use]
+    pub fn item_area(&self, index: usize) -> Option<Rect> {
+        if index < self.offset {
+            return None;
+        }
+        let row = self.item_start_row(index).saturating_sub(self.offset_row());
+        let row = u16::try_from(row).ok()?;
+        if row >= self.rows_area.height {
+            return None;
+        }
+        let height = u16::try_from(self.item_height(index))
+            .unwrap_or(u16::MAX)
+            .min(self.rows_area.height - row);
+        Some(Rect::new(
+            self.rows_area.x,
+            self.rows_area.y.saturating_add(row),
+            self.rows_area.width,
+            height,
+        ))
+    }
+
     fn row_area(&self, index: usize) -> Option<Rect> {
-        let slot = index.checked_sub(self.offset)?;
-        let row = u16::try_from(slot).ok()?;
-        (row < self.rows_area.height).then(|| {
-            Rect::new(
-                self.rows_area.x,
-                self.rows_area.y.saturating_add(row),
-                self.rows_area.width,
-                1,
-            )
-        })
+        self.item_area(index)
     }
 }
 
@@ -519,6 +730,7 @@ impl RowNavigationState {
 pub struct ListState {
     navigation: RowNavigationState,
     spinner_frame: usize,
+    back_focused: bool,
 }
 
 impl ListState {
@@ -527,7 +739,20 @@ impl ListState {
         Self {
             navigation: RowNavigationState::new(selected),
             spinner_frame: 0,
+            back_focused: false,
         }
+    }
+
+    /// Whether the Page's back row, rather than a list row, holds focus.
+    #[must_use]
+    pub const fn back_focused(&self) -> bool {
+        self.back_focused
+    }
+
+    pub const fn set_back_focused(&mut self, focused: bool) -> bool {
+        let changed = self.back_focused != focused;
+        self.back_focused = focused;
+        changed
     }
 
     #[must_use]
@@ -659,6 +884,119 @@ mod tests {
             ListNavigationOutcome::Scrolled(4)
         );
         assert_eq!(scroll.selected(), Some(1));
+    }
+
+    #[test]
+    fn variable_heights_count_rows_for_offsets_paging_and_hit_testing() {
+        let mut state = ListState::new(Some(0));
+        state.set_navigation(0, 1, ListPageBehavior::Selection);
+        // Heights: 1, 2, 3, 1, 2 (9 rows) in a 5-row viewport.
+        state.prepare_with_heights(Rect::new(0, 0, 20, 5), &[1, 2, 3, 1, 2]);
+        assert!(!state.has_uniform_rows());
+        assert_eq!(state.content_rows(5), 9);
+        assert_eq!(state.item_start_row(2), 3);
+        assert_eq!(state.item_height(2), 3);
+        assert_eq!(state.max_offset(5), 3);
+        assert_eq!(state.visible_item_count(5), 2);
+        assert_eq!(state.item_at(Position::new(0, 4), 5), Some(2));
+        assert_eq!(state.item_area(2), Some(Rect::new(0, 3, 20, 2)));
+        assert_eq!(state.item_area(3), None);
+
+        assert_eq!(
+            state.navigate(ListNavigationAction::PageDown, 5),
+            ListNavigationOutcome::SelectionChanged(1),
+            "a page is the fully visible items minus the overlap"
+        );
+        assert_eq!(state.offset(), 0);
+        state.navigate(ListNavigationAction::Down, 5);
+        assert_eq!(state.selected(), Some(2));
+        assert_eq!(
+            state.offset(),
+            1,
+            "Beta and Gamma fill the five rows exactly"
+        );
+        state.navigate(ListNavigationAction::Down, 5);
+        assert_eq!(state.offset(), 2);
+        assert_eq!(state.offset_row(), 3);
+        state.navigate(ListNavigationAction::Last, 5);
+        assert_eq!(state.offset(), 3);
+        assert_eq!(state.item_at(Position::new(0, 2), 5), Some(4));
+        assert_eq!(state.item_at(Position::new(0, 3), 5), None);
+        state.navigate(ListNavigationAction::Up, 5);
+        state.navigate(ListNavigationAction::Up, 5);
+        assert_eq!(state.selected(), Some(2));
+        assert_eq!(state.offset(), 2);
+
+        let mut scroll = ListState::new(Some(0));
+        scroll.set_navigation(0, 0, ListPageBehavior::Scroll);
+        scroll.prepare_with_heights(Rect::new(0, 0, 20, 5), &[1, 2, 3, 1, 2]);
+        assert_eq!(
+            scroll.navigate(ListNavigationAction::PageDown, 5),
+            ListNavigationOutcome::Scrolled(2)
+        );
+        assert_eq!(scroll.selected(), Some(0));
+
+        // Returning to uniform rows restores the row-per-item behavior.
+        scroll.prepare(Rect::new(0, 0, 20, 5), 5);
+        assert!(scroll.has_uniform_rows());
+        assert_eq!(scroll.max_offset(5), 0);
+    }
+
+    #[test]
+    fn unselectable_rows_are_skipped_by_navigation_and_selection() {
+        let mut state = ListState::new(Some(0));
+        state.set_navigation(0, 1, ListPageBehavior::Selection);
+        // 0: divider, 1: item, 2: divider, 3: item, 4: item, 5: divider
+        let rows = [false, true, false, true, true, false]
+            .map(|selectable| RowMetrics::new(1, selectable));
+        state.prepare_with_rows(Rect::new(0, 0, 20, 4), &rows);
+        assert_eq!(state.selected(), Some(1), "initial selection snaps forward");
+        assert!(!state.is_selectable(0));
+        assert_eq!(
+            state.navigate(ListNavigationAction::Down, 6),
+            ListNavigationOutcome::SelectionChanged(3)
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::Down, 6),
+            ListNavigationOutcome::SelectionChanged(4)
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::Down, 6),
+            ListNavigationOutcome::None,
+            "trailing divider is never the last stop"
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::Up, 6),
+            ListNavigationOutcome::SelectionChanged(3)
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::First, 6),
+            ListNavigationOutcome::SelectionChanged(1)
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::Last, 6),
+            ListNavigationOutcome::SelectionChanged(4)
+        );
+        assert_eq!(
+            state.navigate(ListNavigationAction::PageUp, 6),
+            ListNavigationOutcome::SelectionChanged(1),
+            "page targets snap to the nearest selectable row"
+        );
+        assert!(
+            state.select(Some(2), 6),
+            "selecting a divider snaps forward"
+        );
+        assert_eq!(state.selected(), Some(3));
+        assert!(!state.select(Some(2), 6));
+        assert_eq!(state.hovered_item(6), None);
+
+        let mut wrap = RowNavigationState::new(Some(4));
+        wrap.set_boundary_behavior(RowBoundaryBehavior::Wrap);
+        wrap.prepare_with_rows(Rect::new(0, 0, 20, 4), &rows);
+        assert_eq!(
+            wrap.navigate(ListNavigationAction::Down, 6),
+            ListNavigationOutcome::SelectionChanged(1)
+        );
     }
 
     #[test]

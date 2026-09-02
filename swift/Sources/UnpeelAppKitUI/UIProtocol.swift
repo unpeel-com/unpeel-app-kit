@@ -17,6 +17,7 @@ public enum UnpeelUIProtocol {
     public static let listItemMetadataCapability = "listItemMetadata"
     public static let listItemActivateCapability = "listItemActivate"
     public static let listItemPresentationCapability = "listItemPresentation"
+    public static let listItemStyledTextCapability = "listItemStyledText"
     public static let listItemRoleCapability = "listItemRole"
     public static let listSelectionCapability = "listSelection"
     public static let statusSymbolCapability = "statusSymbol"
@@ -55,6 +56,7 @@ public enum UnpeelUIProtocol {
         listItemMetadataCapability,
         listItemActivateCapability,
         listItemPresentationCapability,
+        listItemStyledTextCapability,
         listItemRoleCapability,
         listSelectionCapability,
         statusSymbolCapability,
@@ -564,6 +566,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
     public let placeholder: String
     public let commandHint: MarkdownCommandHint?
     public let title: String?
+    public let back: String?
     public let actions: MarkdownEditorActions
     public let insertMenu: UIMenuSpec?
     public let contextMenu: UIMenuSpec?
@@ -578,6 +581,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         placeholder: String = "",
         commandHint: MarkdownCommandHint? = nil,
         title: String? = nil,
+        back: String? = nil,
         actions: MarkdownEditorActions = .init(),
         insertMenu: UIMenuSpec? = nil,
         contextMenu: UIMenuSpec? = nil,
@@ -591,6 +595,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         self.placeholder = placeholder
         self.commandHint = commandHint
         self.title = title
+        self.back = back
         self.actions = actions
         self.insertMenu = insertMenu
         self.contextMenu = contextMenu
@@ -606,6 +611,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
         case placeholder
         case commandHint
         case title
+        case back
         case actions
         case insertMenu
         case contextMenu
@@ -628,6 +634,7 @@ public struct MarkdownEditorSpec: Codable, Equatable, Sendable {
             forKey: .commandHint
         )
         title = try container.decodeIfPresent(String.self, forKey: .title)
+        back = try container.decodeIfPresent(String.self, forKey: .back)
         actions = try container.decodeIfPresent(
             MarkdownEditorActions.self,
             forKey: .actions
@@ -1249,6 +1256,8 @@ public struct UIFooterActionSpec: Codable, Equatable, Hashable, Identifiable, Se
     public let accelerator: String?
     public let role: UIFooterActionRole
     public let disabled: Bool
+    /// The action is in progress; renderers show an activity indicator.
+    public let busy: Bool
 
     public init(
         id: String,
@@ -1256,7 +1265,8 @@ public struct UIFooterActionSpec: Codable, Equatable, Hashable, Identifiable, Se
         action: String,
         accelerator: String? = nil,
         role: UIFooterActionRole = .standard,
-        disabled: Bool = false
+        disabled: Bool = false,
+        busy: Bool = false
     ) {
         self.id = id
         self.label = label
@@ -1264,10 +1274,11 @@ public struct UIFooterActionSpec: Codable, Equatable, Hashable, Identifiable, Se
         self.accelerator = accelerator
         self.role = role
         self.disabled = disabled
+        self.busy = busy
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, action, accelerator, role, disabled
+        case id, label, action, accelerator, role, disabled, busy
     }
 
     public init(from decoder: Decoder) throws {
@@ -1278,6 +1289,7 @@ public struct UIFooterActionSpec: Codable, Equatable, Hashable, Identifiable, Se
         accelerator = try container.decodeIfPresent(String.self, forKey: .accelerator)
         role = try container.decodeIfPresent(UIFooterActionRole.self, forKey: .role) ?? .standard
         disabled = try container.decodeIfPresent(Bool.self, forKey: .disabled) ?? false
+        busy = try container.decodeIfPresent(Bool.self, forKey: .busy) ?? false
     }
 }
 
@@ -1430,17 +1442,52 @@ private func ratioCeil(_ value: Int, _ numerator: Int, _ denominator: Int) -> In
     return Int(min(resolved, UInt64(UInt32.max)))
 }
 
+public enum UIToggleRole: String, Codable, Equatable, Hashable, Sendable {
+    /// Marks the row done; shown as a checkbox.
+    case completion
+    /// A preference switch; shown as a switch and never strikes the row.
+    case setting
+}
+
 public struct UIToggleSpec: Codable, Equatable, Hashable, Sendable {
     public let id: String
     public let label: String
     public let value: Bool
     public let setValue: String
+    public let role: UIToggleRole
 
-    public init(id: String, label: String, value: Bool, setValue: String) {
+    public init(
+        id: String,
+        label: String,
+        value: Bool,
+        setValue: String,
+        role: UIToggleRole = .completion
+    ) {
         self.id = id
         self.label = label
         self.value = value
         self.setValue = setValue
+        self.role = role
+    }
+
+    enum CodingKeys: String, CodingKey { case id, label, value, setValue, role }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        label = try container.decode(String.self, forKey: .label)
+        value = try container.decode(Bool.self, forKey: .value)
+        setValue = try container.decode(String.self, forKey: .setValue)
+        role = try container.decodeIfPresent(UIToggleRole.self, forKey: .role) ?? .completion
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(label, forKey: .label)
+        try container.encode(value, forKey: .value)
+        try container.encode(setValue, forKey: .setValue)
+        if role != .completion { try container.encode(role, forKey: .role) }
     }
 }
 
@@ -1471,6 +1518,35 @@ public enum UIListItemTone: String, Codable, Equatable, Hashable, Sendable {
 public enum UIListItemEmphasis: String, Codable, Equatable, Hashable, Sendable {
     case regular
     case strong
+}
+
+public struct UIListItemTextRun: Codable, Equatable, Hashable, Sendable {
+    public let text: String
+    public let tone: UIListItemTone?
+    public let emphasis: UIListItemEmphasis?
+
+    public init(
+        text: String,
+        tone: UIListItemTone? = nil,
+        emphasis: UIListItemEmphasis? = nil
+    ) {
+        self.text = text
+        self.tone = tone
+        self.emphasis = emphasis
+    }
+}
+
+private func listItemRunsAreValid(
+    _ runs: [UIListItemTextRun],
+    fallback: String?
+) -> Bool {
+    if runs.isEmpty { return true }
+    guard runs.count <= 256, let fallback else { return false }
+    return runs.map(\.text).joined() == fallback && runs.allSatisfy {
+        !$0.text.isEmpty && $0.text.utf8.count <= 16_384
+            && !$0.text.contains("\n") && !$0.text.contains("\r")
+            && !$0.text.contains("\0")
+    }
 }
 
 public enum UIListItemActionRole: String, Codable, Equatable, Hashable, Sendable {
@@ -2039,13 +2115,170 @@ extension UIListItemSlot: Codable {
     }
 }
 
+/// How a List lays out each row. Native rows always stack the detail; the
+/// value moves beneath the label for `.stacked`, and `.auto` lets the row
+/// choose by its available width.
+public enum UIListRowLayout: Equatable, Hashable, Sendable {
+    case inline
+    case stacked
+    case auto(stackBelowWidth: Int)
+}
+
+extension UIListRowLayout: Codable {
+    enum CodingKeys: String, CodingKey { case type, stackBelowWidth }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(String.self, forKey: .type) {
+        case "inline": self = .inline
+        case "stacked": self = .stacked
+        case "auto":
+            self = .auto(stackBelowWidth: try container.decode(Int.self, forKey: .stackBelowWidth))
+        case let other:
+            throw DecodingError.dataCorruptedError(
+                forKey: .type,
+                in: container,
+                debugDescription: "unsupported List rowLayout \(other)"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .inline: try container.encode("inline", forKey: .type)
+        case .stacked: try container.encode("stacked", forKey: .type)
+        case let .auto(width):
+            try container.encode("auto", forKey: .type)
+            try container.encode(width, forKey: .stackBelowWidth)
+        }
+    }
+}
+
+/// A full-width band on its own line above or below a ListItem's text.
+public enum UIListItemBand: Equatable, Hashable, Sendable {
+    case gauge(UIGaugeSpec)
+    case sparkline(UISparklineSpec)
+    case text(String, tone: UIListItemTone)
+    case divider
+    case unsupported(kind: String)
+
+    public var id: String? {
+        switch self {
+        case let .gauge(gauge): gauge.id
+        case let .sparkline(sparkline): sparkline.id
+        case .text, .divider, .unsupported: nil
+        }
+    }
+}
+
+extension UIListItemBand: Codable {
+    enum CodingKeys: String, CodingKey { case type, text, tone }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(String.self, forKey: .type)
+        switch kind {
+        case "gauge": self = .gauge(try UIGaugeSpec(from: decoder))
+        case "sparkline": self = .sparkline(try UISparklineSpec(from: decoder))
+        case "text":
+            self = .text(
+                try container.decode(String.self, forKey: .text),
+                tone: try container.decodeIfPresent(UIListItemTone.self, forKey: .tone) ?? .default
+            )
+        case "divider": self = .divider
+        default: self = .unsupported(kind: kind)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .gauge(gauge):
+            try container.encode("gauge", forKey: .type)
+            try gauge.encode(to: encoder)
+        case let .sparkline(sparkline):
+            try container.encode("sparkline", forKey: .type)
+            try sparkline.encode(to: encoder)
+        case let .text(text, tone):
+            try container.encode("text", forKey: .type)
+            try container.encode(text, forKey: .text)
+            if tone != .default { try container.encode(tone, forKey: .tone) }
+        case .divider:
+            try container.encode("divider", forKey: .type)
+        case let .unsupported(kind):
+            try container.encode(kind, forKey: .type)
+        }
+    }
+}
+
+public enum UIListItemMediaSide: String, Codable, Equatable, Hashable, Sendable {
+    case leading
+    case trailing
+}
+
+/// A media column spanning every line of a ListItem. `spec` is the real
+/// image; without it renderers show a tone-colored block with the glyph.
+public struct UIListItemMedia: Codable, Equatable, Hashable, Sendable {
+    public let side: UIListItemMediaSide
+    /// Terminal columns reserved for the block (1 through 12).
+    public let width: Int
+    public let glyph: String?
+    public let tone: UIListItemTone
+    public let spec: MediaSpec?
+
+    public init(
+        side: UIListItemMediaSide = .leading,
+        width: Int,
+        glyph: String? = nil,
+        tone: UIListItemTone = .default,
+        spec: MediaSpec? = nil
+    ) {
+        self.side = side
+        self.width = width
+        self.glyph = glyph
+        self.tone = tone
+        self.spec = spec
+    }
+
+    enum CodingKeys: String, CodingKey { case side, width, glyph, tone, spec }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        side = try container.decodeIfPresent(UIListItemMediaSide.self, forKey: .side) ?? .leading
+        width = try container.decode(Int.self, forKey: .width)
+        glyph = try container.decodeIfPresent(String.self, forKey: .glyph)
+        tone = try container.decodeIfPresent(UIListItemTone.self, forKey: .tone) ?? .default
+        spec = try container.decodeIfPresent(MediaSpec.self, forKey: .spec)
+        guard (1...12).contains(width) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .width,
+                in: container,
+                debugDescription: "ListItem media width must be between 1 and 12"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if side != .leading { try container.encode(side, forKey: .side) }
+        try container.encode(width, forKey: .width)
+        try container.encodeIfPresent(glyph, forKey: .glyph)
+        if tone != .default { try container.encode(tone, forKey: .tone) }
+        try container.encodeIfPresent(spec, forKey: .spec)
+    }
+}
+
 public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendable {
     public let id: String
     public let label: String
+    public let labelRuns: [UIListItemTextRun]
     public let labelTone: UIListItemTone
     public let emphasis: UIListItemEmphasis
     public let detail: String?
+    public let detailRuns: [UIListItemTextRun]
     public let value: String?
+    public let valueRuns: [UIListItemTextRun]
     public let valueTone: UIListItemTone
     public let valueMinWidth: Int?
     public var done: Bool
@@ -2053,6 +2286,14 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     public var leading: UIListItemSlot?
     public var trailing: UIListItemSlot?
     public var accessory: UIListItemSlot?
+    /// Full-width band above the text rows.
+    public let top: UIListItemBand?
+    /// Full-width band below the text rows.
+    public let bottom: UIListItemBand?
+    /// Media column spanning the item.
+    public let media: UIListItemMedia?
+    /// A passive separator row; `label` is an optional caption.
+    public let divider: Bool
     public let delete: String?
     public let activate: String?
     public let actionRole: UIListItemActionRole
@@ -2060,10 +2301,13 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     public init(
         id: String,
         label: String,
+        labelRuns: [UIListItemTextRun] = [],
         labelTone: UIListItemTone = .default,
         emphasis: UIListItemEmphasis = .regular,
         detail: String? = nil,
+        detailRuns: [UIListItemTextRun] = [],
         value: String? = nil,
+        valueRuns: [UIListItemTextRun] = [],
         valueTone: UIListItemTone = .muted,
         valueMinWidth: Int? = nil,
         done: Bool = false,
@@ -2071,16 +2315,23 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         leading: UIListItemSlot? = nil,
         trailing: UIListItemSlot? = nil,
         accessory: UIListItemSlot? = nil,
+        top: UIListItemBand? = nil,
+        bottom: UIListItemBand? = nil,
+        media: UIListItemMedia? = nil,
+        divider: Bool = false,
         delete: String? = nil,
         activate: String? = nil,
         actionRole: UIListItemActionRole = .default
     ) {
         self.id = id
         self.label = label
+        self.labelRuns = labelRuns
         self.labelTone = labelTone
         self.emphasis = emphasis
         self.detail = detail
+        self.detailRuns = detailRuns
         self.value = value
+        self.valueRuns = valueRuns
         self.valueTone = valueTone
         self.valueMinWidth = valueMinWidth
         self.done = done
@@ -2088,24 +2339,42 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         self.leading = leading
         self.trailing = trailing
         self.accessory = accessory
+        self.top = top
+        self.bottom = bottom
+        self.media = media
+        self.divider = divider
         self.delete = delete
         self.activate = activate
         self.actionRole = actionRole
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, labelTone, emphasis, detail, value, valueTone, valueMinWidth
-        case done, busy, leading, trailing, accessory, delete, activate, actionRole
+        case id, label, labelRuns, labelTone, emphasis, detail, detailRuns
+        case value, valueRuns, valueTone, valueMinWidth
+        case done, busy, leading, trailing, accessory, top, bottom, media, divider
+        case delete, activate, actionRole
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         label = try container.decode(String.self, forKey: .label)
+        labelRuns = try container.decodeIfPresent(
+            [UIListItemTextRun].self,
+            forKey: .labelRuns
+        ) ?? []
         labelTone = try container.decodeIfPresent(UIListItemTone.self, forKey: .labelTone) ?? .default
         emphasis = try container.decodeIfPresent(UIListItemEmphasis.self, forKey: .emphasis) ?? .regular
         detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        detailRuns = try container.decodeIfPresent(
+            [UIListItemTextRun].self,
+            forKey: .detailRuns
+        ) ?? []
         value = try container.decodeIfPresent(String.self, forKey: .value)
+        valueRuns = try container.decodeIfPresent(
+            [UIListItemTextRun].self,
+            forKey: .valueRuns
+        ) ?? []
         valueTone = try container.decodeIfPresent(UIListItemTone.self, forKey: .valueTone) ?? .muted
         valueMinWidth = try container.decodeIfPresent(Int.self, forKey: .valueMinWidth)
         done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
@@ -2113,6 +2382,10 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         leading = try container.decodeIfPresent(UIListItemSlot.self, forKey: .leading)
         trailing = try container.decodeIfPresent(UIListItemSlot.self, forKey: .trailing)
         accessory = try container.decodeIfPresent(UIListItemSlot.self, forKey: .accessory)
+        top = try container.decodeIfPresent(UIListItemBand.self, forKey: .top)
+        bottom = try container.decodeIfPresent(UIListItemBand.self, forKey: .bottom)
+        media = try container.decodeIfPresent(UIListItemMedia.self, forKey: .media)
+        divider = try container.decodeIfPresent(Bool.self, forKey: .divider) ?? false
         delete = try container.decodeIfPresent(String.self, forKey: .delete)
         activate = try container.decodeIfPresent(String.self, forKey: .activate)
         actionRole = try container.decodeIfPresent(
@@ -2121,7 +2394,9 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
         ) ?? .default
         guard [label, detail, value].compactMap({ $0 }).allSatisfy({
             !$0.contains("\n") && !$0.contains("\r")
-        }) else {
+        }), listItemRunsAreValid(labelRuns, fallback: label),
+        listItemRunsAreValid(detailRuns, fallback: detail),
+        listItemRunsAreValid(valueRuns, fallback: value) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .label,
                 in: container,
@@ -2139,7 +2414,8 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
             guard case let .toggle(toggle) = slot else { return nil }
             return toggle
         }
-        guard toggles.count <= 1, toggles.first?.value ?? done == done else {
+        let completion = toggles.first(where: { $0.role == .completion })
+        guard toggles.count <= 1, completion?.value ?? done == done else {
             throw DecodingError.dataCorruptedError(
                 forKey: .done,
                 in: container,
@@ -2204,13 +2480,6 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
                     debugDescription: "Gauge is accepted only once in the trailing slot"
                 )
             }
-            guard value == nil else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .value,
-                    in: container,
-                    debugDescription: "Gauge owns the row's trailing value caption"
-                )
-            }
         }
         let independentRoles = (toggles.isEmpty ? 0 : 1)
             + (checkmarks.isEmpty ? 0 : 1)
@@ -2235,6 +2504,7 @@ public struct UIListItemSpec: Codable, Equatable, Hashable, Identifiable, Sendab
     }
 
     public var primaryRole: UIListItemPrimaryRole {
+        if divider { return .static }
         if [leading, trailing, accessory].contains(where: {
             guard case .toggle? = $0 else { return false }
             return true
@@ -2294,6 +2564,7 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
     public let pageOverlap: Int
     public let pageBehavior: UIListPageBehavior
     public let spacePagesDown: Bool
+    public let rowLayout: UIListRowLayout
     public let contextMenu: UIMenuSpec?
 
     public init(
@@ -2306,6 +2577,7 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
         pageOverlap: Int = 1,
         pageBehavior: UIListPageBehavior = .selection,
         spacePagesDown: Bool = false,
+        rowLayout: UIListRowLayout = .inline,
         contextMenu: UIMenuSpec? = nil
     ) {
         self.id = id
@@ -2317,12 +2589,13 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
         self.pageOverlap = pageOverlap
         self.pageBehavior = pageBehavior
         self.spacePagesDown = spacePagesDown
+        self.rowLayout = rowLayout
         self.contextMenu = contextMenu
     }
 
     enum CodingKeys: String, CodingKey {
         case id, items, emptyMessage, selectedID = "selectedId", select, scrollPadding
-        case pageOverlap, pageBehavior, spacePagesDown, contextMenu
+        case pageOverlap, pageBehavior, spacePagesDown, rowLayout, contextMenu
     }
 
     public init(from decoder: Decoder) throws {
@@ -2336,6 +2609,7 @@ public struct UIListSpec: Codable, Equatable, Hashable, Sendable {
         pageOverlap = try container.decodeIfPresent(Int.self, forKey: .pageOverlap) ?? 1
         pageBehavior = try container.decodeIfPresent(UIListPageBehavior.self, forKey: .pageBehavior) ?? .selection
         spacePagesDown = try container.decodeIfPresent(Bool.self, forKey: .spacePagesDown) ?? false
+        rowLayout = try container.decodeIfPresent(UIListRowLayout.self, forKey: .rowLayout) ?? .inline
         contextMenu = try container.decodeIfPresent(UIMenuSpec.self, forKey: .contextMenu)
         guard (0...Int(UInt16.max)).contains(scrollPadding),
               (0...Int(UInt16.max)).contains(pageOverlap)
@@ -2758,6 +3032,11 @@ public struct PageSpec: Codable, Equatable, Hashable, Sendable {
         }) {
             capabilities.append(UnpeelUIProtocol.listItemPresentationCapability)
         }
+        if list.items.contains(where: {
+            !$0.labelRuns.isEmpty || !$0.detailRuns.isEmpty || !$0.valueRuns.isEmpty
+        }) {
+            capabilities.append(UnpeelUIProtocol.listItemStyledTextCapability)
+        }
         if hasStatus { capabilities.append(UnpeelUIProtocol.statusSymbolCapability) }
         if hasBadge { capabilities.append(UnpeelUIProtocol.badgeCapability) }
         if hasSparkline { capabilities.append(UnpeelUIProtocol.sparklineCapability) }
@@ -2798,6 +3077,7 @@ public struct UITreeItem: Codable, Equatable, Hashable, Sendable, Identifiable {
     public let id: String
     public let label: String
     public let kind: UITreeItemKind
+    public let detail: String?
     public let hidden: Bool
     public let symlink: Bool
     public var childState: UITreeChildState
@@ -2808,6 +3088,7 @@ public struct UITreeItem: Codable, Equatable, Hashable, Sendable, Identifiable {
         id: String,
         label: String,
         kind: UITreeItemKind,
+        detail: String? = nil,
         hidden: Bool = false,
         symlink: Bool = false,
         childState: UITreeChildState = .loaded,
@@ -2817,6 +3098,7 @@ public struct UITreeItem: Codable, Equatable, Hashable, Sendable, Identifiable {
         self.id = id
         self.label = label
         self.kind = kind
+        self.detail = detail
         self.hidden = hidden
         self.symlink = symlink
         self.childState = childState
@@ -2825,7 +3107,7 @@ public struct UITreeItem: Codable, Equatable, Hashable, Sendable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, label, kind, hidden, symlink, childState, expanded, children
+        case id, label, kind, detail, hidden, symlink, childState, expanded, children
     }
 
     public init(from decoder: Decoder) throws {
@@ -2833,6 +3115,7 @@ public struct UITreeItem: Codable, Equatable, Hashable, Sendable, Identifiable {
         id = try container.decode(String.self, forKey: .id)
         label = try container.decode(String.self, forKey: .label)
         kind = try container.decode(UITreeItemKind.self, forKey: .kind)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
         hidden = try container.decodeIfPresent(Bool.self, forKey: .hidden) ?? false
         symlink = try container.decodeIfPresent(Bool.self, forKey: .symlink) ?? false
         childState = try container.decodeIfPresent(

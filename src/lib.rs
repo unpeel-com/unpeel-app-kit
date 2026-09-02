@@ -11,6 +11,7 @@
 #![deny(unsafe_code)]
 
 mod agent;
+mod app_metadata;
 mod bar_chart;
 mod click;
 mod components;
@@ -40,10 +41,12 @@ mod pointer;
 #[cfg(feature = "ui-bridge")]
 #[allow(unsafe_code)]
 mod process_security;
+mod runner;
 mod scrollbar;
 mod selectable;
 mod semantic_menu;
 mod sparkline;
+mod spinner;
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 mod surface;
 mod text_box;
@@ -63,6 +66,7 @@ pub use agent::{
     AgentBridge, AgentError, AgentProjectContext, clipboard_sequence, is_hosted, path_reference,
     send_reference_to_agent, send_to_agent,
 };
+pub use app_metadata::AppMetadata;
 pub use bar_chart::{
     BAR_CHART_COMPONENT_CAPABILITY, BarChart, BarChartBar, BarChartEmphasis, BarChartWidget,
 };
@@ -73,10 +77,12 @@ pub use components::{
     FooterActions, FooterActionsWidget, INPUT_COMPONENT_CAPABILITY, Input,
     LIST_COMPONENT_CAPABILITY, LIST_ITEM_ACTIVATE_CAPABILITY, LIST_ITEM_COMPONENT_CAPABILITY,
     LIST_ITEM_METADATA_CAPABILITY, LIST_ITEM_PRESENTATION_CAPABILITY, LIST_ITEM_ROLE_CAPABILITY,
-    LIST_SELECTION_CAPABILITY, List, ListItem, ListItemActionRole, ListItemEmphasis, ListItemSlot,
-    ListItemTone, ListWidget, PAGE_BACK_CAPABILITY, PAGE_COMPONENT_CAPABILITY, Page, PageBodySlot,
-    PageHeaderSlot, PageLayout, PagePointerDecision, PageTheme, PageWidget,
-    STATUS_SYMBOL_COMPONENT_CAPABILITY, StatusSymbol, TOGGLE_COMPONENT_CAPABILITY, Toggle,
+    LIST_ITEM_STYLED_TEXT_CAPABILITY, LIST_SELECTION_CAPABILITY, List, ListItem,
+    ListItemActionRole, ListItemBand, ListItemEmphasis, ListItemMedia, ListItemMediaSide,
+    ListItemSlot, ListItemTextRun, ListItemTone, ListRowLayout, ListWidget, PAGE_BACK_CAPABILITY,
+    PAGE_COMPONENT_CAPABILITY, Page, PageBodySlot, PageHeaderSlot, PageLayout, PagePointerDecision,
+    PageTheme, PageWidget, STATUS_SYMBOL_COMPONENT_CAPABILITY, StatusSymbol,
+    TOGGLE_COMPONENT_CAPABILITY, Toggle,
 };
 pub use content::{
     CONTENT_COMPONENT_CAPABILITY, CONTENT_SELECTION_CAPABILITY, Content, ContentEmphasis,
@@ -93,7 +99,8 @@ pub use drop_target::{
 };
 pub use editor::{EditorBridge, EditorError, open_in_editor};
 pub use explorer::{
-    Explorer, ExplorerEntry, ExplorerEvent, ExplorerInput, ExplorerTheme, ExplorerWidget,
+    Explorer, ExplorerEntry, ExplorerEntryDetail, ExplorerEvent, ExplorerInput, ExplorerTheme,
+    ExplorerWidget,
 };
 pub use gauge::{GAUGE_COMPONENT_CAPABILITY, Gauge, GaugeWidget};
 pub use host::AppReporter;
@@ -105,7 +112,8 @@ pub use line_chart::{
 };
 pub use list_navigation::{
     ListKeymap, ListNavigationAction, ListNavigationOutcome, ListPageBehavior, ListState,
-    RowBoundaryBehavior, RowKeyDecision, RowNavigationState, RowPointerDecision, RowPrimaryRole,
+    RowBoundaryBehavior, RowKeyDecision, RowMetrics, RowNavigationState, RowPointerDecision,
+    RowPrimaryRole,
 };
 pub use markdown::{MarkdownCommandHint, MarkdownCommandHintVisibility};
 #[cfg(all(feature = "markdown-text-area", feature = "ui-bridge"))]
@@ -137,6 +145,7 @@ pub use menu::{MenuItem, MenuItemTone, MenuTheme, PopupMenu};
 pub use navigator::Navigator;
 pub use path::display_path_from_root;
 pub use pointer::{TerminalPointerPhase, TerminalPointerState};
+pub use runner::{App, AppAction, AppValue, Flow, Reduce, Session, run_app};
 pub use scrollbar::VerticalScrollbar;
 pub use selectable::SelectableRow;
 pub use semantic_menu::{
@@ -146,6 +155,7 @@ pub use semantic_menu::{
 pub use sparkline::{
     ChartValue, SPARKLINE_COMPONENT_CAPABILITY, Sparkline, SparklinePoint, SparklineWidget,
 };
+pub use spinner::{SPINNER_FRAMES, Spinner, SpinnerWidget};
 #[cfg(any(feature = "surface-embed", feature = "ui-bridge"))]
 pub use surface::{
     CANVAS_PAGE_COMPONENT_CAPABILITY, CanvasControl, CanvasPage, CanvasPageLayout, CanvasPageTheme,
@@ -173,18 +183,18 @@ pub use tree::{
 };
 #[cfg(feature = "ui-bridge")]
 pub use ui::{
-    ActionId, AppInstanceId, AppMetadata, ClientId, EventId, MAX_SAFE_UI_INTEGER,
-    MAX_UI_FRAME_BYTES, MarkdownEditorActions, MarkdownEditorSpec, MarkdownMenuTrigger,
-    MarkdownPresentation, NodeId, ParticipantId, RendererId, TextEdit, TextPosition, TextRange,
-    TextSelection, UI_DELTA_CAPABILITY, UI_MARKDOWN_COMMAND_HINT_CAPABILITY,
-    UI_MARKDOWN_EDITOR_CAPABILITY, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION,
-    UI_PROTOCOL_NAME, UI_PROTOCOL_VERSION, UI_SOCKET_ENV, UI_TOKEN_ENV, UiAck, UiAckStatus,
-    UiAction, UiAttach, UiAttached, UiComponent, UiDelta, UiDeltaOperation, UiErrorMessage,
-    UiEvent, UiEventKind, UiEventValue, UiGrant, UiLifecycle, UiMessage, UiNode, UiParticipant,
-    UiParticipantKind, UiPresence, UiPresenceMember, UiProtocolError, UiRendererMetadata,
-    UiRendererState, UiRequestSnapshot, UiSnapshot, UiValidationError, ViewId, decode_ui_frame,
-    encode_ui_frame, markdown_delta_operations, negotiate_ui_protocol_version,
-    page_delta_operations, read_ui_message, tree_delta_operations, write_ui_message,
+    ActionId, AppInstanceId, ClientId, EventId, MAX_SAFE_UI_INTEGER, MAX_UI_FRAME_BYTES,
+    MarkdownEditorActions, MarkdownEditorSpec, MarkdownMenuTrigger, MarkdownPresentation, NodeId,
+    ParticipantId, RendererId, TextEdit, TextPosition, TextRange, TextSelection,
+    UI_DELTA_CAPABILITY, UI_MARKDOWN_COMMAND_HINT_CAPABILITY, UI_MARKDOWN_EDITOR_CAPABILITY,
+    UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UI_PROTOCOL_VERSION,
+    UI_SOCKET_ENV, UI_TOKEN_ENV, UiAck, UiAckStatus, UiAction, UiAttach, UiAttached, UiComponent,
+    UiDelta, UiDeltaOperation, UiErrorMessage, UiEvent, UiEventKind, UiEventValue, UiGrant,
+    UiLifecycle, UiMessage, UiNode, UiParticipant, UiParticipantKind, UiPresence, UiPresenceMember,
+    UiProtocolError, UiRendererMetadata, UiRendererState, UiRequestSnapshot, UiSnapshot,
+    UiValidationError, ViewId, decode_ui_frame, encode_ui_frame, markdown_delta_operations,
+    negotiate_ui_protocol_version, page_delta_operations, read_ui_message, tree_delta_operations,
+    write_ui_message,
 };
 #[cfg(feature = "ui-bridge")]
 pub use ui_auth::{

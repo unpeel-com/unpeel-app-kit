@@ -11,6 +11,7 @@ import {
   type LineChartSpec,
   type ListItemSlot,
   type ListItemSpec,
+  type ListItemTextRun,
   type ListSpec,
   type PageNode,
   type SparklineSpec,
@@ -388,28 +389,42 @@ export class PageRenderer {
     labelContent.className = "unpeel-list-item__content";
     const label = document.createElement("span");
     label.className = "unpeel-list-item__label";
-    label.textContent = item.label;
-    label.dataset.tone = item.labelTone ?? "default";
-    label.dataset.emphasis = item.emphasis ?? "regular";
+    this.appendListItemText(
+      label,
+      item.label,
+      item.labelRuns,
+      item.labelTone ?? "default",
+      item.emphasis ?? "regular",
+    );
     labelContent.append(label);
     if (item.detail !== undefined) {
       const detail = document.createElement("span");
       detail.className = "unpeel-list-item__detail";
-      detail.textContent = item.detail;
+      this.appendListItemText(detail, item.detail, item.detailRuns, "muted", "regular");
       labelContent.append(detail);
     }
     row.append(labelContent);
     if (item.value !== undefined) {
       const value = document.createElement("span");
       value.className = "unpeel-list-item__value";
-      value.textContent = item.value;
-      value.dataset.tone = item.valueTone ?? "muted";
+      this.appendListItemText(
+        value,
+        item.value,
+        item.valueRuns,
+        item.valueTone ?? "muted",
+        "regular",
+      );
       const minimum = item.valueMinWidth
         ?? Math.min(item.value.length + 11, 65_535);
       value.dataset.minColumns = String(minimum);
       row.append(value);
     }
-    this.appendSlot(row, item.trailing, item.valueTone ?? "muted");
+    this.appendSlot(
+      row,
+      item.trailing,
+      item.valueTone ?? "muted",
+      item.value === undefined,
+    );
     this.appendSlot(row, item.accessory, item.valueTone ?? "muted");
     if (item.delete !== undefined) {
       const remove = document.createElement("button");
@@ -429,15 +444,41 @@ export class PageRenderer {
     row: HTMLElement,
     slot: ListItemSlot | undefined,
     valueTone: ListItemSpec["valueTone"],
+    showGaugeCaption = true,
   ): void {
     if (slot === undefined) return;
     if (isToggleSlot(slot)) row.append(this.toggle(slot));
     else if (isStatusSlot(slot)) row.append(this.status(slot));
     else if (isBadgeSlot(slot)) row.append(this.badge(slot));
     else if (isSparklineSlot(slot)) row.append(this.sparkline(slot, valueTone ?? "muted"));
-    else if (isGaugeSlot(slot)) row.append(this.compactGauge(slot, valueTone ?? "muted"));
+    else if (isGaugeSlot(slot)) {
+      row.append(this.compactGauge(slot, valueTone ?? "muted", showGaugeCaption));
+    }
     else if (isDisclosureSlot(slot)) row.append(this.disclosure());
     else if (isCheckmarkSlot(slot)) row.append(this.checkmark(slot));
+  }
+
+  private appendListItemText(
+    element: HTMLElement,
+    fallback: string,
+    runs: ListItemTextRun[] | undefined,
+    tone: NonNullable<ListItemSpec["labelTone"]>,
+    emphasis: NonNullable<ListItemSpec["emphasis"]>,
+  ): void {
+    element.dataset.tone = tone;
+    element.dataset.emphasis = emphasis;
+    if (runs === undefined || runs.length === 0) {
+      element.textContent = fallback;
+      return;
+    }
+    for (const run of runs) {
+      const span = document.createElement("span");
+      span.className = "unpeel-list-item__text-run";
+      span.textContent = run.text;
+      if (run.tone !== undefined) span.dataset.tone = run.tone;
+      if (run.emphasis !== undefined) span.dataset.emphasis = run.emphasis;
+      element.append(span);
+    }
   }
 
   private sparkline(
@@ -505,6 +546,7 @@ export class PageRenderer {
   private compactGauge(
     gauge: GaugeSpec,
     tone: NonNullable<ListItemSpec["valueTone"]>,
+    showCaption = true,
   ): HTMLDivElement {
     const element = document.createElement("div");
     element.className = "unpeel-list-item__gauge";
@@ -512,6 +554,7 @@ export class PageRenderer {
     const caption = document.createElement("span");
     caption.className = "unpeel-list-item__gauge-caption";
     caption.textContent = gaugeValueLabel(gauge);
+    caption.hidden = !showCaption;
     const progress = document.createElement("progress");
     progress.max = 1;
     progress.value = gauge.ratio;
@@ -997,11 +1040,13 @@ export class PageRenderer {
     for (const row of element.querySelectorAll<HTMLElement>(".unpeel-list-item")) {
       const item = list.items.find((candidate) => candidate.id === row.dataset.id);
       const value = row.querySelector<HTMLElement>(".unpeel-list-item__value");
+      const gaugeCaption = row.querySelector<HTMLElement>(".unpeel-list-item__gauge-caption");
       if (item === undefined || value === null) continue;
       const minimum = item.valueMinWidth ?? Math.min((item.value?.length ?? 0) + 11, 65_535);
       const update = (): void => {
         const width = row.getBoundingClientRect().width;
         if (width > 0) value.hidden = width < minimum * 8;
+        if (gaugeCaption !== null) gaugeCaption.hidden = !value.hidden;
       };
       const observer = new ResizeObserver(update);
       observer.observe(row);

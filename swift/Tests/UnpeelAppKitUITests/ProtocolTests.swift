@@ -43,6 +43,51 @@ func nativeMarkdownSelectionReconciliationPreservesOnlyUnsyncedLocalRanges() {
 }
 
 @Test
+func richListItemsDecodeBandsMediaDividersAndBusyFooters() throws {
+    let json = """
+    {"id":"usage-page","type":"page","title":"Usage","body":{"type":"list","id":"rows",
+    "rowLayout":{"type":"auto","stackBelowWidth":60},
+    "items":[
+      {"id":"sep","label":"Providers","divider":true},
+      {"id":"codex","label":"Codex","value":"42% left",
+       "trailing":{"type":"gauge","id":"slot","ratio":0.42,"label":"Quota","accessibilityText":"42 percent left"},
+       "bottom":{"type":"gauge","id":"band","ratio":0.42,"label":"Quota","accessibilityText":"42 percent left"},
+       "top":{"type":"text","text":"Shipped","tone":"success"},
+       "media":{"side":"trailing","width":4,"glyph":"CX","tone":"info"}}
+    ]},
+    "footer":{"actions":[{"id":"refresh","label":"refreshing…","action":"refresh","busy":true,"disabled":true}]}}
+    """
+    let node = try JSONDecoder().decode(UINode.self, from: Data(json.utf8))
+    guard case let .page(page) = node.component, case let .list(list) = page.body else {
+        Issue.record("expected a Page with a List body")
+        return
+    }
+    #expect(list.rowLayout == .auto(stackBelowWidth: 60))
+    #expect(list.items[0].divider)
+    #expect(list.items[0].primaryRole == .static)
+    let codex = list.items[1]
+    #expect(codex.bottom?.id == "band")
+    if case let .text(text, tone) = codex.top {
+        #expect(text == "Shipped" && tone == .success)
+    } else {
+        Issue.record("expected a text band")
+    }
+    #expect(codex.media?.side == .trailing)
+    #expect(codex.media?.width == 4)
+    #expect(codex.media?.glyph == "CX")
+    #expect(page.footer.actions[0].busy)
+    let encoded = try JSONEncoder().encode(node)
+    let decoded = try JSONDecoder().decode(UINode.self, from: encoded)
+    #expect(decoded == node)
+    #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(
+            UIListItemMedia.self,
+            from: Data(#"{"width":40}"#.utf8)
+        )
+    }
+}
+
+@Test
 func textBoxFixtureDecodesAndRoundTrips() throws {
     let testDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     let fixture = testDirectory

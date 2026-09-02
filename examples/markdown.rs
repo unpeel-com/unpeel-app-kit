@@ -92,6 +92,7 @@ impl MarkdownApp {
                 cursor_line: Style::new().bg(Color::Rgb(27, 31, 38)),
                 cursor: Style::new().fg(Color::White),
                 selection: Style::new().bg(Color::Rgb(47, 78, 120)),
+                hovered: Style::new().bg(Color::Rgb(40, 44, 52)),
                 gutter: Style::new().fg(Color::DarkGray),
                 current_gutter: Style::new().fg(Color::Cyan),
                 scrollbar_track: Style::new().fg(Color::Rgb(40, 44, 52)),
@@ -315,6 +316,9 @@ fn drain_bridge(app: &mut MarkdownApp, bridge: &mut UiBridge) -> Result<(), Box<
                             publish_projection_change(app, bridge, previous, true)?;
                             UiEventOutcome::Applied
                         }
+                        Ok(Some(MarkdownEditorEvent::BackRequested)) => UiEventOutcome::Rejected(
+                            "this example has no screen to go back to".to_owned(),
+                        ),
                         Ok(Some(MarkdownEditorEvent::SaveRequested)) => {
                             app.save_without_revision()?;
                             UiEventOutcome::Applied

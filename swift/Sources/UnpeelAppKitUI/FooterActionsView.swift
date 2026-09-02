@@ -46,6 +46,11 @@ public struct FooterActionsView: View {
                             .font(.system(.caption, design: .monospaced).weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
+                    if action.busy {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .accessibilityLabel("In progress")
+                    }
                     Text(action.label)
                 }
             }

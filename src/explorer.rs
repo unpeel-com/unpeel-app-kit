@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -9,7 +11,7 @@ use crossterm::event::{
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 
@@ -28,9 +30,44 @@ pub struct ExplorerEntry {
     directory: bool,
     symlink: bool,
     parent: bool,
+    detail: Option<String>,
+}
+
+/// App-owned secondary text for a file row, for example a document's first
+/// heading. Called once per file on every refresh, so keep it cheap and
+/// bounded (read a prefix, never the whole file).
+#[derive(Clone)]
+pub struct ExplorerEntryDetail(Arc<EntryDetailFn>);
+
+type EntryDetailFn = dyn Fn(&Path) -> Option<String> + Send + Sync;
+
+impl ExplorerEntryDetail {
+    #[must_use]
+    pub fn new(provider: impl Fn(&Path) -> Option<String> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(provider))
+    }
+
+    fn resolve(&self, path: &Path) -> Option<String> {
+        let detail = (self.0)(path)?;
+        let detail = sanitize_label(detail.trim());
+        (!detail.is_empty()).then_some(detail)
+    }
+}
+
+impl fmt::Debug for ExplorerEntryDetail {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ExplorerEntryDetail(..)")
+    }
 }
 
 impl ExplorerEntry {
+    /// Muted secondary text shown after the name, when a detail provider is
+    /// installed.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
     /// Absolute Host-local path represented by this row.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -141,6 +178,8 @@ pub struct ExplorerTheme {
     pub symlink: Style,
     pub parent: Style,
     pub selected: Style,
+    /// Pointer hover on an unselected row; distinct from `selected`.
+    pub hovered: Style,
     pub empty: Style,
     pub scrollbar_track: Style,
     pub scrollbar_thumb: Style,
@@ -202,6 +241,7 @@ impl ExplorerTheme {
             symlink: Style::new().fg(Color::Cyan),
             parent: Style::new().fg(palette.accent),
             selected: palette.selected_row,
+            hovered: palette.hovered_row,
             empty: Style::new().fg(palette.subtle),
             scrollbar_track: palette.scrollbar_track,
             scrollbar_thumb: palette.scrollbar_thumb,
@@ -235,6 +275,7 @@ pub struct Explorer {
     list_area: Rect,
     semantic_ids: HashMap<PathBuf, String>,
     next_semantic_id: u64,
+    detail_provider: Option<ExplorerEntryDetail>,
 }
 
 impl Explorer {
@@ -294,6 +335,7 @@ impl Explorer {
             filter,
             show_path: true,
             theme,
+            detail_provider: None,
             area: Rect::default(),
             list_area: Rect::default(),
             semantic_ids: HashMap::new(),
@@ -432,13 +474,14 @@ impl Explorer {
                     entry.directory,
                     entry.symlink,
                     entry.parent,
+                    entry.detail.clone(),
                 )
             })
             .collect::<Vec<_>>();
         let selected_path = self.selected().map(|entry| entry.path.clone());
         let mut selected_id = None;
         let mut items = Vec::with_capacity(entries.len());
-        for (path, name, directory, symlink, parent) in entries {
+        for (path, name, directory, symlink, parent, detail) in entries {
             let id = self.semantic_id_for_path(&path);
             if selected_path.as_ref() == Some(&path) {
                 selected_id = Some(id.clone());
@@ -454,15 +497,25 @@ impl Explorer {
                             .is_some_and(|name| name.to_string_lossy().starts_with('.')),
                     )
             } else {
-                crate::TreeItem::file(id, name).symlink(symlink).hidden(
-                    path.file_name()
-                        .is_some_and(|name| name.to_string_lossy().starts_with('.')),
-                )
+                crate::TreeItem::file(id, name)
+                    .symlink(symlink)
+                    .hidden(
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with('.')),
+                    )
+                    .detail(detail)
             };
             items.push(item);
         }
         let root = self.navigation_root.as_deref().unwrap_or(&self.cwd);
-        let location = crate::display_path_from_root(&self.cwd, root);
+        let mut location = crate::display_path_from_root(&self.cwd, root);
+        if location == "." {
+            // The root itself reads as its folder name, not a lone dot.
+            location = root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(location);
+        }
         let mut tree =
             crate::Tree::new(label, location, items).empty_message(if self.filter().is_empty() {
                 "empty folder"
@@ -618,6 +671,18 @@ impl Explorer {
             return Ok(());
         }
         self.replace_file_extensions(None)
+    }
+
+    /// Installs App-owned secondary text for file rows and refreshes.
+    pub fn set_entry_detail(&mut self, provider: Option<ExplorerEntryDetail>) -> io::Result<()> {
+        self.detail_provider = provider;
+        self.refresh()
+    }
+
+    /// Builder form of [`Self::set_entry_detail`].
+    pub fn with_entry_detail(mut self, provider: ExplorerEntryDetail) -> io::Result<Self> {
+        self.set_entry_detail(Some(provider))?;
+        Ok(self)
     }
 
     /// Whether directories without a matching descendant file are hidden.
@@ -895,13 +960,18 @@ impl Explorer {
     pub fn refresh(&mut self) -> io::Result<()> {
         let preferred = self.selected().map(|entry| entry.path.clone());
         let previous = self.selected_index();
-        let all_entries = read_entries(
+        let mut all_entries = read_entries(
             &self.cwd,
             self.show_hidden,
             self.parent_allowed_at(&self.cwd),
             self.file_extensions.as_deref(),
             self.prune_unmatched_directories,
         )?;
+        if let Some(provider) = &self.detail_provider {
+            for entry in all_entries.iter_mut().filter(|entry| !entry.directory) {
+                entry.detail = provider.resolve(&entry.path);
+            }
+        }
         self.all_entries = all_entries;
         self.rebuild_filtered(preferred.as_deref());
         if preferred.is_none() {
@@ -1214,7 +1284,8 @@ impl Explorer {
             ListNavigationOutcome::None
             | ListNavigationOutcome::Scrolled(_)
             | ListNavigationOutcome::Activate(_)
-            | ListNavigationOutcome::Back => ExplorerEvent::None,
+            | ListNavigationOutcome::Back
+            | ListNavigationOutcome::FocusedBack => ExplorerEvent::None,
         }
     }
 
@@ -1303,13 +1374,29 @@ impl Explorer {
         let filter_height = u16::from(self.show_filter && area.height > 0);
         if filter_height == 1 {
             let filter_area = Rect::new(area.x, area.y, area.width, 1);
+            // The filter is a row like any other: keyboard focus paints the
+            // shared selection background behind it while the cursor types.
+            let mut theme = input_theme(&self.theme);
+            if self.filter.focused() {
+                theme.style = self.theme.style.patch(self.theme.selected);
+            }
+            self.filter.set_theme(theme);
             self.filter.widget().render(filter_area, buffer);
         } else {
             self.filter.clear_render_state();
         }
 
-        let path_height = u16::from(self.show_path && area.height > filter_height);
-        if path_height == 1 {
+        // The path row is the screen title; keep one padding row beneath it.
+        let path_height = if !self.show_path {
+            0
+        } else {
+            match area.height.saturating_sub(filter_height) {
+                0 => 0,
+                1 => 1,
+                _ => 2,
+            }
+        };
+        if path_height >= 1 {
             let header = Rect::new(area.x, area.y.saturating_add(filter_height), area.width, 1);
             let label_width = area.width.saturating_sub(self.theme.left_padding);
             let label = format!(
@@ -1382,7 +1469,7 @@ impl Explorer {
                     self.theme.selected
                 }
                 TerminalPointerPhase::Idle => self.theme.selected,
-                TerminalPointerPhase::Hovered => self.theme.selected.add_modifier(Modifier::DIM),
+                TerminalPointerPhase::Hovered => self.theme.hovered,
                 TerminalPointerPhase::Pressed => self.theme.selected.add_modifier(Modifier::BOLD),
             });
             let content = SelectableRow::new(highlighted, active_style)
@@ -1391,15 +1478,29 @@ impl Explorer {
                 .right_padding(0)
                 .paint(row, buffer);
             let label = self.entry_label(entry, selected, content.width);
-            Line::styled(
-                label,
-                if highlighted {
-                    active_style
-                } else {
-                    inactive_style
-                },
-            )
-            .render(content, buffer);
+            let label_style = if highlighted {
+                active_style
+            } else {
+                inactive_style
+            };
+            let mut spans = vec![Span::styled(label.clone(), label_style)];
+            if let Some(detail) = entry.detail() {
+                let remaining = usize::from(content.width)
+                    .saturating_sub(display_width(&label))
+                    .saturating_sub(2);
+                if remaining > 0 {
+                    let detail_style = if highlighted {
+                        active_style.add_modifier(Modifier::DIM)
+                    } else {
+                        self.theme.style.patch(self.theme.filter)
+                    };
+                    spans.push(Span::styled(
+                        format!("  {}", truncate_end(detail, remaining)),
+                        detail_style,
+                    ));
+                }
+            }
+            Line::from(spans).render(content, buffer);
             drags.register(row, &entry.path);
         }
 
@@ -1501,6 +1602,7 @@ fn read_entries(
             directory: true,
             symlink: false,
             parent: true,
+            detail: None,
         });
     }
 
@@ -1536,6 +1638,7 @@ fn read_entries(
                 directory,
                 symlink,
                 parent: false,
+                detail: None,
             })
         })
         .collect::<Vec<_>>();
@@ -1976,7 +2079,8 @@ mod tests {
         }
         let mut explorer = Explorer::new(temp.path()).unwrap();
         let mut drags = DragSurface::disabled();
-        let area = Rect::new(0, 0, 20, 5);
+        // Six rows: path title, padding, and a four-row viewport.
+        let area = Rect::new(0, 0, 20, 6);
         let mut buffer = Buffer::empty(area);
         explorer.widget(&mut drags).render(area, &mut buffer);
 
@@ -2096,18 +2200,19 @@ mod tests {
         };
         let mut explorer = Explorer::new(temp.path()).unwrap().with_theme(theme);
         let mut drags = DragSurface::disabled();
-        let area = Rect::new(0, 0, 24, 5);
+        // Filter, path title, padding row, then three entry rows.
+        let area = Rect::new(0, 0, 24, 6);
         let mut buffer = Buffer::empty(area);
         drags.begin_frame();
 
         explorer.widget(&mut drags).render(area, &mut buffer);
 
         assert_ne!(buffer[(0, 0)].symbol(), "┌");
-        assert_eq!(buffer[(23, 2)].bg, Color::Red);
-        assert_eq!(buffer[(0, 2)].symbol(), " ");
-        assert_eq!(buffer[(1, 2)].symbol(), " ");
+        assert_eq!(buffer[(23, 3)].bg, Color::Red);
+        assert_eq!(buffer[(0, 3)].symbol(), " ");
+        assert_eq!(buffer[(1, 3)].symbol(), " ");
         assert_eq!(drags.regions().len(), 4);
-        assert_eq!(drags.regions()[0].area, Rect::new(0, 1, 24, 1));
+        assert_eq!(drags.regions()[0].area, Rect::new(0, 1, 24, 1), "path row");
         assert_eq!(
             drags.regions()[0].path,
             fs::canonicalize(temp.path()).unwrap()
@@ -2128,16 +2233,17 @@ mod tests {
         }
         let mut explorer = Explorer::new(temp.path()).unwrap();
         let mut drags = DragSurface::disabled();
-        let area = Rect::new(2, 3, 12, 4);
+        let area = Rect::new(2, 3, 12, 5);
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 10));
 
         explorer.widget(&mut drags).render(area, &mut buffer);
 
-        assert_eq!(explorer.list_area(), Rect::new(2, 5, 11, 2));
-        assert_eq!(buffer[(13, 5)].symbol(), "┃");
-        assert!(explorer.entry_at(Position::new(2, 5)).is_some());
-        assert!(explorer.entry_at(Position::new(13, 5)).is_none());
-        assert!(explorer.select_at(Position::new(2, 6)));
+        // Path title plus its padding row occupy the first two rows.
+        assert_eq!(explorer.list_area(), Rect::new(2, 6, 11, 2));
+        assert_eq!(buffer[(13, 6)].symbol(), "┃");
+        assert!(explorer.entry_at(Position::new(2, 6)).is_some());
+        assert!(explorer.entry_at(Position::new(13, 6)).is_none());
+        assert!(explorer.select_at(Position::new(2, 7)));
         assert_eq!(explorer.selected_index(), 1);
     }
 

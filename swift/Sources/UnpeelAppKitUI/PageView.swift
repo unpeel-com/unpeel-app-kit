@@ -41,6 +41,8 @@ private struct PageContent: View {
     @State private var selectedID: String?
     @State private var listHeight: CGFloat = 0
     @FocusState private var listFocused: Bool
+    @FocusState private var backFocused: Bool
+    @State private var backHovered = false
 
     init(nodeID: String, page: PageSpec, onAction: @escaping (UIAction) -> Void) {
         self.nodeID = nodeID
@@ -60,6 +62,8 @@ private struct PageContent: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 if let back = page.back {
+                    // The chevron alone carries the gray focus/hover fill,
+                    // matching the terminal's back row.
                     Button {
                         onAction(UIAction(
                             nodeID: nodeID,
@@ -68,8 +72,25 @@ private struct PageContent: View {
                         ))
                     } label: {
                         Image(systemName: "chevron.left")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 24, height: 22)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color.primary.opacity(
+                                        backFocused || backHovered ? 0.14 : 0
+                                    ))
+                            )
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.plain)
+                    .focusable()
+                    .focused($backFocused)
+                    .onHover { backHovered = $0 }
+                    .onKeyPress(.downArrow) {
+                        backFocused = false
+                        listFocused = true
+                        return .handled
+                    }
                     .accessibilityLabel("Back")
                 }
                 Text(page.title)
@@ -230,7 +251,7 @@ private struct PageContent: View {
     }
 
     private func select(_ itemID: String, in list: UIListSpec) {
-        guard list.items.contains(where: { $0.id == itemID }) else { return }
+        guard list.items.contains(where: { $0.id == itemID && !$0.divider }) else { return }
         let changed = selectedID != itemID
         selectLocally(itemID, in: list)
         guard changed, let action = list.select else { return }
@@ -280,22 +301,34 @@ private struct PageContent: View {
         let visibleRows = max(Int(listHeight / 28), 1)
         let pageRows = max(visibleRows - max(list.pageOverlap, 0), 1)
         let last = list.items.count - 1
-        let next: Int
+        let selectable = { (index: Int) in !list.items[index].divider }
+        // Divider rows are passive: every move lands on the nearest real row.
+        let forward = { (from: Int) in (from...last).first(where: selectable) }
+        let backward = { (from: Int) in (0...from).reversed().first(where: selectable) }
+        let target: Int?
         switch decision {
         case .down:
-            next = min(current + 1, last)
+            target = forward(min(current + 1, last)) ?? (current + 1 > last ? nil : backward(current))
         case .up:
-            next = max(current - 1, 0)
+            target = backward(max(current - 1, 0)) ?? (current == 0 ? nil : forward(current))
+            if page.back != nil, current == forward(0), target == nil || target == current {
+                // Up from the first row focuses the back chevron.
+                backFocused = true
+                return .handled
+            }
         case .first:
-            next = 0
+            target = forward(0)
         case .last:
-            next = last
+            target = backward(last)
         case .pageDown:
-            next = min(current + pageRows, last)
+            target = forward(min(current + pageRows, last)) ?? backward(last)
         case .pageUp:
-            next = max(current - pageRows, 0)
+            target = backward(max(current - pageRows, 0)) ?? forward(0)
         case .invokePrimary, .back:
             return .ignored
+        }
+        guard let next = target, next != current || decision == .first || decision == .last else {
+            return .handled
         }
         select(list.items[next].id, in: list)
         proxy.scrollTo(list.items[next].id, anchor: list.scrollPadding > 0 ? .center : nil)
@@ -385,16 +418,53 @@ private struct PageContent: View {
         }
     }
 
+    @ViewBuilder
     private func itemRow(_ item: UIListItemSpec, list: UIListSpec) -> some View {
-        Group {
-            if let value = item.value {
-                ViewThatFits(in: .horizontal) {
-                    itemRowContent(item, list: list, value: value)
-                        .frame(minWidth: CGFloat(item.valueMinWidth ?? value.count + 11) * 8)
-                    itemRowContent(item, list: list, value: nil)
+        if item.divider {
+            dividerRow(item)
+        } else {
+            richItemRow(item, list: list)
+        }
+    }
+
+    /// A passive separator row: a thin rule with an optional muted caption.
+    private func dividerRow(_ item: UIListItemSpec) -> some View {
+        HStack(spacing: 8) {
+            if !item.label.isEmpty {
+                Text(item.label)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Rectangle()
+                .fill(.quaternary)
+                .frame(height: 1)
+        }
+        .padding(.vertical, 2)
+        .selectionDisabled()
+        .listRowSeparator(.hidden)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    /// Text rows plus optional bands, wrapped by a media column that spans
+    /// every line of the item.
+    private func richItemRow(_ item: UIListItemSpec, list: UIListSpec) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            if let media = item.media, media.side == .leading {
+                ListItemMediaView(media: media, color: color(for: media.tone))
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                if let band = item.top {
+                    bandView(band, item: item, list: list)
                 }
-            } else {
-                itemRowContent(item, list: list, value: nil)
+                textRows(item, list: list)
+                if let band = item.bottom {
+                    bandView(band, item: item, list: list)
+                }
+            }
+            if let media = item.media, media.side == .trailing {
+                ListItemMediaView(media: media, color: color(for: media.tone))
             }
         }
         .contextMenu {
@@ -418,6 +488,63 @@ private struct PageContent: View {
         }
     }
 
+    /// The label line with its slots. `.stacked` moves the value beneath the
+    /// label; `.inline` and `.auto` keep it trailing while it fits.
+    @ViewBuilder
+    private func textRows(_ item: UIListItemSpec, list: UIListSpec) -> some View {
+        if let value = item.value, list.rowLayout != .stacked {
+            ViewThatFits(in: .horizontal) {
+                itemRowContent(item, list: list, value: value)
+                    .frame(minWidth: CGFloat(item.valueMinWidth ?? value.count + 11) * 8)
+                itemRowContent(item, list: list, value: nil)
+            }
+        } else {
+            itemRowContent(item, list: list, value: nil)
+        }
+    }
+
+    /// A band is the whole-row interpretation of a metric. When the row also
+    /// carries a trailing chart of the same kind, the band takes over here,
+    /// matching the terminal.
+    @ViewBuilder
+    private func bandView(_ band: UIListItemBand, item: UIListItemSpec, list: UIListSpec) -> some View {
+        switch band {
+        case let .gauge(gauge):
+            VStack(alignment: .leading, spacing: 2) {
+                ProgressView(value: gauge.ratio, total: 1)
+                    .progressViewStyle(.linear)
+                    .tint(bandColor(for: item))
+                if item.value == nil {
+                    Text(gauge.valueLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(gauge.accessibilityText)
+            .accessibilityValue(gauge.valueLabel)
+        case let .sparkline(sparkline):
+            NativeSparkline(spec: sparkline, color: bandColor(for: item), compact: false)
+                .frame(height: 28)
+        case let .text(text, tone):
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(color(for: tone))
+                .lineLimit(1)
+        case .divider:
+            Rectangle()
+                .fill(.quaternary)
+                .frame(height: 1)
+        case .unsupported:
+            EmptyView()
+        }
+    }
+
+    private func bandColor(for item: UIListItemSpec) -> Color {
+        item.valueTone == .muted ? .accentColor : color(for: item.valueTone)
+    }
+
     private func itemRowContent(
         _ item: UIListItemSpec,
         list: UIListSpec,
@@ -429,16 +556,23 @@ private struct PageContent: View {
                     .controlSize(.small)
                     .accessibilityLabel("Loading")
             }
-            slot(item.leading, itemID: item.id, list: list, valueTone: item.valueTone)
+            slot(
+                item.leading,
+                itemID: item.id,
+                list: list,
+                valueTone: item.valueTone,
+                showGaugeCaption: value == nil
+            )
+            let stackedValue = list.rowLayout == .stacked && value == nil && item.value != nil
             if item.primaryRole == .static {
-                itemLabel(item)
+                itemLabel(item, stackedValue: stackedValue)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Button {
                     listFocused = true
                     _ = invokePrimary(item, in: list)
                 } label: {
-                    itemLabel(item)
+                    itemLabel(item, stackedValue: stackedValue)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
@@ -446,13 +580,29 @@ private struct PageContent: View {
             }
             Spacer(minLength: 4)
             if let value {
-                Text(value)
-                    .foregroundStyle(color(for: item.valueTone))
+                listItemText(
+                    value,
+                    runs: item.valueRuns,
+                    fallbackTone: item.valueTone,
+                    fallbackEmphasis: .regular
+                )
                     .multilineTextAlignment(.trailing)
                     .fixedSize(horizontal: true, vertical: false)
             }
-            slot(item.trailing, itemID: item.id, list: list, valueTone: item.valueTone)
-            slot(item.accessory, itemID: item.id, list: list, valueTone: item.valueTone)
+            slot(
+                trailingSlot(item),
+                itemID: item.id,
+                list: list,
+                valueTone: item.valueTone,
+                showGaugeCaption: value == nil
+            )
+            slot(
+                item.accessory,
+                itemID: item.id,
+                list: list,
+                valueTone: item.valueTone,
+                showGaugeCaption: value == nil
+            )
             if let action = item.delete {
                 Button {
                     selectLocally(item.id, in: list)
@@ -470,23 +620,70 @@ private struct PageContent: View {
         }
     }
 
-    private func itemLabel(_ item: UIListItemSpec) -> some View {
+    private func itemLabel(_ item: UIListItemSpec, stackedValue: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(item.label)
+            listItemText(
+                item.label,
+                runs: item.labelRuns,
+                fallbackTone: item.actionRole == .destructive ? .danger : item.labelTone,
+                fallbackEmphasis: item.emphasis
+            )
                 .strikethrough(item.done)
-                .fontWeight(item.emphasis == .strong ? .semibold : .regular)
-                .foregroundStyle(
-                    item.actionRole == .destructive
-                        ? Color.red
-                        : (item.done ? Color.secondary : color(for: item.labelTone))
-                )
+                .opacity(item.done ? 0.68 : 1)
             if let detail = item.detail {
-                Text(detail)
+                listItemText(
+                    detail,
+                    runs: item.detailRuns,
+                    fallbackTone: .muted,
+                    fallbackEmphasis: .regular
+                )
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+            }
+            if stackedValue, let value = item.value {
+                listItemText(
+                    value,
+                    runs: item.valueRuns,
+                    fallbackTone: item.valueTone,
+                    fallbackEmphasis: .regular
+                )
+                    .font(.caption)
             }
         }
         .contentShape(Rectangle())
+    }
+
+    /// A trailing chart slot is hidden when a band of the same kind shows the
+    /// same metric across the row.
+    private func trailingSlot(_ item: UIListItemSpec) -> UIListItemSlot? {
+        let bands = [item.top, item.bottom].compactMap { $0 }
+        switch item.trailing {
+        case .gauge? where bands.contains(where: { if case .gauge = $0 { true } else { false } }):
+            return nil
+        case .sparkline? where bands.contains(where: { if case .sparkline = $0 { true } else { false } }):
+            return nil
+        default:
+            return item.trailing
+        }
+    }
+
+    private func listItemText(
+        _ fallback: String,
+        runs: [UIListItemTextRun],
+        fallbackTone: UIListItemTone,
+        fallbackEmphasis: UIListItemEmphasis
+    ) -> Text {
+        let resolved = runs.isEmpty
+            ? [UIListItemTextRun(
+                text: fallback,
+                tone: fallbackTone,
+                emphasis: fallbackEmphasis
+            )]
+            : runs
+        return resolved.reduce(Text("")) { result, run in
+            result + Text(run.text)
+                .foregroundColor(color(for: run.tone ?? fallbackTone))
+                .fontWeight((run.emphasis ?? fallbackEmphasis) == .strong ? .semibold : .regular)
+        }
     }
 
     @ViewBuilder
@@ -494,7 +691,8 @@ private struct PageContent: View {
         _ slot: UIListItemSlot?,
         itemID: String,
         list: UIListSpec,
-        valueTone: UIListItemTone
+        valueTone: UIListItemTone,
+        showGaugeCaption: Bool
     ) -> some View {
         switch slot {
         case let .toggle(toggle):
@@ -517,7 +715,7 @@ private struct PageContent: View {
             }
             .labelsHidden()
             .accessibilityLabel(toggle.label)
-            .toggleStyle(.checkbox)
+            .modifier(ToggleRoleStyle(role: toggle.role))
         case let .status(status):
             Text(status.symbol)
                 .foregroundStyle(color(for: status.tone))
@@ -549,6 +747,7 @@ private struct PageContent: View {
             NativeCompactGauge(
                 spec: gauge,
                 color: color(for: valueTone),
+                showCaption: showGaugeCaption,
                 onActivate: gauge.activate.map { action in
                     {
                         selectLocally(itemID, in: list)
@@ -572,6 +771,74 @@ private struct PageContent: View {
                 .accessibilityValue(checkmark.value ? "Selected" : "Not selected")
         case .unsupported, .none:
             EmptyView()
+        }
+    }
+}
+
+/// Completion toggles are checkboxes; setting toggles are switches.
+private struct ToggleRoleStyle: ViewModifier {
+    let role: UIToggleRole
+
+    func body(content: Content) -> some View {
+        switch role {
+        case .completion:
+            content.toggleStyle(.checkbox)
+        case .setting:
+            content.toggleStyle(.switch).controlSize(.small)
+        }
+    }
+}
+
+/// Media column beside a ListItem: the real image for path and inline
+/// sources, otherwise a tone-colored block with the glyph.
+@MainActor
+private struct ListItemMediaView: View {
+    let media: UIListItemMedia
+    let color: Color
+
+    @State private var image: NSImage?
+
+    private var size: CGSize {
+        CGSize(width: max(36, CGFloat(media.width) * 9), height: 36)
+    }
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle()
+                    .fill(color.opacity(0.85))
+                if let glyph = media.glyph {
+                    Text(glyph)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityLabel(media.spec?.alt ?? media.glyph ?? "")
+        .task(id: media.spec?.source) {
+            image = loadImage()
+        }
+    }
+
+    private func loadImage() -> NSImage? {
+        guard let spec = media.spec else { return nil }
+        switch spec.source {
+        case let .path(path):
+            return NSImage(contentsOfFile: path)
+        case let .inline(_, base64):
+            guard let data = Data(base64Encoded: base64), data.count <= 262_144 else { return nil }
+            return NSImage(data: data)
+        case .blob:
+            // Blob loading needs the Host's authorized loader; fall back to
+            // the glyph block until a row-level loader is wired.
+            return nil
         }
     }
 }
@@ -787,6 +1054,7 @@ private struct NativeGauge: View {
 private struct NativeCompactGauge: View {
     let spec: UIGaugeSpec
     let color: Color
+    let showCaption: Bool
     var onActivate: (() -> Void)?
 
     @ViewBuilder
@@ -803,10 +1071,12 @@ private struct NativeCompactGauge: View {
 
     private var content: some View {
         VStack(alignment: .trailing, spacing: 3) {
-            Text(spec.valueLabel)
-                .font(.caption)
-                .foregroundStyle(color)
-                .lineLimit(1)
+            if showCaption {
+                Text(spec.valueLabel)
+                    .font(.caption)
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+            }
             ProgressView(value: spec.ratio, total: 1)
                 .progressViewStyle(.linear)
                 .tint(color)

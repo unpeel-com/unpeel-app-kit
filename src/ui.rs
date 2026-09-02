@@ -147,34 +147,7 @@ impl UiGrant {
     pub const ALL: &'static str = "*";
 }
 
-/// Human-facing identity advertised by an App process during attachment.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppMetadata {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-impl AppMetadata {
-    #[must_use]
-    pub fn new(id: impl Into<String>, name: impl Into<String>, version: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            version: version.into(),
-            description: None,
-        }
-    }
-
-    #[must_use]
-    pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-}
+pub use crate::app_metadata::AppMetadata;
 
 /// Host-attested participant category. Agents use the same presence, grants,
 /// events, and revision path as people rather than a privileged side channel.
@@ -684,6 +657,10 @@ pub struct MarkdownEditorSpec {
     pub command_hint: Option<MarkdownCommandHint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// App-owned action behind the title's back chevron (`cancel` kind),
+    /// for example returning to a note list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<String>,
     #[serde(default)]
     pub actions: MarkdownEditorActions,
     /// Server-owned slash/palette menu, anchored to the renderer-local caret.
@@ -708,11 +685,19 @@ impl MarkdownEditorSpec {
             placeholder: String::new(),
             command_hint: None,
             title: None,
+            back: None,
             actions: MarkdownEditorActions::editable(),
             insert_menu: None,
             context_menu: None,
             footer: crate::FooterActions::default(),
         }
+    }
+
+    /// Declares the action emitted (kind `cancel`) by the title's back chevron.
+    #[must_use]
+    pub fn back_action(mut self, action: impl Into<String>) -> Self {
+        self.back = Some(action.into());
+        self
     }
 
     #[must_use]
@@ -816,6 +801,9 @@ impl MarkdownEditorSpec {
         validate_position(&self.text, self.selection.head)
             .map_err(|message| UiValidationError::new(format!("{path}.selection.head"), message))?;
         validate_action_set(&self.actions, self.read_only, path)?;
+        if let Some(back) = &self.back {
+            validate_identifier(back, &format!("{path}.back"))?;
+        }
         if let Some(hint) = &self.command_hint {
             validate_markdown_command_hint(hint, &format!("{path}.commandHint"))?;
             if self.actions.open_menu.is_none() {
@@ -1295,9 +1283,7 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
     }
     let mut operations = match (&previous_page.body, &next_page.body) {
         (PageBodySlot::List(previous_list), PageBodySlot::List(next_list)) => {
-            let Some(mut operations) = list_chart_delta_operations(previous_list, next_list) else {
-                return vec![UiDeltaOperation::ReplaceRoot { root: next.clone() }];
-            };
+            let mut operations = list_item_delta_operations(previous_list, next_list);
             if previous_list.id != next_list.id
                 || previous_list.empty_message != next_list.empty_message
                 || previous_list.select != next_list.select
@@ -1401,41 +1387,158 @@ pub fn page_delta_operations(previous: &UiNode, next: &UiNode) -> Vec<UiDeltaOpe
     operations
 }
 
-fn list_chart_delta_operations(
-    previous: &crate::List,
-    next: &crate::List,
-) -> Option<Vec<UiDeltaOperation>> {
-    if previous.items.len() != next.items.len() {
-        return None;
-    }
-    let mut comparable = previous.items.clone();
+/// Item-level operations between two Lists with the same identity: removals
+/// first, then per-index inserts and in-place control updates. Rows whose
+/// content changed beyond a Toggle, Checkmark, Sparkline, or Gauge value are
+/// replaced with a remove plus an insert at the same index.
+fn list_item_delta_operations(previous: &crate::List, next: &crate::List) -> Vec<UiDeltaOperation> {
     let mut operations = Vec::new();
-    for (candidate, next_item) in comparable.iter_mut().zip(&next.items) {
-        if let (
-            Some(crate::ListItemSlot::Sparkline(previous_sparkline)),
-            Some(crate::ListItemSlot::Sparkline(next_sparkline)),
-        ) = (&candidate.trailing, &next_item.trailing)
-            && previous_sparkline.id == next_sparkline.id
-            && previous_sparkline.activate == next_sparkline.activate
-            && previous_sparkline != next_sparkline
+    let next_ids = next
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut working = previous.items.clone();
+    working.retain(|item| {
+        let keep = next_ids.contains(item.id.as_str());
+        if !keep {
+            operations.push(UiDeltaOperation::list_remove_item(
+                next.id.clone(),
+                item.id.clone(),
+            ));
+        }
+        keep
+    });
+    for (index, next_item) in next.items.iter().enumerate() {
+        let index_u64 = u64::try_from(index).unwrap_or(u64::MAX);
+        if working
+            .get(index)
+            .is_some_and(|item| item.id == next_item.id)
         {
-            operations.push(UiDeltaOperation::sparkline_set_data(next_sparkline));
-            candidate.trailing = next_item.trailing.clone();
+            if working[index] != *next_item {
+                match list_item_update_operations(&working[index], next_item) {
+                    Some(updates) => operations.extend(updates),
+                    None => {
+                        operations.push(UiDeltaOperation::list_remove_item(
+                            next.id.clone(),
+                            next_item.id.clone(),
+                        ));
+                        operations.push(UiDeltaOperation::list_insert_item(
+                            next.id.clone(),
+                            index_u64,
+                            next_item.clone(),
+                        ));
+                    }
+                }
+                working[index] = next_item.clone();
+            }
             continue;
         }
-        if let (
-            Some(crate::ListItemSlot::Gauge(previous_gauge)),
-            Some(crate::ListItemSlot::Gauge(next_gauge)),
-        ) = (&candidate.trailing, &next_item.trailing)
-            && previous_gauge.id == next_gauge.id
-            && previous_gauge.activate == next_gauge.activate
-            && previous_gauge != next_gauge
-        {
-            operations.push(UiDeltaOperation::gauge_set_data(next_gauge));
-            candidate.trailing = next_item.trailing.clone();
+        if let Some(position) = working.iter().position(|item| item.id == next_item.id) {
+            working.remove(position);
+            operations.push(UiDeltaOperation::list_remove_item(
+                next.id.clone(),
+                next_item.id.clone(),
+            ));
+        }
+        operations.push(UiDeltaOperation::list_insert_item(
+            next.id.clone(),
+            index_u64,
+            next_item.clone(),
+        ));
+        working.insert(index, next_item.clone());
+    }
+    operations
+}
+
+/// In-place operations that turn `current` into `next`, or `None` when the
+/// change is not expressible through the closed control operations.
+fn list_item_update_operations(
+    current: &ListItem,
+    next: &ListItem,
+) -> Option<Vec<UiDeltaOperation>> {
+    let mut candidate = current.clone();
+    let mut operations = Vec::new();
+    let slots = |item: &ListItem| {
+        [
+            item.leading.clone(),
+            item.trailing.clone(),
+            item.accessory.clone(),
+        ]
+    };
+    for (current_slot, next_slot) in slots(&candidate).into_iter().zip(slots(next)) {
+        match (current_slot, next_slot) {
+            (
+                Some(crate::ListItemSlot::Toggle(previous)),
+                Some(crate::ListItemSlot::Toggle(toggle)),
+            ) if previous.id == toggle.id && previous.value != toggle.value => {
+                operations.push(UiDeltaOperation::toggle_set_value(
+                    toggle.id.clone(),
+                    toggle.value,
+                ));
+                set_slot_toggle(&mut candidate, &toggle.id, toggle.value);
+                candidate.done = next.done;
+            }
+            (
+                Some(crate::ListItemSlot::Checkmark(previous)),
+                Some(crate::ListItemSlot::Checkmark(checkmark)),
+            ) if previous.id == checkmark.id && previous.value != checkmark.value => {
+                operations.push(UiDeltaOperation::checkmark_set_value(
+                    checkmark.id.clone(),
+                    checkmark.value,
+                ));
+                set_slot_checkmark(&mut candidate, &checkmark.id, checkmark.value);
+            }
+            (
+                Some(crate::ListItemSlot::Sparkline(previous)),
+                Some(crate::ListItemSlot::Sparkline(sparkline)),
+            ) if previous.id == sparkline.id
+                && previous.activate == sparkline.activate
+                && previous != sparkline =>
+            {
+                operations.push(UiDeltaOperation::sparkline_set_data(&sparkline));
+                candidate.trailing = next.trailing.clone();
+            }
+            (
+                Some(crate::ListItemSlot::Gauge(previous)),
+                Some(crate::ListItemSlot::Gauge(gauge)),
+            ) if previous.id == gauge.id
+                && previous.activate == gauge.activate
+                && previous != gauge =>
+            {
+                operations.push(UiDeltaOperation::gauge_set_data(&gauge));
+                candidate.trailing = next.trailing.clone();
+            }
+            _ => {}
         }
     }
-    (comparable == next.items).then_some(operations)
+    (candidate == *next && !operations.is_empty()).then_some(operations)
+}
+
+fn set_slot_toggle(item: &mut ListItem, id: &str, value: bool) {
+    for slot in [&mut item.leading, &mut item.trailing, &mut item.accessory]
+        .into_iter()
+        .flatten()
+    {
+        if let crate::ListItemSlot::Toggle(toggle) = slot
+            && toggle.id == id
+        {
+            toggle.value = value;
+        }
+    }
+}
+
+fn set_slot_checkmark(item: &mut ListItem, id: &str, value: bool) {
+    for slot in [&mut item.leading, &mut item.trailing, &mut item.accessory]
+        .into_iter()
+        .flatten()
+    {
+        if let crate::ListItemSlot::Checkmark(checkmark) = slot
+            && checkmark.id == id
+        {
+            checkmark.value = value;
+        }
+    }
 }
 
 fn contiguous_text_edit(previous: &str, next: &str) -> TextEdit {

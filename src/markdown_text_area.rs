@@ -21,7 +21,7 @@ use crate::{
     TextSelection, UI_PROTOCOL_MAX_VERSION, UI_PROTOCOL_MIN_VERSION, UI_PROTOCOL_NAME, UiEvent,
     UiEventKind, UiEventValue, UiNode,
 };
-use crate::{MarkdownCommandHint, TerminalPointerState, VerticalScrollbar};
+use crate::{MarkdownCommandHint, TerminalPointerPhase, TerminalPointerState, VerticalScrollbar};
 
 const DEFAULT_LEFT_PADDING: u16 = 1;
 const DEFAULT_TAB_LENGTH: u8 = 2;
@@ -45,6 +45,9 @@ pub struct MarkdownTextAreaStyle {
     /// Built-in selection style. Markdown Apps can leave this empty and paint
     /// selections as part of syntax highlighting.
     pub selection: Style,
+    /// Pointer hover on footer actions and the back chevron; distinct from
+    /// `selection`.
+    pub hovered: Style,
     /// Style for ordinary line numbers.
     pub gutter: Style,
     /// Style for the line number containing the cursor.
@@ -71,6 +74,7 @@ pub struct MarkdownEditorConfig {
     read_only: bool,
     dirty: bool,
     title: Option<String>,
+    back: Option<String>,
     command_hint: Option<MarkdownCommandHint>,
     insert_menu: Option<SemanticMenu>,
     context_menu: Option<SemanticMenu>,
@@ -89,6 +93,7 @@ impl MarkdownEditorConfig {
             read_only: false,
             dirty: false,
             title: None,
+            back: None,
             command_hint: None,
             insert_menu: None,
             context_menu: None,
@@ -163,6 +168,18 @@ impl MarkdownEditorConfig {
         self
     }
 
+    /// Declares the App-owned action behind the title's back chevron.
+    #[must_use]
+    pub fn back_action(mut self, action: impl Into<String>) -> Self {
+        self.back = Some(action.into());
+        self
+    }
+
+    #[must_use]
+    pub fn back(&self) -> Option<&str> {
+        self.back.as_deref()
+    }
+
     /// Enables an App-owned slash/palette Menu entry point. It is opt-in so a
     /// plain Markdown editor does not advertise behavior its reducer lacks.
     #[must_use]
@@ -176,11 +193,20 @@ impl MarkdownEditorConfig {
 #[cfg(feature = "ui-bridge")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownEditorEvent {
-    TextChanged { changed: bool },
+    TextChanged {
+        changed: bool,
+    },
     SelectionChanged,
-    Undo { changed: bool },
-    Redo { changed: bool },
+    Undo {
+        changed: bool,
+    },
+    Redo {
+        changed: bool,
+    },
     SaveRequested,
+    /// The renderer activated the title's back chevron; the App owns what
+    /// "back" means (usually closing the document).
+    BackRequested,
     PresentationRequested(MarkdownPresentation),
     MenuRequested(MarkdownMenuTrigger),
 }
@@ -261,8 +287,23 @@ pub type MarkdownEditor<'a> = MarkdownTextArea<'a>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MarkdownEditorTerminalLayout {
     pub body: Rect,
+    /// Title row at the top (with the back chevron when `back` is set).
     pub status: Rect,
     pub footer: Rect,
+}
+
+impl MarkdownEditorTerminalLayout {
+    /// Whether a click at `position` lands on the title row (the padding row
+    /// beneath it does not count).
+    #[must_use]
+    pub fn back_hit(&self, position: ratatui::layout::Position) -> bool {
+        !self.status.is_empty()
+            && Rect {
+                height: 1,
+                ..self.status
+            }
+            .contains(position)
+    }
 }
 
 impl<'a> MarkdownTextArea<'a> {
@@ -344,6 +385,7 @@ impl<'a> MarkdownTextArea<'a> {
         editor.context_menu.clone_from(&config.context_menu);
         editor.actions = config.actions.clone();
         editor.title.clone_from(&config.title);
+        editor.back.clone_from(&config.back);
         editor.footer.clone_from(&config.footer);
         UiNode::markdown_editor(config.node_id.clone(), editor)
     }
@@ -380,6 +422,10 @@ impl<'a> MarkdownTextArea<'a> {
         }
 
         let action = event.action.action.as_str();
+        if config.back.as_deref() == Some(action) {
+            require_kind(event, UiEventKind::Cancel)?;
+            return Ok(Some(MarkdownEditorEvent::BackRequested));
+        }
         if action_matches(config.actions.replace_range.as_ref(), action) {
             if config.read_only {
                 return Err(MarkdownEditorEventError::ReadOnly);
@@ -681,7 +727,7 @@ impl<'a> MarkdownTextArea<'a> {
                     )
                     .pointer(self.pointer)
                     .interaction_styles(
-                        self.style.selection.add_modifier(Modifier::DIM),
+                        self.style.hovered,
                         self.style.selection.add_modifier(Modifier::BOLD),
                     ),
                 footer,
@@ -703,21 +749,23 @@ impl<'a> MarkdownTextArea<'a> {
         spec: &MarkdownEditorSpec,
     ) -> MarkdownEditorTerminalLayout {
         let footer_height = u16::from(!spec.footer.is_empty() && area.height > 0);
-        let status_height =
-            u16::from(spec.title.is_some() && area.height.saturating_sub(footer_height) > 1);
+        // Title on top with one padding row beneath it, actions at the
+        // bottom: the shared screen shape.
+        let available = area.height.saturating_sub(footer_height);
+        let status_height = if spec.title.is_none() || available <= 1 {
+            0
+        } else if available > 2 {
+            2
+        } else {
+            1
+        };
+        let status = Rect::new(area.x, area.y, area.width, status_height);
         let body = Rect::new(
             area.x,
-            area.y,
+            area.y.saturating_add(status_height),
             area.width,
             area.height
                 .saturating_sub(status_height.saturating_add(footer_height)),
-        );
-        let status = Rect::new(
-            area.x,
-            area.bottom()
-                .saturating_sub(footer_height.saturating_add(status_height)),
-            area.width,
-            status_height,
         );
         let footer = Rect::new(
             area.x,
@@ -735,10 +783,26 @@ impl<'a> MarkdownTextArea<'a> {
             spec.insert_menu.is_some(),
         );
         if let Some(title) = &spec.title {
+            let chevron = if spec.back.is_some() { "‹  " } else { "" };
             frame.render_widget(
-                Paragraph::new(format!("  {title}")).style(self.style.status),
+                Paragraph::new(format!("  {chevron}{title}")).style(self.style.status),
                 status,
             );
+            if spec.back.is_some() {
+                // Only the chevron takes the hover/press fill, like Page.
+                let fill = match self.pointer.phase(status) {
+                    TerminalPointerPhase::Idle => None,
+                    TerminalPointerPhase::Hovered => Some(self.style.hovered),
+                    TerminalPointerPhase::Pressed => {
+                        Some(self.style.selection.add_modifier(Modifier::BOLD))
+                    }
+                };
+                if let Some(fill) = fill {
+                    let chevron_area =
+                        Rect::new(status.x.saturating_add(1), status.y, 3.min(status.width), 1);
+                    frame.buffer_mut().set_style(chevron_area, fill);
+                }
+            }
         }
         if footer_height > 0 {
             frame.render_widget(
@@ -753,7 +817,7 @@ impl<'a> MarkdownTextArea<'a> {
                     )
                     .pointer(self.pointer)
                     .interaction_styles(
-                        self.style.selection.add_modifier(Modifier::DIM),
+                        self.style.hovered,
                         self.style.selection.add_modifier(Modifier::BOLD),
                     ),
                 footer,

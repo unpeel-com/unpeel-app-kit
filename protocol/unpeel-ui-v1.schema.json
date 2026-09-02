@@ -217,7 +217,8 @@
           "pattern": "^(?:[!-~]|ctrl\\+[A-Za-z0-9]|escape|enter|space)$"
         },
         "role": { "enum": ["default", "danger"], "default": "default" },
-        "disabled": { "type": "boolean", "default": false }
+        "disabled": { "type": "boolean", "default": false },
+        "busy": { "type": "boolean", "default": false }
       }
     },
     "footerActions": {
@@ -296,6 +297,7 @@
         "placeholder": { "type": "string", "default": "" },
         "commandHint": { "$ref": "#/$defs/markdownCommandHint" },
         "title": { "type": "string" },
+        "back": { "$ref": "#/$defs/identifier" },
         "actions": { "$ref": "#/$defs/markdownActions" },
         "insertMenu": { "$ref": "#/$defs/semanticMenu" },
         "contextMenu": { "$ref": "#/$defs/semanticMenu" },
@@ -619,7 +621,8 @@
         "id": { "$ref": "#/$defs/identifier" },
         "label": { "type": "string", "maxLength": 4096 },
         "value": { "type": "boolean" },
-        "setValue": { "$ref": "#/$defs/identifier" }
+        "setValue": { "$ref": "#/$defs/identifier" },
+        "role": { "enum": ["completion", "setting"], "default": "completion" }
       }
     },
     "checkmark": {
@@ -646,6 +649,17 @@
     },
     "listItemEmphasis": {
       "enum": ["regular", "strong"]
+    },
+    "listItemTextRun": {
+      "description": "One closed semantic text span. Omitted tone/emphasis inherit the containing ListItem field.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 16384, "pattern": "^[^\\u0000\\r\\n]+$" },
+        "tone": { "$ref": "#/$defs/listItemTone" },
+        "emphasis": { "$ref": "#/$defs/listItemEmphasis" }
+      }
     },
     "statusSymbol": {
       "type": "object",
@@ -785,7 +799,7 @@
       }
     },
     "gauge": {
-      "description": "Minimal labeled ratio from zero through one with optional App-authored value caption; valid as a Page body or one trailing ListItem slot.",
+      "description": "Minimal labeled ratio from zero through one with optional App-authored value caption; valid as a Page body or one trailing ListItem slot. A ListItem value, when present, is the visible rich caption while Gauge contributes the compact meter.",
       "type": "object",
       "additionalProperties": true,
       "required": ["type", "id", "ratio", "label", "accessibilityText"],
@@ -822,6 +836,67 @@
         { "$ref": "#/$defs/unsupportedRowSlot" }
       ]
     },
+    "listRowLayout": {
+      "oneOf": [
+        { "type": "object", "required": ["type"], "properties": { "type": { "const": "inline" } } },
+        { "type": "object", "required": ["type"], "properties": { "type": { "const": "stacked" } } },
+        {
+          "type": "object",
+          "required": ["type", "stackBelowWidth"],
+          "properties": {
+            "type": { "const": "auto" },
+            "stackBelowWidth": { "type": "integer", "minimum": 0, "maximum": 65535 }
+          }
+        }
+      ]
+    },
+    "listItemBand": {
+      "oneOf": [
+        { "$ref": "#/$defs/gauge" },
+        { "$ref": "#/$defs/sparkline" },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string", "maxLength": 16384, "pattern": "^[^\\r\\n]*$" },
+            "tone": { "$ref": "#/$defs/listItemTone", "default": "default" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["type"],
+          "properties": { "type": { "const": "divider" } }
+        }
+      ]
+    },
+    "listItemMedia": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["width"],
+      "properties": {
+        "side": { "enum": ["leading", "trailing"], "default": "leading" },
+        "width": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "glyph": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+        "tone": { "$ref": "#/$defs/listItemTone", "default": "default" },
+        "spec": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["source", "intrinsic", "alt"],
+          "properties": {
+            "source": { "$ref": "#/$defs/mediaSource" },
+            "intrinsic": { "$ref": "#/$defs/mediaPixelSize" },
+            "cells": { "$ref": "#/$defs/mediaCellSize" },
+            "points": { "$ref": "#/$defs/mediaPointSize" },
+            "fit": { "enum": ["contain", "cover", "fill"], "default": "contain" },
+            "alt": { "type": "string", "maxLength": 16384 },
+            "activate": { "$ref": "#/$defs/identifier" }
+          }
+        }
+      }
+    },
     "listItem": {
       "type": "object",
       "additionalProperties": true,
@@ -829,10 +904,13 @@
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
         "label": { "type": "string", "maxLength": 16384, "pattern": "^[^\\r\\n]*$" },
+        "labelRuns": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/listItemTextRun" } },
         "labelTone": { "$ref": "#/$defs/listItemTone", "default": "default" },
         "emphasis": { "$ref": "#/$defs/listItemEmphasis", "default": "regular" },
         "detail": { "type": "string", "maxLength": 16384, "pattern": "^[^\\r\\n]*$" },
+        "detailRuns": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/listItemTextRun" } },
         "value": { "type": "string", "maxLength": 4096, "pattern": "^[^\\r\\n]*$" },
+        "valueRuns": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/listItemTextRun" } },
         "valueTone": { "$ref": "#/$defs/listItemTone", "default": "muted" },
         "valueMinWidth": { "type": "integer", "minimum": 0, "maximum": 65535 },
         "done": { "type": "boolean", "default": false },
@@ -840,6 +918,10 @@
         "leading": { "$ref": "#/$defs/listItemSlot" },
         "trailing": { "$ref": "#/$defs/listItemSlot" },
         "accessory": { "$ref": "#/$defs/listItemSlot" },
+        "top": { "$ref": "#/$defs/listItemBand" },
+        "bottom": { "$ref": "#/$defs/listItemBand" },
+        "media": { "$ref": "#/$defs/listItemMedia" },
+        "divider": { "type": "boolean", "default": false },
         "delete": { "$ref": "#/$defs/identifier" },
         "activate": { "$ref": "#/$defs/identifier" },
         "actionRole": { "enum": ["default", "destructive"], "default": "default" }
@@ -864,6 +946,7 @@
         "pageOverlap": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 1 },
         "pageBehavior": { "enum": ["selection", "scroll"], "default": "selection" },
         "spacePagesDown": { "type": "boolean", "default": false },
+        "rowLayout": { "$ref": "#/$defs/listRowLayout" },
         "contextMenu": { "$ref": "#/$defs/semanticMenu" }
       }
     },
@@ -1031,6 +1114,7 @@
         "id": { "$ref": "#/$defs/identifier" },
         "label": { "type": "string", "maxLength": 16384, "pattern": "^[^\\r\\n]*$" },
         "kind": { "enum": ["parent", "directory", "file"] },
+        "detail": { "type": "string", "maxLength": 16384, "pattern": "^[^\\r\\n]*$" },
         "hidden": { "type": "boolean", "default": false },
         "symlink": { "type": "boolean", "default": false },
         "childState": { "enum": ["loaded", "unloaded", "loading"], "default": "loaded" },

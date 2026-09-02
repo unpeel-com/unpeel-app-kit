@@ -209,7 +209,20 @@ impl Widget for GaugeWidget<'_> {
         } else {
             self.gauge.percentage_label()
         };
-        if area.height == 1 {
+        if area.height == 1 && label.is_empty() {
+            // LineGauge always leaves one cell after its label, even an empty
+            // one; a bare track should start at the first column.
+            let width = usize::from(area.width);
+            let filled = ((width as f64) * ratio).floor() as usize;
+            for (offset, x) in (area.x..area.right()).enumerate() {
+                let style = if offset < filled {
+                    filled_style
+                } else {
+                    unfilled_style
+                };
+                buffer.set_string(x, area.y, "─", style);
+            }
+        } else if area.height == 1 {
             LineGauge::default()
                 .ratio(ratio)
                 .label(label)

@@ -36,6 +36,7 @@ func shouldApplyAuthoritativeMarkdownSelection(
 public struct MarkdownEditorView: View {
     public let snapshot: UISnapshot
     public let onAction: (UIAction) -> Void
+    @State private var backHovered = false
 
     public init(snapshot: UISnapshot, onAction: @escaping (UIAction) -> Void) {
         self.snapshot = snapshot
@@ -58,6 +59,24 @@ public struct MarkdownEditorView: View {
 
     private func toolbar(_ editor: MarkdownEditorSpec) -> some View {
         HStack(spacing: 10) {
+            if let back = editor.back {
+                Button {
+                    onAction(UIAction(nodeID: snapshot.root.id, action: back, kind: .cancel))
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 24, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.primary.opacity(backHovered ? 0.14 : 0))
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { backHovered = $0 }
+                .keyboardShortcut(.escape, modifiers: [])
+                .accessibilityLabel("Back")
+            }
             Text(editor.title ?? "Markdown")
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)

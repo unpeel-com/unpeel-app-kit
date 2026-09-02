@@ -13,7 +13,7 @@ use std::fmt;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use serde::{Deserialize, Serialize};
@@ -21,9 +21,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     BarChart, Content, ContentState, ContentTheme, Gauge, InputField, InputFieldTheme, KitTheme,
-    LineChart, ListPageBehavior, ListState, RowPointerDecision, RowPrimaryRole,
-    SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu, Sparkline, TerminalPointerPhase,
-    TerminalPointerState, VerticalScrollbar,
+    LineChart, ListNavigationAction, ListNavigationOutcome, ListPageBehavior, ListState,
+    RowPointerDecision, RowPrimaryRole, SELECTABLE_LEFT_PADDING, SelectableRow, SemanticMenu,
+    Sparkline, TerminalPointerPhase, TerminalPointerState, VerticalScrollbar,
 };
 
 /// Renderer capability for the v1 Page container.
@@ -38,6 +38,8 @@ pub const LIST_ITEM_METADATA_CAPABILITY: &str = "listItemMetadata";
 pub const LIST_ITEM_ACTIVATE_CAPABILITY: &str = "listItemActivate";
 /// Renderer capability for status/badge/busy ListItem presentation.
 pub const LIST_ITEM_PRESENTATION_CAPABILITY: &str = "listItemPresentation";
+/// Renderer capability for semantic styled runs inside ListItem text fields.
+pub const LIST_ITEM_STYLED_TEXT_CAPABILITY: &str = "listItemStyledText";
 /// Renderer capability for primary row roles and their native affordances.
 pub const LIST_ITEM_ROLE_CAPABILITY: &str = "listItemRole";
 /// Renderer capability for authoritative selection and shared list navigation.
@@ -61,6 +63,7 @@ const MAX_ITEMS: usize = 100_000;
 pub(crate) const MAX_SHORT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_LABEL_BYTES: usize = 16 * 1024;
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_LIST_ITEM_TEXT_RUNS: usize = 256;
 
 /// Visual intent for a semantic [`Button`]. The renderer chooses its native
 /// platform treatment; these are not arbitrary style tokens.
@@ -141,6 +144,11 @@ pub struct FooterAction {
     pub role: FooterActionRole,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// The action is in progress; the terminal animates a braille spinner
+    /// beside the label. Native and web renderers may show their own
+    /// activity indicator.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
 }
 
 impl FooterAction {
@@ -153,7 +161,15 @@ impl FooterAction {
             accelerator: None,
             role: FooterActionRole::Default,
             disabled: false,
+            busy: false,
         }
+    }
+
+    /// Marks the action as in progress; see [`Self::busy`].
+    #[must_use]
+    pub const fn busy(mut self, busy: bool) -> Self {
+        self.busy = busy;
+        self
     }
 
     #[must_use]
@@ -374,6 +390,7 @@ impl FooterActions {
                 .add_modifier(Modifier::REVERSED)
                 .add_modifier(Modifier::BOLD),
             pointer: TerminalPointerState::new(),
+            spinner_frame: 0,
         }
     }
 }
@@ -389,9 +406,17 @@ pub struct FooterActionsWidget<'a> {
     hover_style: Style,
     pressed_style: Style,
     pointer: TerminalPointerState,
+    spinner_frame: usize,
 }
 
 impl FooterActionsWidget<'_> {
+    /// Frame for the braille spinner drawn beside busy actions.
+    #[must_use]
+    pub const fn spinner_frame(mut self, frame: usize) -> Self {
+        self.spinner_frame = frame;
+        self
+    }
+
     #[must_use]
     pub const fn styles(
         mut self,
@@ -447,8 +472,10 @@ impl Widget for FooterActionsWidget<'_> {
             };
             let accelerator = action.accelerator_label();
             let key_width = accelerator.as_deref().map_or(0, UnicodeWidthStr::width);
+            let spinner_width = usize::from(action.busy) * 2;
             let width = key_width
                 .saturating_add(usize::from(key_width > 0))
+                .saturating_add(spinner_width)
                 .saturating_add(UnicodeWidthStr::width(action.label.as_str()));
             let hit = Rect::new(
                 x,
@@ -481,6 +508,16 @@ impl Widget for FooterActionsWidget<'_> {
                 spans.push(Span::styled(accelerator, key_style));
                 spans.push(Span::styled(" ", action_style));
             }
+            if action.busy {
+                spans.push(Span::styled(
+                    format!("{} ", crate::Spinner::glyph_for(self.spinner_frame)),
+                    if action.disabled {
+                        self.key_style
+                    } else {
+                        action_style
+                    },
+                ));
+            }
             spans.push(Span::styled(action.label.clone(), action_style));
             x = x.saturating_add(u16::try_from(width).unwrap_or(u16::MAX));
         }
@@ -496,6 +533,25 @@ pub struct Toggle {
     pub label: String,
     pub value: bool,
     pub set_value: String,
+    #[serde(default, skip_serializing_if = "is_default_toggle_role")]
+    pub role: ToggleRole,
+}
+
+/// What a Toggle means for its row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToggleRole {
+    /// Marks the row done: the terminal strikes the label and `done` must
+    /// mirror the value. Native renderers show a checkbox.
+    #[default]
+    Completion,
+    /// A preference switch. The label stays as is and `done` is untouched.
+    /// Native renderers show a switch.
+    Setting,
+}
+
+const fn is_default_toggle_role(role: &ToggleRole) -> bool {
+    matches!(role, ToggleRole::Completion)
 }
 
 impl Toggle {
@@ -511,13 +567,36 @@ impl Toggle {
             label: label.into(),
             value,
             set_value: set_value.into(),
+            role: ToggleRole::Completion,
         }
+    }
+
+    /// A preference switch that never strikes through its row.
+    #[must_use]
+    pub fn setting(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        value: bool,
+        set_value: impl Into<String>,
+    ) -> Self {
+        Self::new(id, label, value, set_value).role(ToggleRole::Setting)
+    }
+
+    #[must_use]
+    pub const fn role(mut self, role: ToggleRole) -> Self {
+        self.role = role;
+        self
     }
 
     /// Compact terminal marker used inside a row.
     #[must_use]
     pub const fn marker(&self) -> &'static str {
-        if self.value { "[x]" } else { "[ ]" }
+        match (self.role, self.value) {
+            (ToggleRole::Completion, true) => "[x]",
+            (ToggleRole::Completion, false) => "[ ]",
+            (ToggleRole::Setting, true) => "(●)",
+            (ToggleRole::Setting, false) => "( )",
+        }
     }
 
     pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
@@ -589,6 +668,99 @@ pub enum ListItemEmphasis {
     #[default]
     Regular,
     Strong,
+}
+
+/// One semantic span inside a ListItem label, detail, or trailing value.
+///
+/// Omitted tone/weight inherit the containing field. Explicit semantic tones
+/// remain visible while a row is selected, so danger/warning state is not
+/// erased by terminal focus styling.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListItemTextRun {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<ListItemTone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<ListItemEmphasis>,
+}
+
+impl ListItemTextRun {
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: None,
+            emphasis: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn tone(mut self, tone: ListItemTone) -> Self {
+        self.tone = Some(tone);
+        self
+    }
+
+    #[must_use]
+    pub const fn emphasis(mut self, emphasis: ListItemEmphasis) -> Self {
+        self.emphasis = Some(emphasis);
+        self
+    }
+}
+
+fn list_item_runs_text(runs: &[ListItemTextRun]) -> String {
+    runs.iter().map(|run| run.text.as_str()).collect()
+}
+
+fn validate_list_item_text_runs(
+    runs: &[ListItemTextRun],
+    fallback: &str,
+    path: &str,
+) -> Result<(), ComponentValidationError> {
+    if runs.is_empty() {
+        return Ok(());
+    }
+    if runs.len() > MAX_LIST_ITEM_TEXT_RUNS {
+        return Err(ComponentValidationError::new(
+            path,
+            format!("must contain at most {MAX_LIST_ITEM_TEXT_RUNS} styled runs"),
+        ));
+    }
+    for (index, run) in runs.iter().enumerate() {
+        let run_path = format!("{path}[{index}].text");
+        validate_text(&run.text, MAX_LABEL_BYTES, &run_path)?;
+        validate_single_line(&run.text, &run_path)?;
+        if run.text.is_empty() {
+            return Err(ComponentValidationError::new(
+                run_path,
+                "styled run text must not be empty",
+            ));
+        }
+    }
+    if list_item_runs_text(runs) != fallback {
+        return Err(ComponentValidationError::new(
+            path,
+            "styled runs must concatenate exactly to the plain text fallback",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_list_item_text_runs(
+    runs: &[ListItemTextRun],
+    fallback: Option<&str>,
+    path: &str,
+) -> Result<(), ComponentValidationError> {
+    if runs.is_empty() {
+        return Ok(());
+    }
+    let Some(fallback) = fallback else {
+        return Err(ComponentValidationError::new(
+            path,
+            "styled runs require their plain text fallback",
+        ));
+    };
+    validate_list_item_text_runs(runs, fallback, path)
 }
 
 /// Visual severity for a plain command/button row.
@@ -869,20 +1041,242 @@ impl ListItemSlot {
     }
 }
 
+/// How a terminal List lays out each row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ListRowLayout {
+    /// One terminal row per item: detail follows the label and the value is
+    /// right-aligned (the historical behavior).
+    #[default]
+    Inline,
+    /// Two text rows per item: label and slots on the first, detail and value
+    /// left-aligned in the value tone beneath it.
+    Stacked,
+    /// Stacked only while the row width is below `stack_below_width`.
+    #[serde(rename_all = "camelCase")]
+    Auto { stack_below_width: u16 },
+}
+
+impl ListRowLayout {
+    /// Resolves the layout for a concrete row width.
+    #[must_use]
+    pub const fn stacks_at(self, row_width: u16) -> bool {
+        match self {
+            Self::Inline => false,
+            Self::Stacked => true,
+            Self::Auto { stack_below_width } => row_width < stack_below_width,
+        }
+    }
+}
+
+/// A full-width band rendered on its own row above or below a ListItem.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ListItemBand {
+    /// A progress meter spanning the content width with its label and
+    /// caption.
+    Gauge(Gauge),
+    /// Read-only history spanning the content width.
+    Sparkline(Sparkline),
+    /// One line of toned text.
+    #[serde(rename_all = "camelCase")]
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "is_default_list_item_tone")]
+        tone: ListItemTone,
+    },
+    /// A thin rule spanning the content width.
+    Divider,
+}
+
+impl ListItemBand {
+    #[must_use]
+    pub const fn gauge(gauge: Gauge) -> Self {
+        Self::Gauge(gauge)
+    }
+
+    #[must_use]
+    pub const fn sparkline(sparkline: Sparkline) -> Self {
+        Self::Sparkline(sparkline)
+    }
+
+    #[must_use]
+    pub fn text(text: impl Into<String>, tone: ListItemTone) -> Self {
+        Self::Text {
+            text: text.into(),
+            tone,
+        }
+    }
+
+    #[must_use]
+    pub const fn divider() -> Self {
+        Self::Divider
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> Option<&str> {
+        match self {
+            Self::Gauge(gauge) => Some(gauge.id.as_str()),
+            Self::Sparkline(sparkline) => Some(sparkline.id.as_str()),
+            Self::Text { .. } | Self::Divider => None,
+        }
+    }
+
+    fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
+        match self {
+            Self::Gauge(gauge) => {
+                gauge.validate(path)?;
+                if gauge.activate.is_some() {
+                    return Err(ComponentValidationError::new(
+                        format!("{path}.activate"),
+                        "band charts are read-only; use the row activate action",
+                    ));
+                }
+                Ok(())
+            }
+            Self::Sparkline(sparkline) => {
+                sparkline.validate(path)?;
+                if sparkline.activate.is_some() {
+                    return Err(ComponentValidationError::new(
+                        format!("{path}.activate"),
+                        "band charts are read-only; use the row activate action",
+                    ));
+                }
+                Ok(())
+            }
+            Self::Text { text, .. } => {
+                validate_text(text, MAX_LABEL_BYTES, &format!("{path}.text"))?;
+                validate_single_line(text, &format!("{path}.text"))
+            }
+            Self::Divider => Ok(()),
+        }
+    }
+}
+
+/// Which side of the row a [`ListItemMedia`] column occupies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ListItemMediaSide {
+    #[default]
+    Leading,
+    Trailing,
+}
+
+const MAX_LIST_ITEM_MEDIA_WIDTH: u16 = 12;
+
+/// A media column spanning every row of a ListItem.
+///
+/// The terminal paints a tone-colored block with an optional glyph or
+/// initials; native and web renderers show `spec` when present. Real
+/// terminal thumbnails are a follow-up.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListItemMedia {
+    #[serde(default, skip_serializing_if = "is_default_media_side")]
+    pub side: ListItemMediaSide,
+    /// Terminal columns reserved for the media block (1 through 12).
+    pub width: u16,
+    /// Short glyph or initials centered in the terminal placeholder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_list_item_tone")]
+    pub tone: ListItemTone,
+    /// Optional real image for renderers that can draw one.
+    #[cfg(any(feature = "media", feature = "ui-bridge"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<crate::MediaSpec>,
+}
+
+const fn is_default_media_side(side: &ListItemMediaSide) -> bool {
+    matches!(side, ListItemMediaSide::Leading)
+}
+
+impl ListItemMedia {
+    #[must_use]
+    pub fn new(side: ListItemMediaSide, width: u16) -> Self {
+        Self {
+            side,
+            width: width.clamp(1, MAX_LIST_ITEM_MEDIA_WIDTH),
+            glyph: None,
+            tone: ListItemTone::Default,
+            #[cfg(any(feature = "media", feature = "ui-bridge"))]
+            spec: None,
+        }
+    }
+
+    #[must_use]
+    pub fn leading(width: u16) -> Self {
+        Self::new(ListItemMediaSide::Leading, width)
+    }
+
+    #[must_use]
+    pub fn trailing(width: u16) -> Self {
+        Self::new(ListItemMediaSide::Trailing, width)
+    }
+
+    #[must_use]
+    pub fn glyph(mut self, glyph: impl Into<String>) -> Self {
+        self.glyph = Some(glyph.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn tone(mut self, tone: ListItemTone) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    #[cfg(any(feature = "media", feature = "ui-bridge"))]
+    #[must_use]
+    pub fn spec(mut self, spec: crate::MediaSpec) -> Self {
+        self.spec = Some(spec);
+        self
+    }
+
+    fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
+        if self.width == 0 || self.width > MAX_LIST_ITEM_MEDIA_WIDTH {
+            return Err(ComponentValidationError::new(
+                format!("{path}.width"),
+                format!("must be between 1 and {MAX_LIST_ITEM_MEDIA_WIDTH} columns"),
+            ));
+        }
+        if let Some(glyph) = &self.glyph {
+            validate_text(glyph, MAX_SHORT_TEXT_BYTES, &format!("{path}.glyph"))?;
+            validate_single_line(glyph, &format!("{path}.glyph"))?;
+        }
+        #[cfg(any(feature = "media", feature = "ui-bridge"))]
+        if let Some(spec) = &self.spec {
+            spec.validate().map_err(|error| {
+                ComponentValidationError::new(
+                    format!("{path}.spec.{}", error.path.trim_start_matches("media.")),
+                    error.message,
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
 /// One keyed, semantically meaningful row in a [`List`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListItem {
     pub id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub label_runs: Vec<ListItemTextRun>,
     #[serde(default, skip_serializing_if = "is_default_list_item_tone")]
     pub label_tone: ListItemTone,
     #[serde(default, skip_serializing_if = "is_default_list_item_emphasis")]
     pub emphasis: ListItemEmphasis,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail_runs: Vec<ListItemTextRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub value_runs: Vec<ListItemTextRun>,
     #[serde(
         default = "default_value_tone",
         skip_serializing_if = "is_default_value_tone"
@@ -901,6 +1295,19 @@ pub struct ListItem {
     pub trailing: Option<ListItemSlot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accessory: Option<ListItemSlot>,
+    /// Full-width band rendered on its own row above the label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<ListItemBand>,
+    /// Full-width band rendered on its own row below the label/detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<ListItemBand>,
+    /// Media column spanning every row of the item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<ListItemMedia>,
+    /// A passive separator row: a thin muted rule with the label as an
+    /// optional caption. Never selectable; keyboard navigation skips it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub divider: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -915,10 +1322,13 @@ impl ListItem {
         Self {
             id: id.into(),
             label: label.into(),
+            label_runs: Vec::new(),
             label_tone: ListItemTone::Default,
             emphasis: ListItemEmphasis::Regular,
             detail: None,
+            detail_runs: Vec::new(),
             value: None,
+            value_runs: Vec::new(),
             value_tone: ListItemTone::Muted,
             value_min_width: None,
             done: false,
@@ -926,10 +1336,37 @@ impl ListItem {
             leading: None,
             trailing: None,
             accessory: None,
+            top: None,
+            bottom: None,
+            media: None,
+            divider: false,
             delete: None,
             activate: None,
             action_role: ListItemActionRole::Default,
         }
+    }
+
+    /// A standalone separator row. It is one row tall, draws a thin muted
+    /// rule across the content width, is never selected, and keyboard
+    /// navigation jumps over it.
+    #[must_use]
+    pub fn divider(id: impl Into<String>) -> Self {
+        let mut item = Self::new(id, "");
+        item.divider = true;
+        item
+    }
+
+    /// A separator row with a short muted caption embedded in the rule.
+    #[must_use]
+    pub fn divider_labeled(id: impl Into<String>, label: impl Into<String>) -> Self {
+        let mut item = Self::divider(id);
+        item.label = label.into();
+        item
+    }
+
+    #[must_use]
+    pub const fn is_divider(&self) -> bool {
+        self.divider
     }
 
     /// Secondary row text, rendered beneath the label natively and inline in
@@ -937,6 +1374,7 @@ impl ListItem {
     #[must_use]
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
+        self.detail_runs.clear();
         self
     }
 
@@ -944,6 +1382,36 @@ impl ListItem {
     #[must_use]
     pub fn value(mut self, value: impl Into<String>) -> Self {
         self.value = Some(value.into());
+        self.value_runs.clear();
+        self
+    }
+
+    /// Replaces the label with one closed sequence of semantic styled runs.
+    /// The plain `label` fallback is derived from these runs and validated to
+    /// remain byte-for-byte identical on the wire.
+    #[must_use]
+    pub fn label_runs(mut self, runs: impl IntoIterator<Item = ListItemTextRun>) -> Self {
+        self.label_runs = runs.into_iter().collect();
+        self.label = list_item_runs_text(&self.label_runs);
+        self
+    }
+
+    /// Replaces the detail with semantic styled runs and derives its plain
+    /// fallback for accessibility, agents, and older persisted snapshots.
+    #[must_use]
+    pub fn detail_runs(mut self, runs: impl IntoIterator<Item = ListItemTextRun>) -> Self {
+        self.detail_runs = runs.into_iter().collect();
+        self.detail = Some(list_item_runs_text(&self.detail_runs));
+        self
+    }
+
+    /// Replaces the trailing value with semantic styled runs and derives its
+    /// plain fallback. A trailing Gauge may coexist with this copy; the value
+    /// is the visible caption and the Gauge contributes the compact meter.
+    #[must_use]
+    pub fn value_runs(mut self, runs: impl IntoIterator<Item = ListItemTextRun>) -> Self {
+        self.value_runs = runs.into_iter().collect();
+        self.value = Some(list_item_runs_text(&self.value_runs));
         self
     }
 
@@ -1002,6 +1470,45 @@ impl ListItem {
         self
     }
 
+    /// Full-width band on its own row above the label.
+    #[must_use]
+    pub fn top(mut self, band: ListItemBand) -> Self {
+        self.top = Some(band);
+        self
+    }
+
+    /// Full-width band on its own row below the label and detail. The usual
+    /// case is a progress Gauge spanning the row.
+    #[must_use]
+    pub fn bottom(mut self, band: ListItemBand) -> Self {
+        self.bottom = Some(band);
+        self
+    }
+
+    /// Media column beside the text spanning every row of the item.
+    #[must_use]
+    pub fn media(mut self, media: ListItemMedia) -> Self {
+        self.media = Some(media);
+        self
+    }
+
+    /// Terminal rows this item needs in the given layout.
+    #[must_use]
+    pub fn row_height(&self, stacked: bool) -> u16 {
+        if self.divider {
+            return 1;
+        }
+        1 + u16::from(stacked && (self.detail.is_some() || self.value.is_some()))
+            + u16::from(self.top.is_some())
+            + u16::from(self.bottom.is_some())
+    }
+
+    fn bands(&self) -> impl Iterator<Item = &ListItemBand> {
+        [self.top.as_ref(), self.bottom.as_ref()]
+            .into_iter()
+            .flatten()
+    }
+
     #[must_use]
     pub fn delete_action(mut self, action: impl Into<String>) -> Self {
         self.delete = Some(action.into());
@@ -1049,7 +1556,9 @@ impl ListItem {
     /// Behavior hint consumed by the shared Enter/Space decision table.
     #[must_use]
     pub fn primary_role(&self) -> RowPrimaryRole {
-        if self
+        if self.divider {
+            RowPrimaryRole::Static
+        } else if self
             .slots()
             .any(|slot| matches!(slot, ListItemSlot::Toggle(_)))
         {
@@ -1150,15 +1659,53 @@ impl ListItem {
     pub(crate) fn validate(&self, path: &str) -> Result<(), ComponentValidationError> {
         validate_identifier(&self.id, &format!("{path}.id"))?;
         validate_text(&self.label, MAX_LABEL_BYTES, &format!("{path}.label"))?;
+        if self.divider {
+            if self.label.contains('\n') {
+                return Err(ComponentValidationError::new(
+                    format!("{path}.label"),
+                    "must be a single line",
+                ));
+            }
+            let passive = self.detail.is_none()
+                && self.value.is_none()
+                && self.leading.is_none()
+                && self.trailing.is_none()
+                && self.accessory.is_none()
+                && self.top.is_none()
+                && self.bottom.is_none()
+                && self.media.is_none()
+                && self.delete.is_none()
+                && self.activate.is_none()
+                && !self.busy
+                && !self.done;
+            if !passive {
+                return Err(ComponentValidationError::new(
+                    format!("{path}.divider"),
+                    "a divider row carries only an optional caption label",
+                ));
+            }
+            return Ok(());
+        }
         validate_single_line(&self.label, &format!("{path}.label"))?;
+        validate_list_item_text_runs(&self.label_runs, &self.label, &format!("{path}.labelRuns"))?;
         if let Some(detail) = &self.detail {
             validate_text(detail, MAX_LABEL_BYTES, &format!("{path}.detail"))?;
             validate_single_line(detail, &format!("{path}.detail"))?;
         }
+        validate_optional_list_item_text_runs(
+            &self.detail_runs,
+            self.detail.as_deref(),
+            &format!("{path}.detailRuns"),
+        )?;
         if let Some(value) = &self.value {
             validate_text(value, MAX_SHORT_TEXT_BYTES, &format!("{path}.value"))?;
             validate_single_line(value, &format!("{path}.value"))?;
         }
+        validate_optional_list_item_text_runs(
+            &self.value_runs,
+            self.value.as_deref(),
+            &format!("{path}.valueRuns"),
+        )?;
         for (name, slot) in [
             ("leading", self.leading.as_ref()),
             ("trailing", self.trailing.as_ref()),
@@ -1167,6 +1714,14 @@ impl ListItem {
             if let Some(slot) = slot {
                 slot.validate(&format!("{path}.{name}"))?;
             }
+        }
+        for (name, band) in [("top", self.top.as_ref()), ("bottom", self.bottom.as_ref())] {
+            if let Some(band) = band {
+                band.validate(&format!("{path}.{name}"))?;
+            }
+        }
+        if let Some(media) = &self.media {
+            media.validate(&format!("{path}.media"))?;
         }
         let toggles = self
             .slots()
@@ -1229,12 +1784,6 @@ impl ListItem {
                 "Gauge is accepted only once in the trailing slot",
             ));
         }
-        if !gauges.is_empty() && self.value.is_some() {
-            return Err(ComponentValidationError::new(
-                format!("{path}.value"),
-                "Gauge owns the row's trailing value caption",
-            ));
-        }
         let independent_roles = usize::from(!toggles.is_empty())
             + usize::from(!checkmarks.is_empty())
             + usize::from(disclosures > 0)
@@ -1266,6 +1815,7 @@ impl ListItem {
             ));
         }
         if let Some(toggle) = toggles.first()
+            && toggle.role == ToggleRole::Completion
             && toggle.value != self.done
         {
             return Err(ComponentValidationError::new(
@@ -1303,18 +1853,18 @@ impl ListItem {
     }
 
     fn set_toggle_value(&mut self, id: &str, value: bool) -> bool {
-        let mut found = false;
+        let mut found = None;
         for slot in self.slots_mut() {
             if let Some(toggle) = slot.toggle_mut(id) {
                 toggle.value = value;
-                found = true;
+                found = Some(toggle.role);
                 break;
             }
         }
-        if found {
+        if found == Some(ToggleRole::Completion) {
             self.done = value;
         }
-        found
+        found.is_some()
     }
 
     fn set_checkmark_value(&mut self, id: &str, value: bool) -> bool {
@@ -1355,6 +1905,9 @@ pub struct List {
     pub page_behavior: ListPageBehavior,
     #[serde(default)]
     pub space_pages_down: bool,
+    /// Terminal row layout; native and web renderers stack by their own rules.
+    #[serde(default, skip_serializing_if = "is_default_row_layout")]
+    pub row_layout: ListRowLayout,
     /// One bounded action vocabulary presented for the focused/pointed row.
     /// Renderers return the target row id with the selected menu action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1374,8 +1927,25 @@ impl List {
             page_overlap: default_page_overlap(),
             page_behavior: ListPageBehavior::Selection,
             space_pages_down: false,
+            row_layout: ListRowLayout::Inline,
             context_menu: None,
         }
+    }
+
+    #[must_use]
+    pub const fn row_layout(mut self, layout: ListRowLayout) -> Self {
+        self.row_layout = layout;
+        self
+    }
+
+    /// Terminal rows each item needs at `row_width` under this list's layout.
+    #[must_use]
+    pub fn row_heights(&self, row_width: u16) -> Vec<u16> {
+        let stacked = self.row_layout.stacks_at(row_width);
+        self.items
+            .iter()
+            .map(|item| item.row_height(stacked))
+            .collect()
     }
 
     #[must_use]
@@ -1442,6 +2012,9 @@ impl List {
         state.track_mouse(event);
         let position = TerminalPointerState::click_position(event)?;
         let index = state.item_at(position, self.items.len())?;
+        if self.items[index].is_divider() {
+            return None;
+        }
         let changed = state.select(Some(index), self.items.len());
         if self.items[index].primary_role().is_interactive() {
             Some(RowPointerDecision::InvokePrimary(index))
@@ -1553,6 +2126,10 @@ const fn default_page_overlap() -> u16 {
 
 const fn is_default_page_overlap(value: &u16) -> bool {
     *value == default_page_overlap()
+}
+
+const fn is_default_row_layout(value: &ListRowLayout) -> bool {
+    matches!(value, ListRowLayout::Inline)
 }
 
 const fn is_default_page_behavior(value: &ListPageBehavior) -> bool {
@@ -1980,6 +2557,13 @@ impl Page {
             capabilities.push(LIST_ITEM_PRESENTATION_CAPABILITY);
         }
         if list.items.iter().any(|item| {
+            !item.label_runs.is_empty()
+                || !item.detail_runs.is_empty()
+                || !item.value_runs.is_empty()
+        }) {
+            capabilities.push(LIST_ITEM_STYLED_TEXT_CAPABILITY);
+        }
+        if list.items.iter().any(|item| {
             item.slots()
                 .any(|slot| matches!(slot, ListItemSlot::Status(_)))
         }) {
@@ -2051,6 +2635,15 @@ impl Page {
                             )?;
                         }
                     }
+                    for band in item.bands() {
+                        if let Some(id) = band.id() {
+                            register_unique(
+                                &mut ids,
+                                id,
+                                &format!("page.body.items[{index}].band.id"),
+                            )?;
+                        }
+                    }
                 }
             }
             PageBodySlot::Content(content) => {
@@ -2084,6 +2677,64 @@ impl Page {
 
     /// Uses App Kit's single-line List renderer and InputField named slots.
     #[must_use]
+    /// Applies one shared key action with the back row as a focusable stop.
+    ///
+    /// With a back action, Up from the first row (or from an unselected
+    /// list) moves focus to the title row, which paints like a selected row;
+    /// Enter or Escape there returns [`ListNavigationOutcome::Back`] and Down
+    /// returns to the first row. Pages without a back action delegate to
+    /// [`RowNavigationState::navigate`] unchanged.
+    pub fn navigate(
+        &self,
+        state: &mut ListState,
+        action: ListNavigationAction,
+    ) -> ListNavigationOutcome {
+        let item_count = self.list_len();
+        if self.back.is_none() {
+            state.set_back_focused(false);
+            return state.navigate(action, item_count);
+        }
+        if state.back_focused() {
+            return match action {
+                ListNavigationAction::Activate | ListNavigationAction::Back => {
+                    ListNavigationOutcome::Back
+                }
+                ListNavigationAction::Up
+                | ListNavigationAction::First
+                | ListNavigationAction::PageUp => ListNavigationOutcome::None,
+                ListNavigationAction::Down
+                | ListNavigationAction::Last
+                | ListNavigationAction::PageDown => {
+                    state.set_back_focused(false);
+                    let target = if action == ListNavigationAction::Down {
+                        ListNavigationAction::First
+                    } else {
+                        action
+                    };
+                    state.select(None, item_count);
+                    state.navigate(target, item_count)
+                }
+            };
+        }
+        let at_top = state.offset() == 0
+            && state
+                .selected()
+                .is_none_or(|selected| (0..selected).all(|index| !state.is_selectable(index)));
+        if action == ListNavigationAction::Up && at_top {
+            state.set_back_focused(true);
+            state.select(None, item_count);
+            return ListNavigationOutcome::FocusedBack;
+        }
+        state.navigate(action, item_count)
+    }
+
+    fn list_len(&self) -> usize {
+        match &self.body {
+            PageBodySlot::List(list) => list.items.len(),
+            _ => 0,
+        }
+    }
+
     pub fn widget<'a>(
         &'a self,
         input: &'a mut InputField,
@@ -2573,11 +3224,15 @@ pub struct PageTheme {
     pub delete: Style,
     pub empty: Style,
     pub selected: Style,
+    /// Pointer hover on an unselected row; distinct from `selected`.
+    pub hovered: Style,
     pub selected_item: Style,
     pub selected_detail: Style,
     pub selected_value: Style,
     pub selected_badge: Style,
     pub navigation: Style,
+    /// Thin rule used by `ListItemBand::Divider`; muted in light and dark.
+    pub divider: Style,
     pub scrollbar_track: Style,
     pub scrollbar_thumb: Style,
     pub left_padding: u16,
@@ -2645,11 +3300,13 @@ impl PageTheme {
             delete: Style::new().fg(theme.subtle),
             empty: Style::new().fg(theme.subtle),
             selected: theme.selected_row,
+            hovered: theme.hovered_row,
             selected_item: Style::new(),
             selected_detail: Style::new().add_modifier(Modifier::DIM),
             selected_value: Style::new(),
             selected_badge: Style::new().add_modifier(Modifier::DIM),
             navigation: Style::new().fg(theme.subtle),
+            divider: Style::new().fg(theme.subtle).add_modifier(Modifier::DIM),
             scrollbar_track: theme.scrollbar_track,
             scrollbar_thumb: theme.scrollbar_thumb,
             left_padding: SELECTABLE_LEFT_PADDING,
@@ -2712,8 +3369,6 @@ impl Default for PageTheme {
     }
 }
 
-const LIST_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
 /// Standalone single-line List renderer built from App Kit row primitives.
 pub struct ListWidget<'a> {
     list: &'a List,
@@ -2749,12 +3404,46 @@ impl Widget for ListWidget<'_> {
                 .position(|item| &item.id == selected_id);
             self.state.select(selected, item_count);
         }
-        let overflow = item_count > usize::from(area.height) && area.width > 1;
+        let has_dividers = self.list.items.iter().any(ListItem::is_divider);
+        let uniform = !has_dividers
+            && self.list.row_layout == ListRowLayout::Inline
+            && self
+                .list
+                .items
+                .iter()
+                .all(|item| item.top.is_none() && item.bottom.is_none());
+        let heights = if uniform {
+            Vec::new()
+        } else {
+            // Heights depend on the width; the scrollbar column changes it by
+            // one cell, which only matters for Auto thresholds at the edge.
+            self.list.row_heights(area.width)
+        };
+        let content_rows = if uniform {
+            item_count
+        } else {
+            heights.iter().map(|height| usize::from(*height)).sum()
+        };
+        let overflow = content_rows > usize::from(area.height) && area.width > 1;
         let rows_area = Rect {
             width: area.width.saturating_sub(u16::from(overflow)),
             ..area
         };
-        self.state.prepare(rows_area, item_count);
+        let stacked = self.list.row_layout.stacks_at(rows_area.width);
+        if uniform {
+            self.state.prepare(rows_area, item_count);
+        } else if has_dividers {
+            let rows = self
+                .list
+                .items
+                .iter()
+                .zip(&heights)
+                .map(|(item, height)| crate::RowMetrics::new(*height, !item.is_divider()))
+                .collect::<Vec<_>>();
+            self.state.prepare_with_rows(rows_area, &rows);
+        } else {
+            self.state.prepare_with_heights(rows_area, &heights);
+        }
 
         if item_count == 0 {
             let content = SelectableRow::new(false, self.theme.selected)
@@ -2777,32 +3466,36 @@ impl Widget for ListWidget<'_> {
                 .style(self.theme.empty)
                 .render(content, buffer);
         } else {
-            for row in 0..rows_area.height {
-                let index = self.state.offset().saturating_add(usize::from(row));
-                let Some(item) = self.list.items.get(index) else {
+            let mut y = rows_area.y;
+            let offset = self.state.offset();
+            for (index, item) in self.list.items.iter().enumerate().skip(offset) {
+                if y >= rows_area.bottom() {
                     break;
-                };
+                }
+                let height = if uniform {
+                    1
+                } else {
+                    heights.get(index).copied().unwrap_or(1).max(1)
+                }
+                .min(rows_area.bottom() - y);
                 render_list_item(
                     item,
-                    Rect::new(
-                        rows_area.x,
-                        rows_area.y.saturating_add(row),
-                        rows_area.width,
-                        1,
-                    ),
+                    Rect::new(rows_area.x, y, rows_area.width, height),
+                    stacked,
                     self.state.selected() == Some(index),
                     self.state.pointer_phase_at(index),
                     self.state.spinner_frame(),
                     self.theme,
                     buffer,
                 );
+                y = y.saturating_add(height);
             }
         }
         if overflow {
             VerticalScrollbar::new(
-                item_count,
+                content_rows,
                 usize::from(rows_area.height),
-                self.state.offset(),
+                self.state.offset_row(),
             )
             .track_style(self.theme.scrollbar_track)
             .thumb_style(self.theme.scrollbar_thumb)
@@ -2814,9 +3507,11 @@ impl Widget for ListWidget<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_list_item(
     item: &ListItem,
     area: Rect,
+    stacked: bool,
     selected: bool,
     pointer_phase: TerminalPointerPhase,
     spinner_frame: usize,
@@ -2826,11 +3521,11 @@ fn render_list_item(
     if area.is_empty() {
         return;
     }
-    let highlighted = selected || pointer_phase != TerminalPointerPhase::Idle;
+    let highlighted = !item.divider && (selected || pointer_phase != TerminalPointerPhase::Idle);
     let active_style = match pointer_phase {
         TerminalPointerPhase::Idle | TerminalPointerPhase::Hovered if selected => theme.selected,
         TerminalPointerPhase::Idle => theme.selected,
-        TerminalPointerPhase::Hovered => theme.selected.add_modifier(Modifier::DIM),
+        TerminalPointerPhase::Hovered => theme.hovered,
         TerminalPointerPhase::Pressed => theme.selected.add_modifier(Modifier::BOLD),
     };
     let content = SelectableRow::new(highlighted, active_style)
@@ -2851,6 +3546,37 @@ fn render_list_item(
     if content.is_empty() {
         return;
     }
+    if item.divider {
+        render_list_divider(item, content, theme, buffer);
+        return;
+    }
+    let content = render_list_item_media(item, content, highlighted, theme, buffer);
+    if content.is_empty() {
+        return;
+    }
+
+    // Split the multi-row content into top band, text rows, and bottom band.
+    let mut rows = content;
+    if let Some(band) = &item.top {
+        let band_area = Rect { height: 1, ..rows };
+        render_list_item_band(item, band, band_area, highlighted, theme, buffer);
+        rows.y = rows.y.saturating_add(1);
+        rows.height = rows.height.saturating_sub(1);
+    }
+    let text_rows = 1 + u16::from(stacked && (item.detail.is_some() || item.value.is_some()));
+    let bottom_band = item.bottom.as_ref().filter(|_| rows.height > text_rows);
+    if let Some(band) = bottom_band {
+        let band_area = Rect::new(rows.x, rows.bottom() - 1, rows.width, 1);
+        render_list_item_band(item, band, band_area, highlighted, theme, buffer);
+        rows.height -= 1;
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let content = Rect { height: 1, ..rows };
+    let stacked_row =
+        (stacked && rows.height > 1).then(|| Rect::new(rows.x, rows.y + 1, rows.width, 1));
+    let value_on_second_row = stacked && stacked_row.is_some();
 
     let mut left = Vec::new();
     if item.busy {
@@ -2860,10 +3586,7 @@ fn render_list_item(
             theme.busy
         };
         left.push(Span::styled(
-            format!(
-                "{} ",
-                LIST_SPINNER_FRAMES[spinner_frame % LIST_SPINNER_FRAMES.len()]
-            ),
+            format!("{} ", crate::Spinner::glyph_for(spinner_frame)),
             style,
         ));
     }
@@ -2887,7 +3610,16 @@ fn render_list_item(
     if item.emphasis == ListItemEmphasis::Strong {
         label_style = label_style.add_modifier(Modifier::BOLD);
     }
-    left.push(Span::styled(item.label.clone(), label_style));
+    append_list_item_text(
+        &mut left,
+        &item.label,
+        &item.label_runs,
+        label_style,
+        theme.selected_item,
+        highlighted,
+        theme,
+        item.done,
+    );
     if let Some(ListItemSlot::Badge(badge)) = &item.accessory {
         left.push(Span::raw(" "));
         left.push(Span::styled(
@@ -2899,20 +3631,42 @@ fn render_list_item(
             },
         ));
     }
-    if let Some(detail) = &item.detail {
-        left.push(Span::styled(
-            format!("  {detail}"),
-            if highlighted {
-                theme.selected_detail
-            } else {
-                theme.detail
-            },
-        ));
+    if let Some(detail) = item.detail.as_ref().filter(|_| !value_on_second_row) {
+        let detail_style = if highlighted {
+            theme.selected_detail
+        } else {
+            theme.detail
+        };
+        left.push(Span::styled("  ", detail_style));
+        append_list_item_text(
+            &mut left,
+            detail,
+            &item.detail_runs,
+            detail_style,
+            theme.selected_detail,
+            highlighted,
+            theme,
+            false,
+        );
     }
 
     let mut suffix = Vec::new();
-    let sparkline = item.trailing.as_ref().and_then(ListItemSlot::as_sparkline);
-    let gauge = item.trailing.as_ref().and_then(ListItemSlot::as_gauge);
+    // A full-width band is the terminal's interpretation of the same metric;
+    // the compact trailing chart stays on the wire for native renderers.
+    let band_has_sparkline = matches!(item.bottom, Some(ListItemBand::Sparkline(_)))
+        || matches!(item.top, Some(ListItemBand::Sparkline(_)));
+    let band_has_gauge = matches!(item.bottom, Some(ListItemBand::Gauge(_)))
+        || matches!(item.top, Some(ListItemBand::Gauge(_)));
+    let sparkline = item
+        .trailing
+        .as_ref()
+        .and_then(ListItemSlot::as_sparkline)
+        .filter(|_| !band_has_sparkline);
+    let gauge = item
+        .trailing
+        .as_ref()
+        .and_then(ListItemSlot::as_gauge)
+        .filter(|_| !band_has_gauge);
     if let Some(slot) = &item.trailing
         && !matches!(slot, ListItemSlot::Sparkline(_) | ListItemSlot::Gauge(_))
     {
@@ -2935,10 +3689,14 @@ fn render_list_item(
     }
 
     let suffix_width = Line::from(suffix.clone()).width();
-    let gauge_caption = gauge.map(Gauge::value_label);
-    let value = gauge_caption
+    let gauge_caption = gauge
+        .filter(|_| item.value.is_none())
+        .map(Gauge::value_label);
+    let value = item
+        .value
         .as_deref()
-        .or(item.value.as_deref())
+        .filter(|_| !value_on_second_row)
+        .or(gauge_caption.as_deref())
         .filter(|value| {
             let value_width = UnicodeWidthStr::width(*value);
             let default_min = value_width
@@ -2961,10 +3719,20 @@ fn render_list_item(
     });
     let mut right = Vec::new();
     if let Some(value) = value {
-        right.push(Span::styled(
-            value.to_owned(),
+        append_list_item_text(
+            &mut right,
+            value,
+            if item.value.is_some() {
+                &item.value_runs
+            } else {
+                &[]
+            },
             value_style.unwrap_or_default(),
-        ));
+            theme.selected_value,
+            highlighted,
+            theme,
+            false,
+        );
     }
     if !suffix.is_empty() {
         if !right.is_empty() {
@@ -3081,6 +3849,219 @@ fn render_list_item(
                 },
             )
             .render(chart_area, buffer);
+    }
+
+    if let Some(second) = stacked_row {
+        let mut spans = Vec::new();
+        if let Some(detail) = &item.detail {
+            let detail_style = if highlighted {
+                theme.selected_detail
+            } else {
+                theme.detail
+            };
+            append_list_item_text(
+                &mut spans,
+                detail,
+                &item.detail_runs,
+                detail_style,
+                theme.selected_detail,
+                highlighted,
+                theme,
+                false,
+            );
+        }
+        if let Some(value) = &item.value {
+            if !spans.is_empty() {
+                spans.push(Span::raw("  "));
+            }
+            append_list_item_text(
+                &mut spans,
+                value,
+                &item.value_runs,
+                if highlighted {
+                    theme.selected_value
+                } else {
+                    theme.tone(item.value_tone)
+                },
+                theme.selected_value,
+                highlighted,
+                theme,
+                false,
+            );
+        }
+        Paragraph::new(Line::from(spans)).render(second, buffer);
+    }
+}
+
+/// Draws a divider row: a thin muted rule with an optional caption.
+fn render_list_divider(item: &ListItem, content: Rect, theme: PageTheme, buffer: &mut Buffer) {
+    let area = Rect {
+        height: 1,
+        ..content
+    };
+    let rule = "─".repeat(usize::from(area.width));
+    buffer.set_string(area.x, area.y, &rule, theme.divider);
+    if item.label.is_empty() {
+        return;
+    }
+    let caption = format!(" {} ", item.label);
+    let caption_width = u16::try_from(UnicodeWidthStr::width(caption.as_str())).unwrap_or(u16::MAX);
+    if caption_width + 2 > area.width {
+        return;
+    }
+    buffer.set_string(area.x + 2, area.y, &caption, theme.detail);
+}
+
+/// Reserves and paints the media column, returning the remaining content.
+fn render_list_item_media(
+    item: &ListItem,
+    content: Rect,
+    highlighted: bool,
+    theme: PageTheme,
+    buffer: &mut Buffer,
+) -> Rect {
+    let Some(media) = &item.media else {
+        return content;
+    };
+    let width = media.width.clamp(1, MAX_LIST_ITEM_MEDIA_WIDTH);
+    if content.width <= width + 1 {
+        return content;
+    }
+    let (block, remaining) = match media.side {
+        ListItemMediaSide::Leading => (
+            Rect::new(content.x, content.y, width, content.height),
+            Rect::new(
+                content.x + width + 1,
+                content.y,
+                content.width - width - 1,
+                content.height,
+            ),
+        ),
+        ListItemMediaSide::Trailing => (
+            Rect::new(content.right() - width, content.y, width, content.height),
+            Rect::new(
+                content.x,
+                content.y,
+                content.width - width - 1,
+                content.height,
+            ),
+        ),
+    };
+    let tone = theme.tone(media.tone);
+    let fill = tone.fg.or(theme.navigation.fg);
+    let mut style = Style::new();
+    if let Some(color) = fill {
+        style = style.bg(color);
+    } else {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    if highlighted {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    buffer.set_style(block, style);
+    for y in block.y..block.bottom() {
+        buffer.set_string(block.x, y, " ".repeat(usize::from(block.width)), style);
+    }
+    if let Some(glyph) = &media.glyph {
+        let glyph_width = u16::try_from(UnicodeWidthStr::width(glyph.as_str())).unwrap_or(u16::MAX);
+        if glyph_width <= block.width {
+            let x = block.x + (block.width - glyph_width) / 2;
+            let y = block.y + block.height.saturating_sub(1) / 2;
+            let glyph_style = style.fg(theme.selected_item.fg.unwrap_or(Color::White));
+            buffer.set_string(x, y, glyph, glyph_style);
+        }
+    }
+    remaining
+}
+
+fn render_list_item_band(
+    item: &ListItem,
+    band: &ListItemBand,
+    area: Rect,
+    highlighted: bool,
+    theme: PageTheme,
+    buffer: &mut Buffer,
+) {
+    if area.is_empty() {
+        return;
+    }
+    // Charts take the row's value tone like the compact trailing slot; the
+    // default muted tone falls back to the accent so a meter stays visible.
+    let chart_style = if highlighted {
+        theme.selected_value
+    } else if item.value_tone == ListItemTone::Muted {
+        theme.accent
+    } else {
+        theme.tone(item.value_tone)
+    };
+    let track_style = if highlighted {
+        theme.selected_detail
+    } else {
+        theme.navigation
+    };
+    match band {
+        ListItemBand::Gauge(gauge) => {
+            let widget = gauge.widget().styles(chart_style, track_style);
+            // The row's value already shows the caption; keep the band a
+            // pure meter then. Otherwise the caption lives inside the band.
+            if item.value.is_some() {
+                widget.without_label().render(area, buffer);
+            } else {
+                widget.compact().render(area, buffer);
+            }
+        }
+        ListItemBand::Sparkline(sparkline) => {
+            sparkline.widget().style(chart_style).render(area, buffer);
+        }
+        ListItemBand::Text { text, tone } => Paragraph::new(text.as_str())
+            .style(if highlighted {
+                theme.selected_detail
+            } else {
+                theme.tone(*tone)
+            })
+            .render(area, buffer),
+        ListItemBand::Divider => Paragraph::new("─".repeat(usize::from(area.width)))
+            .style(if highlighted {
+                theme.selected_detail
+            } else {
+                theme.divider
+            })
+            .render(area, buffer),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_list_item_text(
+    spans: &mut Vec<Span<'static>>,
+    fallback: &str,
+    runs: &[ListItemTextRun],
+    fallback_style: Style,
+    selected_default: Style,
+    selected: bool,
+    theme: PageTheme,
+    crossed_out: bool,
+) {
+    if runs.is_empty() {
+        spans.push(Span::styled(fallback.to_owned(), fallback_style));
+        return;
+    }
+    for run in runs {
+        let mut style = match run.tone {
+            None => fallback_style,
+            Some(ListItemTone::Default) if selected => selected_default,
+            Some(ListItemTone::Muted) if selected => theme.selected_detail,
+            Some(tone) => theme.tone(tone),
+        };
+        if let Some(emphasis) = run.emphasis {
+            style = match emphasis {
+                ListItemEmphasis::Regular => style.remove_modifier(Modifier::BOLD),
+                ListItemEmphasis::Strong => style.add_modifier(Modifier::BOLD),
+            };
+        }
+        if crossed_out {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        spans.push(Span::styled(run.text.clone(), style));
     }
 }
 
@@ -3247,11 +4228,15 @@ impl Widget for PageWidget<'_> {
         }
         buffer.set_style(area, self.theme.style);
         let layout = self.page.layout(area);
-        let title_style = self.theme.title.patch(
-            self.list_state
-                .pointer()
-                .interaction_style(layout.title, self.page.back.is_some()),
-        );
+        // Only the chevron takes the gray treatment: keyboard focus, hover,
+        // and press paint the cells around "‹" while the title stays plain.
+        let back_phase = if self.page.back.is_some() {
+            self.list_state.pointer().phase(layout.title)
+        } else {
+            TerminalPointerPhase::Idle
+        };
+        let back_focused = self.page.back.is_some() && self.list_state.back_focused();
+        let back_active = back_focused || back_phase != TerminalPointerPhase::Idle;
         Paragraph::new(format!(
             "{}{}{}",
             " ".repeat(usize::from(self.theme.left_padding)),
@@ -3262,8 +4247,26 @@ impl Widget for PageWidget<'_> {
             },
             self.page.title
         ))
-        .style(title_style)
+        .style(self.theme.title)
         .render(layout.title, buffer);
+        if back_active {
+            let active_style = match back_phase {
+                TerminalPointerPhase::Idle => self.theme.selected,
+                TerminalPointerPhase::Hovered if back_focused => self.theme.selected,
+                TerminalPointerPhase::Hovered => self.theme.hovered,
+                TerminalPointerPhase::Pressed => self.theme.selected.add_modifier(Modifier::BOLD),
+            };
+            let chevron_area = Rect::new(
+                layout
+                    .title
+                    .x
+                    .saturating_add(self.theme.left_padding.saturating_sub(1)),
+                layout.title.y,
+                3.min(layout.title.width),
+                1,
+            );
+            buffer.set_style(chevron_area, active_style.patch(self.theme.selected_item));
+        }
 
         if let Some(input) = self.page.input_spec() {
             if self.input.text() != input.value {
@@ -3375,8 +4378,9 @@ impl Widget for PageWidget<'_> {
                     self.theme.navigation.add_modifier(Modifier::DIM),
                 )
                 .pointer(self.list_state.pointer())
+                .spinner_frame(self.list_state.spinner_frame())
                 .interaction_styles(
-                    self.theme.selected.add_modifier(Modifier::DIM),
+                    self.theme.hovered,
                     self.theme.selected.add_modifier(Modifier::BOLD),
                 )
                 .render(footer, buffer);
@@ -3497,6 +4501,572 @@ mod tests {
                 .placeholder("What needs doing?")
                 .submit_action("add-todo"),
         )
+    }
+
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (buffer.area.x..buffer.area.right())
+            .filter(|x| !matches!(buffer[(*x, y)].symbol(), "┃" | "│"))
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    fn draw_list(list: &List, state: &mut ListState, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(list.widget(state), frame.area()))
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn stacked_layout_moves_detail_and_value_beneath_the_label() {
+        let items = vec![
+            ListItem::new("codex", "Codex")
+                .accessory(ListItemSlot::badge(Badge::new("Pro")))
+                .detail("5h window")
+                .value("42% left · resets in 2h")
+                .value_min_width(0),
+            ListItem::new("claude", "Claude").value("ok"),
+        ];
+        let inline = List::new("providers", items.clone());
+        let stacked = List::new("providers", items.clone()).row_layout(ListRowLayout::Stacked);
+        let auto = List::new("providers", items).row_layout(ListRowLayout::Auto {
+            stack_below_width: 40,
+        });
+
+        let mut state = ListState::new(Some(0));
+        let buffer = draw_list(&inline, &mut state, 60, 4);
+        assert_eq!(
+            row_text(&buffer, 0),
+            "  Codex Pro  5h window              42% left · resets in 2h"
+        );
+        assert_eq!(
+            row_text(&buffer, 1),
+            format!("  Claude{}ok", " ".repeat(49))
+        );
+        assert!(state.has_uniform_rows());
+
+        let mut state = ListState::new(Some(0));
+        let buffer = draw_list(&stacked, &mut state, 30, 5);
+        assert_eq!(row_text(&buffer, 0), "  Codex Pro");
+        assert_eq!(row_text(&buffer, 1), "  5h window  42% left · reset");
+        assert_eq!(row_text(&buffer, 2), "  Claude");
+        assert_eq!(row_text(&buffer, 3), "  ok");
+        assert_eq!(state.item_height(0), 2);
+        assert_eq!(state.item_area(1), Some(Rect::new(0, 2, 30, 2)));
+        let selected = KitTheme::dark().selected_row.bg.unwrap();
+        assert_eq!(buffer[(5, 1)].bg, selected, "selection spans both rows");
+        assert_ne!(buffer[(5, 2)].bg, selected);
+        let muted = KitTheme::dark().selected_row.fg.unwrap();
+        assert_eq!(buffer[(2, 1)].fg, muted);
+
+        let mut state = ListState::new(Some(0));
+        let wide = draw_list(&auto, &mut state, 60, 4);
+        assert_eq!(row_text(&wide, 1), format!("  Claude{}ok", " ".repeat(49)));
+        let narrow = draw_list(&auto, &mut state, 30, 5);
+        assert_eq!(row_text(&narrow, 1), "  5h window  42% left · reset");
+    }
+
+    #[test]
+    fn bands_render_on_their_own_rows_inside_the_content_inset() {
+        let list = List::new(
+            "bands",
+            vec![
+                ListItem::new("quota", "Weekly quota")
+                    .value("61%")
+                    .bottom(ListItemBand::gauge(
+                        Gauge::new("quota-gauge", 0.61, "7-day", "61 percent left")
+                            .caption("61% left"),
+                    )),
+                ListItem::new("note", "Release")
+                    .top(ListItemBand::text(
+                        "Shipped yesterday",
+                        ListItemTone::Success,
+                    ))
+                    .bottom(ListItemBand::divider()),
+            ],
+        );
+        let mut state = ListState::new(None);
+        let buffer = draw_list(&list, &mut state, 30, 6);
+        assert_eq!(row_text(&buffer, 0), "  Weekly quota            61%");
+        let gauge_row = row_text(&buffer, 1);
+        assert!(gauge_row.starts_with("  "), "{gauge_row}");
+        assert!(
+            !gauge_row.contains("61% left"),
+            "the value row already shows the caption: {gauge_row}"
+        );
+        assert!(gauge_row.contains('─'), "{gauge_row}");
+        let first_bar = (0..30)
+            .find(|x| buffer[(*x, 1)].symbol() == "─")
+            .expect("meter cell");
+        assert_eq!(
+            buffer[(first_bar, 1)].fg,
+            PageTheme::for_theme(KitTheme::dark()).accent.fg.unwrap(),
+            "default muted value tone falls back to the accent meter"
+        );
+        assert_eq!(buffer[(1, 1)].symbol(), " ", "band respects the left inset");
+        assert_eq!(
+            buffer[(29, 1)].symbol(),
+            " ",
+            "band respects the right inset"
+        );
+        assert_eq!(row_text(&buffer, 2), "  Shipped yesterday");
+        assert_eq!(row_text(&buffer, 3), "  Release");
+        assert_eq!(row_text(&buffer, 4), format!("  {}", "─".repeat(27)));
+        let divider = PageTheme::for_theme(KitTheme::dark()).divider;
+        assert_eq!(buffer[(2, 4)].fg, divider.fg.unwrap());
+        assert!(buffer[(2, 4)].modifier.contains(Modifier::DIM));
+        assert_eq!(
+            PageTheme::for_theme(KitTheme::light()).divider.fg,
+            Some(KitTheme::light().subtle)
+        );
+        assert_eq!(state.item_area(0), Some(Rect::new(0, 0, 30, 2)));
+        assert_eq!(state.item_area(1), Some(Rect::new(0, 2, 30, 3)));
+        assert_eq!(state.content_rows(2), 5);
+
+        // A trailing Gauge slot stays on the wire for native renderers but the
+        // terminal draws only the full-width band.
+        let both = List::new(
+            "both",
+            vec![
+                ListItem::new("quota", "Weekly quota")
+                    .value("61%")
+                    .trailing(ListItemSlot::gauge(Gauge::new("slot", 0.61, "7-day", "61")))
+                    .bottom(ListItemBand::gauge(Gauge::new("band", 0.61, "7-day", "61"))),
+            ],
+        );
+        let mut state = ListState::new(None);
+        let buffer = draw_list(&both, &mut state, 40, 3);
+        assert_eq!(
+            row_text(&buffer, 0),
+            format!("  Weekly quota{}61%", " ".repeat(22))
+        );
+    }
+
+    #[test]
+    fn media_column_spans_every_row_and_reserves_its_width() {
+        let list = List::new(
+            "media",
+            vec![
+                ListItem::new("lead", "Leading")
+                    .detail("beside the block")
+                    .media(
+                        ListItemMedia::leading(4)
+                            .glyph("AB")
+                            .tone(ListItemTone::Info),
+                    ),
+                ListItem::new("trail", "Trailing")
+                    .detail("block on the right")
+                    .media(ListItemMedia::trailing(3)),
+            ],
+        )
+        .row_layout(ListRowLayout::Stacked);
+        let mut state = ListState::new(None);
+        let buffer = draw_list(&list, &mut state, 32, 4);
+        assert_eq!(row_text(&buffer, 0), "   AB  Leading");
+        assert_eq!(row_text(&buffer, 1), "       beside the block");
+        let info = KitTheme::dark().accent;
+        let _ = info;
+        for y in 0..2 {
+            for x in 2..6 {
+                assert!(
+                    buffer[(x, y)].bg != Color::Reset,
+                    "media block at ({x}, {y})"
+                );
+            }
+            assert_eq!(buffer[(6, y)].bg, Color::Reset, "gap after the block");
+        }
+        assert_eq!(row_text(&buffer, 2), "  Trailing");
+        assert_eq!(row_text(&buffer, 3), "  block on the right");
+        for y in 2..4 {
+            for x in 28..31 {
+                assert!(
+                    buffer[(x, y)].bg != Color::Reset,
+                    "trailing block at ({x}, {y})"
+                );
+            }
+            assert_eq!(buffer[(27, y)].bg, Color::Reset);
+        }
+    }
+
+    #[test]
+    fn mixed_row_heights_scroll_reveal_and_hit_test_per_item() {
+        let list = List::new(
+            "mixed",
+            vec![
+                ListItem::new("a", "Alpha"),
+                ListItem::new("b", "Beta").detail("two rows"),
+                ListItem::new("c", "Gamma")
+                    .bottom(ListItemBand::text("band", ListItemTone::Muted))
+                    .detail("three rows"),
+                ListItem::new("d", "Delta"),
+                ListItem::new("e", "Epsilon").detail("two rows"),
+            ],
+        )
+        .row_layout(ListRowLayout::Stacked)
+        .scroll_padding(1);
+        let mut state = ListState::new(Some(0));
+        let buffer = draw_list(&list, &mut state, 20, 5);
+        assert_eq!(row_text(&buffer, 0), "  Alpha");
+        assert_eq!(row_text(&buffer, 1), "  Beta");
+        assert_eq!(row_text(&buffer, 2), "  two rows");
+        assert_eq!(row_text(&buffer, 3), "  Gamma");
+        assert_eq!(row_text(&buffer, 4), "  three rows");
+        assert_eq!(state.content_rows(5), 9);
+        assert_eq!(
+            state.rows_area().width,
+            19,
+            "overflow reserves the scrollbar"
+        );
+        assert_eq!(state.visible_item_count(5), 2);
+        assert_eq!(
+            state.item_at(ratatui::layout::Position::new(3, 2), 5),
+            Some(1)
+        );
+        assert_eq!(
+            state.item_at(ratatui::layout::Position::new(3, 4), 5),
+            Some(2)
+        );
+        assert_eq!(state.item_area(2), Some(Rect::new(0, 3, 19, 2)), "clipped");
+
+        state.navigate(ListNavigationAction::Down, 5);
+        state.navigate(ListNavigationAction::Down, 5);
+        let buffer = draw_list(&list, &mut state, 20, 5);
+        assert_eq!(state.selected(), Some(2));
+        assert_eq!(
+            state.offset(),
+            2,
+            "Gamma's three rows plus one padding row need the viewport from Gamma"
+        );
+        assert_eq!(row_text(&buffer, 0), "  Gamma");
+        assert_eq!(row_text(&buffer, 2), "  band");
+        assert_eq!(row_text(&buffer, 3), "  Delta");
+        assert_eq!(state.offset_row(), 3);
+
+        state.navigate(ListNavigationAction::Last, 5);
+        let buffer = draw_list(&list, &mut state, 20, 5);
+        // The offset stays item-granular: the last valid offset keeps Epsilon
+        // fully visible instead of clipping it, leaving blank rows below.
+        assert_eq!(state.offset(), 3);
+        assert_eq!(state.offset(), state.max_offset(5));
+        assert_eq!(row_text(&buffer, 0), "  Delta");
+        assert_eq!(row_text(&buffer, 2), "  two rows");
+        assert_eq!(row_text(&buffer, 3), "");
+        assert_eq!(
+            state.item_at(ratatui::layout::Position::new(3, 2), 5),
+            Some(4)
+        );
+        assert_eq!(state.item_at(ratatui::layout::Position::new(3, 4), 5), None);
+        assert_eq!(state.item_area(4).map(|area| area.height), Some(2));
+        assert_eq!(state.item_area(0), None);
+
+        state.navigate(ListNavigationAction::PageUp, 5);
+        assert!(state.selected().unwrap() < 4);
+        state.navigate(ListNavigationAction::First, 5);
+        let buffer = draw_list(&list, &mut state, 20, 5);
+        assert_eq!(state.offset(), 0);
+        assert_eq!(row_text(&buffer, 0), "  Alpha");
+    }
+
+    #[test]
+    fn divider_rows_render_muted_rules_and_are_skipped_by_focus_and_clicks() {
+        let list = List::new(
+            "grouped",
+            vec![
+                ListItem::divider_labeled("sep-top", "Providers"),
+                ListItem::new("a", "Alpha").activate_action("open"),
+                ListItem::divider("sep-mid"),
+                ListItem::new("b", "Beta").activate_action("open"),
+            ],
+        );
+        Page::new("Grouped", list.clone()).validate().unwrap();
+        let mut state = ListState::new(Some(0));
+        let buffer = draw_list(&list, &mut state, 24, 4);
+        assert_eq!(row_text(&buffer, 0), "  ── Providers ────────");
+        assert_eq!(row_text(&buffer, 1), "  Alpha");
+        assert_eq!(row_text(&buffer, 2), format!("  {}", "─".repeat(21)));
+        assert_eq!(state.selected(), Some(1), "initial focus skips the divider");
+        let selected = KitTheme::dark().selected_row.bg.unwrap();
+        assert_eq!(buffer[(3, 1)].bg, selected);
+        assert_ne!(buffer[(3, 0)].bg, selected);
+        let divider = PageTheme::for_theme(KitTheme::dark()).divider;
+        assert_eq!(buffer[(2, 2)].fg, divider.fg.unwrap());
+        assert_eq!(
+            buffer[(4, 0)].fg,
+            PageTheme::for_theme(KitTheme::dark()).detail.fg.unwrap()
+        );
+
+        state.navigate(ListNavigationAction::Down, 4);
+        assert_eq!(state.selected(), Some(3), "Down jumps over the divider");
+        state.navigate(ListNavigationAction::Up, 4);
+        assert_eq!(state.selected(), Some(1));
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(list.pointer_decision(&mut state, &click), None);
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        };
+        state.track_mouse(&release);
+        assert_eq!(state.selected(), Some(1));
+
+        let json = serde_json::to_value(ListItem::divider("d")).unwrap();
+        assert_eq!(json["divider"], true);
+        assert_eq!(json["label"], "");
+        assert!(
+            serde_json::to_value(ListItem::new("x", "X"))
+                .unwrap()
+                .get("divider")
+                .is_none()
+        );
+        assert!(
+            ListItem::divider("bad")
+                .value("no")
+                .validate("item")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn back_row_is_a_focusable_gray_stop_above_the_first_item() {
+        let page = Page::new(
+            "Detail",
+            List::new(
+                "rows",
+                vec![
+                    ListItem::divider("sep"),
+                    ListItem::new("a", "Alpha"),
+                    ListItem::new("b", "Beta"),
+                ],
+            ),
+        )
+        .back_action("close");
+        let mut state = ListState::new(Some(1));
+        let mut input = InputField::new("");
+        let mut draw = |state: &mut ListState| {
+            let mut terminal = Terminal::new(TestBackend::new(30, 6)).unwrap();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(page.widget(&mut input, state), frame.area());
+                })
+                .unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let selected = KitTheme::dark().selected_row.bg.unwrap();
+        let buffer = draw(&mut state);
+        assert_ne!(buffer[(0, 0)].bg, selected);
+
+        assert_eq!(
+            page.navigate(&mut state, ListNavigationAction::Up),
+            ListNavigationOutcome::FocusedBack,
+            "Up from the first selectable row focuses back"
+        );
+        assert!(state.back_focused());
+        assert_eq!(state.selected(), None);
+        let buffer = draw(&mut state);
+        assert!(
+            (1..4).all(|x| buffer[(x, 0)].bg == selected),
+            "only the chevron cells take the selection background"
+        );
+        assert_ne!(buffer[(0, 0)].bg, selected);
+        assert_ne!(buffer[(6, 0)].bg, selected, "title text stays plain");
+        assert_eq!(row_text(&buffer, 0), "  ‹  Detail");
+        assert_ne!(buffer[(0, 2)].bg, selected, "list rows are unselected");
+
+        assert_eq!(
+            page.navigate(&mut state, ListNavigationAction::Up),
+            ListNavigationOutcome::None
+        );
+        assert_eq!(
+            page.navigate(&mut state, ListNavigationAction::Activate),
+            ListNavigationOutcome::Back
+        );
+        assert_eq!(
+            page.navigate(&mut state, ListNavigationAction::Down),
+            ListNavigationOutcome::SelectionChanged(1),
+            "Down returns to the first selectable row"
+        );
+        assert!(!state.back_focused());
+        let buffer = draw(&mut state);
+        assert_ne!(buffer[(0, 0)].bg, selected);
+
+        // Hovering the back row paints the same gray row, never an underline.
+        state.track_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        let buffer = draw(&mut state);
+        let hovered = KitTheme::dark().hovered_row.bg.unwrap();
+        assert_ne!(hovered, selected, "hover and selection are distinct");
+        assert_eq!(buffer[(2, 0)].bg, hovered, "hover paints the chevron");
+        assert_ne!(buffer[(8, 0)].bg, hovered);
+        assert!(
+            (0..30).all(|x| !buffer[(x, 0)].modifier.contains(Modifier::UNDERLINED)),
+            "no underline on hover"
+        );
+
+        let no_back = Page::new("Plain", List::new("rows", vec![ListItem::new("a", "A")]));
+        let mut plain = ListState::new(Some(0));
+        assert_eq!(
+            no_back.navigate(&mut plain, ListNavigationAction::Up),
+            ListNavigationOutcome::None
+        );
+        assert!(!plain.back_focused());
+    }
+
+    #[test]
+    fn busy_footer_actions_animate_a_braille_spinner_beside_the_label() {
+        let page = Page::new("Usage", List::new("rows", vec![ListItem::new("a", "A")]))
+            .footer_actions(vec![
+                FooterAction::new("refresh", "refreshing…", "refresh")
+                    .accelerator("r")
+                    .busy(true)
+                    .disabled(true),
+            ]);
+        let mut input = InputField::new("");
+        let mut state = ListState::new(Some(0));
+        state.set_spinner_frame(3);
+        let mut terminal = Terminal::new(TestBackend::new(30, 4)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(page.widget(&mut input, &mut state), frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        assert_eq!(row_text(&buffer, 3), "  r ⠸ refreshing…");
+        let json =
+            serde_json::to_value(FooterAction::new("r", "Refresh", "refresh").busy(true)).unwrap();
+        assert_eq!(json["busy"], true);
+        assert!(
+            serde_json::to_value(FooterAction::new("r", "Refresh", "refresh"))
+                .unwrap()
+                .get("busy")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn setting_toggles_are_switches_that_never_strike_the_row() {
+        let list = List::new(
+            "alerts",
+            vec![
+                ListItem::new("near", "Close to a limit")
+                    .detail("At 80% used")
+                    .trailing(ListItemSlot::toggle(Toggle::setting(
+                        "near-toggle",
+                        "Close to a limit",
+                        true,
+                        "set-alert",
+                    ))),
+                ListItem::new("todo", "Ship it")
+                    .done(true)
+                    .trailing(ListItemSlot::toggle(Toggle::new(
+                        "todo-toggle",
+                        "Done",
+                        true,
+                        "set-done",
+                    ))),
+            ],
+        );
+        Page::new("Alerts", list.clone()).validate().unwrap();
+        let mut state = ListState::new(None);
+        let buffer = draw_list(&list, &mut state, 40, 3);
+        assert_eq!(
+            row_text(&buffer, 0),
+            "  Close to a limit  At 80% used     (●)"
+        );
+        assert!(
+            !buffer[(2, 0)].modifier.contains(Modifier::CROSSED_OUT),
+            "setting toggles keep the label intact"
+        );
+        assert!(buffer[(2, 1)].modifier.contains(Modifier::CROSSED_OUT));
+        let json = serde_json::to_value(&list.items[0].trailing).unwrap();
+        assert_eq!(json["role"], "setting");
+        assert!(
+            serde_json::to_value(&list.items[1].trailing)
+                .unwrap()
+                .get("role")
+                .is_none()
+        );
+        let mut item = list.items[0].clone();
+        assert!(item.set_toggle_value("near-toggle", false));
+        assert!(!item.done, "setting toggles never mark the row done");
+        assert!(
+            ListItem::new("bad", "Bad")
+                .done(true)
+                .trailing(ListItemSlot::toggle(Toggle::setting(
+                    "t", "T", false, "set"
+                )))
+                .validate("item")
+                .is_ok(),
+            "done is independent of a setting toggle"
+        );
+    }
+
+    #[test]
+    fn rich_list_item_fields_validate_and_round_trip_serde() {
+        let item = ListItem::new("row", "Row")
+            .top(ListItemBand::text("above", ListItemTone::Muted))
+            .bottom(ListItemBand::gauge(Gauge::new("g", 0.5, "G", "half")))
+            .media(ListItemMedia::trailing(3).glyph("R"));
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["top"]["type"], "text");
+        assert_eq!(json["bottom"]["type"], "gauge");
+        assert_eq!(json["media"]["side"], "trailing");
+        assert_eq!(json["media"]["width"], 3);
+        let plain = serde_json::to_value(ListItem::new("plain", "Plain")).unwrap();
+        assert!(plain.get("top").is_none() && plain.get("media").is_none());
+        let decoded: ListItem = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, item);
+        let list = List::new("l", vec![item]).row_layout(ListRowLayout::Auto {
+            stack_below_width: 50,
+        });
+        let json = serde_json::to_value(&list).unwrap();
+        assert_eq!(json["rowLayout"]["type"], "auto");
+        assert_eq!(json["rowLayout"]["stackBelowWidth"], 50);
+        assert!(
+            serde_json::to_value(List::new("l", vec![]))
+                .unwrap()
+                .get("rowLayout")
+                .is_none()
+        );
+        Page::new("Rich", list).validate().unwrap();
+
+        let clickable = ListItem::new("bad", "Bad").bottom(ListItemBand::gauge(
+            Gauge::new("g", 0.5, "G", "half").activate("open"),
+        ));
+        assert_eq!(
+            clickable.validate("item").unwrap_err().path,
+            "item.bottom.activate"
+        );
+        let mut wide = ListItemMedia::leading(3);
+        wide.width = 40;
+        assert!(
+            ListItem::new("m", "M")
+                .media(wide)
+                .validate("item")
+                .is_err()
+        );
+        let duplicate = Page::new(
+            "Dup",
+            List::new(
+                "l",
+                vec![
+                    ListItem::new("a", "A")
+                        .bottom(ListItemBand::gauge(Gauge::new("g", 0.5, "G", "h"))),
+                    ListItem::new("b", "B")
+                        .top(ListItemBand::gauge(Gauge::new("g", 0.5, "G", "h"))),
+                ],
+            ),
+        );
+        assert!(duplicate.validate().is_err());
     }
 
     #[test]
@@ -3956,11 +5526,11 @@ mod tests {
                 .is_err()
         );
         assert!(
-            ListItem::new("duplicate-caption", "Quota")
-                .value("renderer-owned copy")
+            ListItem::new("app-caption", "Quota")
+                .value("App-owned copy")
                 .trailing(ListItemSlot::gauge(gauge.clone()))
                 .validate("item")
-                .is_err()
+                .is_ok()
         );
         let page = Page::new(
             "Usage",
@@ -3993,6 +5563,73 @@ mod tests {
         assert!((0..72).any(|x| {
             buffer[(x, 2)].symbol() == "─" && buffer[(x, 2)].fg == ratatui::style::Color::DarkGray
         }));
+    }
+
+    #[test]
+    fn list_item_styled_runs_preserve_semantic_color_and_plain_fallback() {
+        let gauge = Gauge::new(
+            "fable-gauge",
+            1.0,
+            "Fable 7-day",
+            "Fable 7-day is 100 percent used",
+        )
+        .caption("100% used");
+        let item = ListItem::new("claude", "Claude")
+            .label_runs([ListItemTextRun::new("Claude")
+                .tone(ListItemTone::Accent)
+                .emphasis(ListItemEmphasis::Strong)])
+            .detail_runs([
+                ListItemTextRun::new("5-hour 32% · ").tone(ListItemTone::Muted),
+                ListItemTextRun::new("Fable 7-day 100% used").tone(ListItemTone::Danger),
+            ])
+            .value_runs([
+                ListItemTextRun::new("Fable 7-day ").tone(ListItemTone::Muted),
+                ListItemTextRun::new("100% used").tone(ListItemTone::Danger),
+            ])
+            .value_tone(ListItemTone::Danger)
+            .trailing(ListItemSlot::gauge(gauge));
+        item.validate("item").unwrap();
+        assert_eq!(item.label, "Claude");
+        assert_eq!(
+            item.detail.as_deref(),
+            Some("5-hour 32% · Fable 7-day 100% used")
+        );
+        assert_eq!(item.value.as_deref(), Some("Fable 7-day 100% used"));
+
+        let page = Page::new("Usage", List::new("providers", vec![item]));
+        assert!(
+            page.required_capabilities()
+                .contains(&LIST_ITEM_STYLED_TEXT_CAPABILITY)
+        );
+        let mut input = InputField::new("");
+        let mut state = ListState::default();
+        let mut theme = PageTheme::for_theme(KitTheme::dark());
+        theme.danger = Style::new().fg(ratatui::style::Color::Red);
+        theme.accent = Style::new().fg(ratatui::style::Color::Cyan);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 110, 7));
+        page.widget(&mut input, &mut state)
+            .theme(theme)
+            .render(buffer.area, &mut buffer);
+
+        let row = (0..110)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect::<String>();
+        assert!(row.contains("Claude"));
+        assert!(row.contains("Fable 7-day 100% used"));
+        let red_text = (0..110).any(|x| {
+            buffer[(x, 2)].symbol() == "1" && buffer[(x, 2)].fg == ratatui::style::Color::Red
+        });
+        assert!(
+            red_text,
+            "danger run must own its terminal foreground: {row}"
+        );
+        assert!((0..110).any(|x| {
+            buffer[(x, 2)].symbol() == "─" && buffer[(x, 2)].fg == ratatui::style::Color::Red
+        }));
+
+        let mut invalid = ListItem::new("invalid", "Fallback");
+        invalid.label_runs = vec![ListItemTextRun::new("Different")];
+        assert!(invalid.validate("item").is_err());
     }
 
     #[test]

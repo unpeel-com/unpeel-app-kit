@@ -1,5 +1,7 @@
 # unpeel-app-kit
 
+**Writing an App?** Start with [docs/writing-an-app.md](docs/writing-an-app.md): one struct, a `page()` builder, a `reduce()` function, and `run_app`. Everything below is the component reference and the hosted protocol.
+
 An opinionated [Ratatui](https://ratatui.rs/) component library for building
 normal standalone TUI Apps. Use the components in an ordinary terminal
 process, ship the binary anywhere Ratatui runs, and keep ownership of the event
@@ -40,6 +42,16 @@ hosted, the identical Pages become Swift Charts / SwiftUI Gauge or inline SVG:
 ```sh
 cargo run --example charts
 cargo run --example charts --no-default-features
+```
+
+The rich ListItem demo shows every multi-row variant in one Page: stacked
+detail, full-width Gauge and Sparkline bands, text bands, leading and
+trailing media columns, busy, toggle, and checkmark rows. `l` cycles the
+layout and Auto reflows as the terminal narrows:
+
+```sh
+cargo run --example list_items
+cargo run --example list_items --no-default-features
 ```
 
 The `TextBox` demo pairs a chat-style prompt bar (busy spinner row, embedded
@@ -217,7 +229,7 @@ The standalone component layer currently provides:
 | `Page` | Top-level standalone Ratatui presentation with a constrained Input header, a closed List, Content, Sparkline, BarChart, LineChart, or Gauge body, one optional back action, and an ordered FooterActions slot |
 | `FooterActions` / `FooterActionsWidget` | Ordered App-owned screen commands with optional one-key accelerators, danger/disabled intent, and the classic compact Ratatui bottom hint bar |
 | `Content` / `ContentWidget` | Read-only scrollable styled lines for issue, diff, and document detail screens; keyed range selection and bounded context actions without editor semantics |
-| `List` / `ListItem` | Borderless single-line rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, and closed slots including compact Sparkline/Gauge metrics |
+| `List` / `ListItem` | Borderless rows built from `SelectableRow`/`VerticalScrollbar`, with stable selection, status/badge/busy presentation, collapsible trailing values, closed slots including compact Sparkline/Gauge metrics, and optional multi-row layouts: `ListRowLayout` stacking, full-width top/bottom `ListItemBand`s, and a `ListItemMedia` column |
 | `ListState` / `ListKeymap` | Clamped non-wrapping selection, scroll-to-reveal/paging, hit testing, and the shared arrow/j/k/Home/g/End/G/Page/Enter/Escape/q vocabulary |
 | `TerminalPointerState` / `PagePointerDecision` | Renderer-local hover/left-press lifecycle and pure-TUI Page hit decisions shared by Lists, Trees, Explorer, Menus, charts, Media, Canvas Buttons, Markdown footers, and clickable FooterActions; action meaning remains in the Rust component spec |
 | `SelectableRow` | Full-width gray selected/hovered row painter returning the standard two-cell-inset content rectangle |
@@ -734,6 +746,74 @@ if let Ok(Some(TextBoxUiEvent::Submitted(text))) =
     send(text);
 }
 ```
+
+## Rich list rows
+
+Lists are one terminal row per item by default. Three additions let a row
+grow while keeping the closed vocabulary:
+
+- `List::row_layout(ListRowLayout::Stacked)` puts the detail and value on a
+  second row, left-aligned in the value tone, so long values survive narrow
+  panes. `ListRowLayout::Auto { stack_below_width }` stacks only when the row
+  is narrower than the threshold; `Inline` is the unchanged default.
+- `ListItem::top(band)` and `ListItem::bottom(band)` render a full-width
+  `ListItemBand` on its own row inside the content inset: a `Gauge`, a
+  `Sparkline`, toned `Text`, or a `Divider`. Band charts are read-only; the
+  row's `activate` action remains the click target. When a row carries both a
+  trailing chart slot and a band of the same kind, native renderers show the
+  slot and the terminal draws only the band.
+- `ListItem::media(ListItemMedia::leading(4).glyph("AL"))` reserves a column
+  spanning every row of the item. The terminal paints a tone-colored block
+  with the optional glyph; with `media` or `ui-bridge` the same struct carries
+  an optional `MediaSpec` for renderers that draw the real image.
+
+```rust
+use unpeel_app_kit::{Gauge, List, ListItem, ListItemBand, ListItemMedia, ListRowLayout};
+
+let list = List::new(
+    "providers",
+    vec![
+        ListItem::new("codex", "Codex")
+            .detail("5h window")
+            .value("42% left · resets in 2h")
+            .bottom(ListItemBand::gauge(Gauge::new("codex-quota", 0.42, "Quota", "42 percent left")))
+            .media(ListItemMedia::leading(3).glyph("C")),
+    ],
+)
+.row_layout(ListRowLayout::Auto { stack_below_width: 70 });
+```
+
+`Page::navigate(&mut list_state, action)` treats a Page's back action as a
+focusable stop: Up from the first row moves focus to the title row, which
+paints with the same gray selection background, Enter or Escape there
+returns `ListNavigationOutcome::Back`, and Down returns to the first row.
+Pages without a back action behave exactly like `ListState::navigate`.
+
+`ListItem::divider(id)` and `ListItem::divider_labeled(id, "Section")` are
+standalone separator rows: one row tall, a thin muted rule in both palettes
+(`PageTheme::divider`), never selected, skipped by Up/Down/Home/End/Page
+keys, and ignored by clicks. `RowNavigationState::prepare_with_rows` carries
+the same per-row focusability for custom renderers.
+
+`ListState` (and the shared `RowNavigationState`) tracks a height per item:
+offsets stay item indexes while reveal with scroll padding, PageUp/PageDown,
+the scrollbar, and `item_at` count terminal rows. `state.item_area(index)`
+returns each visible item's rectangle so Apps can build hit lists without
+assuming one row per item; `item_height`, `offset_row`, `content_rows`, and
+`visible_item_count` expose the same geometry. Single-row lists are
+unchanged. SwiftUI interprets the same fields natively; the web renderer
+ignores them for now (see `AGENTS.md`), and they are omitted from the wire
+when unset.
+
+## Spinner
+
+`Spinner` is the shared ten-frame braille cycle (`SPINNER_FRAMES`). Apps
+advance one `Spinner` from their tick and hand its frame to whatever is busy:
+`ListState::set_spinner_frame` for busy rows, `FooterActionsWidget::spinner_frame`
+for footer actions marked `FooterAction::busy(true)` (the terminal draws the
+glyph beside the label; native and web renderers show their own indicator or
+just the label), `TextBox::set_busy` for prompt status rows, or
+`spinner.widget()` anywhere else.
 
 ## Popup menu
 

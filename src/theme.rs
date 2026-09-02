@@ -57,6 +57,9 @@ pub struct KitTheme {
     pub surface: Color,
     pub danger: Color,
     pub selected_row: Style,
+    /// Pointer hover on a selectable row: lighter than the selection so the
+    /// two never read as the same state.
+    pub hovered_row: Style,
     pub scrollbar_track: Style,
     pub scrollbar_thumb: Style,
 }
@@ -73,6 +76,7 @@ impl KitTheme {
             surface: Color::Rgb(39, 39, 42),
             danger: Color::LightRed,
             selected_row: Style::new().fg(Color::White).bg(Color::Rgb(63, 63, 70)),
+            hovered_row: Style::new().fg(Color::White).bg(Color::Rgb(46, 46, 52)),
             scrollbar_track: Style::new().fg(Color::Rgb(65, 65, 65)),
             scrollbar_thumb: Style::new().fg(Color::Rgb(145, 145, 145)),
         }
@@ -89,6 +93,7 @@ impl KitTheme {
             surface: Color::Rgb(238, 238, 240),
             danger: Color::Red,
             selected_row: Style::new().fg(Color::Black).bg(Color::Rgb(216, 216, 220)),
+            hovered_row: Style::new().fg(Color::Black).bg(Color::Rgb(236, 236, 240)),
             scrollbar_track: Style::new().fg(Color::Rgb(200, 200, 200)),
             scrollbar_thumb: Style::new().fg(Color::Rgb(100, 100, 100)),
         }

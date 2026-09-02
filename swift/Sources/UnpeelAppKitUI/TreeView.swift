@@ -162,6 +162,13 @@ private struct TreeContent: View {
                 .foregroundStyle(row.item.symlink ? .cyan : .secondary)
             Text(row.item.kind == .parent ? ".." : row.item.label)
                 .lineLimit(1)
+            if let detail = row.item.detail, row.item.kind != .parent {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
             if row.item.childState == .loading {
                 Spacer()
                 ProgressView().controlSize(.small)
